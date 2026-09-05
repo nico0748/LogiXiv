@@ -1,0 +1,146 @@
+# LogiXiv
+
+論文 PDF を **1 文単位**で読むための、ローカルファーストな対訳リーダー。
+
+- 中央に原文 PDF、右サイドバーに 1 文ごとの日本語訳、その下にメモ
+- サイドバーの文と PDF 上のマーカーが双方向に連動する
+- 翻訳は **Claude を MCP 経由**で使う（翻訳 API キー不要・追加費用なし）
+- PDF ごと畳み込んだ**単一 HTML** に書き出せる。他人の書き出しを取り込むこともできる
+- PDF は端末から出ない。サーバーは既定で `127.0.0.1` にしか bind しない
+
+## なぜ「OSS のローカル実行 Web アプリ」なのか
+
+「Web アプリか OSS か」は二択ではない。OSS はライセンス、Web アプリは提供形態の話で、
+LogiXiv は **OSS の、ローカル実行 Web アプリ**を採っている。
+
+| 形態 | 判定 | 理由 |
+| --- | --- | --- |
+| SaaS（クローズド） | ✗ | 未公開論文を他人のサーバーに置く設計は研究室・企業で通らない |
+| OSS + ホスト型 Web | ✗ | 結局 PDF がサーバーに上がる。運用コストを誰かが負う |
+| **OSS + ローカル実行 Web** | **✓** | PDF が端末外に出ない / pdf.js が使える / 配布は git clone |
+| OSS + デスクトップアプリ | △ | 将来 Tauri 化は可能。今は Electron の重さに見合わない |
+
+決め手は 3 つ。
+
+1. 扱う対象が未公開原稿なので、既定で `127.0.0.1` にのみ bind し、本文が外部へ出る経路をコードから消した
+2. PDF 描画は pdf.js が圧倒的に強く、ネイティブで作り直す理由がない
+3. 訳語の選び方・文の切り方は分野で好みが割れる。fork できること自体が実用価値になる
+
+副作用として、翻訳を **Claude の MCP 経由**にできた。SaaS ならサーバー側で翻訳 API を叩き、
+費用を誰かが負担し、本文が第三者の翻訳エンジンを通る。ローカル実行ならその全部が消える。
+
+## 動かす
+
+```bash
+git clone https://github.com/nico0748/LogiXiv.git
+cd LogiXiv
+npm install
+npm run build
+npm start          # http://127.0.0.1:4173
+```
+
+開発中は UI だけ Vite の開発サーバーで動かす。
+
+```bash
+npm start          # 別ターミナルで本体
+npm run dev        # http://localhost:5173（/api は本体へプロキシ）
+```
+
+### GROBID（強く推奨）
+
+文の区切りと PDF 座標は GROBID から取る。無くても動くが精度は明確に落ちる。
+
+```bash
+docker compose -f docker/grobid.yml up -d      # http://localhost:8070
+```
+
+`LOGIXIV_GROBID_URL` で別のホストを指せる。GROBID に届かないときは pdf.js による
+簡易解析に自動で切り替わり、その旨が UI のバッジと `parserNote` に出る。
+
+### Claude から使う（MCP）
+
+`claude_desktop_config.json`（または Claude Code の MCP 設定）に追加する。
+
+```json
+{
+  "mcpServers": {
+    "logixiv": {
+      "command": "node",
+      "args": ["/path/to/LogiXiv/packages/mcp/dist/index.js"],
+      "env": { "LOGIXIV_URL": "http://127.0.0.1:4173" }
+    }
+  }
+}
+```
+
+本体（`npm start`）を起動したうえで、Claude に「LogiXiv の論文を訳して」と頼めばよい。
+`translate_paper` プロンプトに手順がまとめてある。
+
+## 技術的な中核 — なぜ「1 文ごと」が成立するか
+
+GROBID に `segmentSentences=1` と `teiCoordinates=s` を付けて投げると、
+**文単位で PDF 座標が付いた TEI** が返る。
+
+```xml
+<s coords="1,53.80,194.57,238.71,9.29;1,53.80,205.00,238.71,9.29">
+  We study sparse attention under long contexts.
+</s>
+```
+
+`page, x, y, w, h`（PDF ユーザー空間・左上原点）。行またぎの文には矩形が複数付く。
+この座標に pdf.js の描画結果を重ねると、文とマーカーが 1 対 1 で対応する。
+**ここだけは自前のテキスト抽出で代替できない**（2 段組・ハイフネーション・数式・脚注で必ず壊れる）。
+
+## 構成
+
+```
+packages/core     型・TEIパーサ・文分割・エクスポート/インポート・マージ（唯一の真実）
+packages/server   ローカル API（GROBIDプロキシ、ファイルストア、SSE）
+packages/mcp      Claude 用 MCP サーバー（stdio、ツール9個＋プロンプト1個）
+apps/web          Vite + React の本体 UI
+apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア（pdf.js 同梱）
+```
+
+データは `~/.logixiv/documents/<id>/` に `document.json` と `source.pdf` を置くだけ。DB は無い。
+「アプリを捨ててもデータが読める」ことを優先している。書き込みは一時ファイル → rename。
+
+## 主要な設計判断
+
+- **構造データと注釈を分離した。** 再解析で訳が消えないよう、原文の正規化ハッシュで再結合する
+- **メモは衝突しても消さない。** 訳は「正解が 1 つ」だがメモは「多いほど良い」。マージ規則を非対称にした
+- **人手修正フラグ。** `revisedByHuman` が立った訳を機械が上書きしない
+- **エクスポート HTML に静的フォールバック。** JS が壊れても対訳とメモが素の HTML として読める
+- **インポート時に埋め込み JS を実行しない。** 正規表現で JSON を切り出して `JSON.parse` するだけ
+- **`consolidateHeader=0`。** GROBID の既定値 1 は CrossRef へ問い合わせに行く。未公開原稿のタイトルを外部に出さない
+
+詳しくは [docs/architecture.md](docs/architecture.md) と [docs/mcp.md](docs/mcp.md)。
+
+## テスト
+
+```bash
+npm run typecheck   # 全パッケージの型チェック
+npm test            # core のユニットテスト（18 本）
+npm run test:e2e    # 取り込み→翻訳→SSE→書き出し→取り込み→MCP 起動の通し確認
+```
+
+`test:e2e` は GROBID が居ない前提で走り、フォールバック経路を通す。
+GROBID を上げた状態で確認したいときは `LOGIXIV_GROBID_URL` を指定する。
+
+## 既知の制約
+
+- スキャン PDF（画像のみ）は扱えない。先に OCR を通す必要がある
+- 書き出し HTML は大きい（PDF + ビューア約 1.8MB）
+- 回転ページや特殊な CropBox で座標がずれ得る
+- 文分割の手動修正 UI が未実装
+
+## これから
+
+1. 文の手動分割・結合 UI（GROBID の誤分割を直せるように）
+2. 用語集の一括置換（訳語を変えたとき既訳を追随させる）
+3. 図表の切り出しとサイドバー表示
+4. 複数論文をまたいだ横断検索
+5. Zotero / Obsidian への書き出し
+
+## ライセンス
+
+MIT

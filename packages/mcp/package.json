@@ -1,0 +1,16 @@
+{
+  "name": "@logixiv/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": { "logixiv-mcp": "./dist/index.js" },
+  "scripts": { "build": "tsc -b" },
+  "dependencies": {
+    "@logixiv/core": "0.1.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": { "typescript": "5.9.3", "@types/node": "22.18.1" }
+}

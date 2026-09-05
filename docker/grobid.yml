@@ -1,0 +1,16 @@
+# GROBID をローカルで動かす。CRF 版で十分に速く、CPU だけで動く。
+# より精度が要るなら grobid/grobid:0.8.2 (deep learning 版) に差し替える。
+services:
+  grobid:
+    image: lfoppiano/grobid:0.8.2
+    container_name: logixiv-grobid
+    ports:
+      - "127.0.0.1:8070:8070"
+    environment:
+      - JAVA_OPTS=-Xmx4g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8070/api/isalive"]
+      interval: 30s
+      timeout: 5s
+      retries: 5

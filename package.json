@@ -1,0 +1,25 @@
+{
+  "name": "logixiv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "論文PDFを1文単位で読むためのローカルファースト対訳リーダー",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/server",
+    "packages/mcp",
+    "apps/web",
+    "apps/viewer"
+  ],
+  "engines": { "node": ">=20.10" },
+  "scripts": {
+    "build": "npm run build -w @logixiv/core && npm run build -w @logixiv/server && npm run build -w @logixiv/mcp && npm run build -w @logixiv/viewer && npm run build -w @logixiv/web",
+    "typecheck": "tsc -b packages/core packages/server packages/mcp --pretty false",
+    "test": "npm run test -w @logixiv/core",
+    "test:e2e": "node --experimental-strip-types scripts/e2e-smoke.ts",
+    "dev": "npm run dev -w @logixiv/web",
+    "start": "node packages/server/dist/cli.js",
+    "clean": "rm -rf packages/*/dist apps/*/dist packages/*/*.tsbuildinfo"
+  }
+}
