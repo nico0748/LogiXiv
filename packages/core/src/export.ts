@@ -1,5 +1,6 @@
 import type { ExportPayload, PaperDocument, Sentence } from './types.ts';
 import { escapeHtml, escapeJsonForScript } from './escape.ts';
+import { LOGIXIV_VERSION } from './hash.ts';
 
 /**
  * 書き出し HTML の作り。
@@ -105,7 +106,7 @@ export function buildExportHtml(input: BuildExportInput): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="generator" content="LogiXiv 0.1.0">
+<meta name="generator" content="LogiXiv ${LOGIXIV_VERSION}">
 <title>${title} — LogiXiv</title>
 <style>${STATIC_STYLE}</style>
 <style>${input.viewerStyle}</style>

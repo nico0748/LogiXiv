@@ -56,12 +56,26 @@ export function setTranslation(
   };
 }
 
+/**
+ * メモを付ける。
+ *
+ * 存在しない hash を黙って受け付けてはいけない。メモは hash でしか文に結び付かないので、
+ * 1 文字違うだけで「保存はされたがどの画面にも二度と出ないメモ」になる。
+ * Claude には「訳せない箇所の判断をメモに残せ」と指示しているぶん、
+ * いちばん大事な情報が静かに消える経路になる。
+ */
 export function addNote(
   document: PaperDocument,
   sentenceHash: string,
   body: string,
   author: string | null = null,
-): { document: PaperDocument; note: Note } {
+): { document: PaperDocument; note: Note | null; applied: boolean; reason?: string } {
+  if (!document.structure.sentences.some((s) => s.hash === sentenceHash)) {
+    return { document, note: null, applied: false, reason: 'この文書に該当する文がありません' };
+  }
+  if (body.trim().length === 0) {
+    return { document, note: null, applied: false, reason: 'メモが空です' };
+  }
   const now = new Date().toISOString();
   const note: Note = { id: newId('note'), sentenceHash, body, author, createdAt: now, updatedAt: now };
   return {
@@ -71,6 +85,7 @@ export function addNote(
       annotations: { ...document.annotations, notes: [...document.annotations.notes, note] },
     },
     note,
+    applied: true,
   };
 }
 
@@ -121,12 +136,19 @@ export function progress(document: PaperDocument): { total: number; translated: 
   return { total: hashes.size, translated, revisedByHuman };
 }
 
-/** 文書内の全文検索。原文・訳文・メモを横断する。 */
-export function searchDocument(
-  document: PaperDocument,
-  query: string,
-  limit = 30,
-): { sentence: Sentence; where: ('source' | 'translation' | 'note')[] }[] {
+/**
+ * 文書内の全文検索。原文・訳文・メモを横断する。
+ * ヒットには訳文とメモも入れる（訳語の揺れを探すのが主な用途なのに、
+ * 原文しか返らないと「どの訳語が使われているか」を確認するためにもう一往復要る）。
+ */
+export interface SearchHit {
+  sentence: Sentence;
+  where: ('source' | 'translation' | 'note')[];
+  translation: string | null;
+  notes: string[];
+}
+
+export function searchDocument(document: PaperDocument, query: string, limit = 30): SearchHit[] {
   const needle = query.trim().toLowerCase();
   if (needle.length === 0) return [];
   const notesByHash = new Map<string, string[]>();
@@ -136,18 +158,27 @@ export function searchDocument(
     else notesByHash.set(note.sentenceHash, [note.body]);
   }
 
-  const hits: { sentence: Sentence; where: ('source' | 'translation' | 'note')[] }[] = [];
+  const hits: SearchHit[] = [];
   for (const sentence of document.structure.sentences) {
     const where: ('source' | 'translation' | 'note')[] = [];
     if (sentence.text.toLowerCase().includes(needle)) where.push('source');
-    const translation = document.annotations.translations[sentence.hash];
+    const translation = document.annotations.translations[sentence.hash] ?? null;
     if (translation && translation.text.toLowerCase().includes(needle)) where.push('translation');
     const notes = notesByHash.get(sentence.hash) ?? [];
-    if (notes.some((body) => body.toLowerCase().includes(needle))) where.push('note');
-    if (where.length > 0) hits.push({ sentence, where });
+    const matchedNotes = notes.filter((body) => body.toLowerCase().includes(needle));
+    if (matchedNotes.length > 0) where.push('note');
+    if (where.length > 0) {
+      hits.push({ sentence, where, translation: translation?.text ?? null, notes: matchedNotes });
+    }
     if (hits.length >= limit) break;
   }
   return hits;
+}
+
+/** hash から文を引く。検索結果や MCP からの指定を辿るときに使う。 */
+export function sentencesByHash(document: PaperDocument, hashes: readonly string[]): Sentence[] {
+  const wanted = new Set(hashes);
+  return document.structure.sentences.filter((s) => wanted.has(s.hash));
 }
 
 export function structureSummary(structure: DocumentStructure): string {

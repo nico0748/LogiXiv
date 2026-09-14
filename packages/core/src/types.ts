@@ -48,8 +48,8 @@ export interface Sentence {
 export type ParserKind = 'grobid' | 'fallback';
 
 export interface DocumentStructure {
-  /** 構造スキーマのバージョン。破壊的変更時に上げる。 */
-  version: 1;
+  /** 構造スキーマのバージョン。hash.ts の STRUCTURE_VERSION と揃える。 */
+  version: number;
   parser: ParserKind;
   /** UI に「今どちらで解析されたか」を出すための説明文。 */
   parserNote: string;

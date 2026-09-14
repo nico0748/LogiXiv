@@ -1,6 +1,6 @@
-import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
-import { buildSentencesFromChunks, type DocumentStructure, type PageSize, type TextChunk } from '@logixiv/core';
+import { Worker } from 'node:worker_threads';
+import { buildSentencesFromChunks, STRUCTURE_VERSION, type DocumentStructure } from '@logixiv/core';
+import type { FallbackWorkerInput, FallbackWorkerOutput } from './fallback-worker.ts';
 
 /**
  * GROBID が無い環境向けのフォールバック解析。
@@ -8,89 +8,93 @@ import { buildSentencesFromChunks, type DocumentStructure, type PageSize, type T
  * pdf.js でテキストを取り出し、core の行組み立て＋文分割にかける。
  * 2 段組では読み順が崩れ、数式や脚注が本文に混ざる。精度は GROBID に明確に劣るので、
  * ここを通ったことは structure.parserNote に必ず書いて UI に出す。
+ *
+ * pdf.js 本体はワーカースレッドで回す（理由は fallback-worker.ts の先頭に書いた）。
+ * そのうえで「ページ数・文字片数・実時間」の 3 つに上限を置く。上限が無いと、
+ * アップロード上限の 100MB に対して解析が時間オーダーで伸び、サーバーが実質停止する。
  */
 
-interface PdfJsTextItem {
-  str: string;
-  transform: number[];
-  width: number;
-  height: number;
-  hasEOL?: boolean;
+export class FallbackParseError extends Error {}
+
+export interface FallbackLimits {
+  maxPages: number;
+  maxChunks: number;
+  timeoutMs: number;
 }
 
-async function loadPdfJs(): Promise<typeof import('pdfjs-dist/legacy/build/pdf.mjs')> {
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  // Node では実スレッドのワーカーを使わず、pdf.js の「fake worker」を同一プロセスで動かす。
-  // ただし workerSrc は空にできず、import 可能な URL を求められるのでモジュールの実体を指す。
-  const require = createRequire(import.meta.url);
-  const workerPath = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs');
-  (pdfjs.GlobalWorkerOptions as { workerSrc: string }).workerSrc = pathToFileURL(workerPath).href;
-  return pdfjs;
+export const DEFAULT_FALLBACK_LIMITS: FallbackLimits = {
+  maxPages: 400,
+  maxChunks: 400_000,
+  timeoutMs: 120_000,
+};
+
+/** src から動かしているか dist から動かしているかで、ワーカーの拡張子が変わる。 */
+function workerUrl(): URL {
+  const here = import.meta.url;
+  return new URL(here.endsWith('.ts') ? './fallback-worker.ts' : './fallback-worker.js', here);
 }
 
-export async function parseWithPdfJs(pdf: Uint8Array): Promise<DocumentStructure> {
-  const pdfjs = await loadPdfJs();
-  // pdf.js は Buffer を受け付けない（Buffer は Uint8Array の派生だが明示的に弾かれる）。
-  const data = new Uint8Array(pdf.byteLength);
-  data.set(pdf);
-  const require = createRequire(import.meta.url);
-  const task = pdfjs.getDocument({
-    data,
-    useSystemFonts: false,
-    disableFontFace: true,
-    // テキスト抽出しかしないので、フォント実体が無いことの警告は出さない。
-    verbosity: 0,
-    // 埋め込みフォントを持たない PDF のために、pdf.js 同梱の標準フォントの場所を教える。
-    standardFontDataUrl: pathToFileURL(
-      require.resolve('pdfjs-dist/package.json').replace(/package\.json$/, 'standard_fonts/'),
-    ).href,
+function runWorker(input: FallbackWorkerInput, timeoutMs: number): Promise<FallbackWorkerOutput> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(workerUrl(), { workerData: input });
+    let settled = false;
+
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      finish(() =>
+        reject(
+          new FallbackParseError(
+            `PDF の解析が ${Math.round(timeoutMs / 1000)} 秒を超えたため中断しました。ページ数が多い PDF は GROBID を使ってください。`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+    timer.unref();
+
+    worker.on('message', (message: { ok: true; result: FallbackWorkerOutput } | { ok: false; error: string }) => {
+      if (message.ok) finish(() => resolve(message.result));
+      else finish(() => reject(new FallbackParseError(message.error)));
+    });
+    worker.on('error', (error) => finish(() => reject(error)));
+    worker.on('exit', (code) => {
+      if (!settled) finish(() => reject(new FallbackParseError(`解析ワーカーが異常終了しました (code ${code})`)));
+    });
   });
-  const document = await task.promise;
+}
 
-  const chunks: TextChunk[] = [];
-  const pageSizes: PageSize[] = [];
+export async function parseWithPdfJs(
+  pdf: Uint8Array,
+  limits: FallbackLimits = DEFAULT_FALLBACK_LIMITS,
+): Promise<DocumentStructure> {
+  const output = await runWorker(
+    { pdf, maxPages: limits.maxPages, maxChunks: limits.maxChunks },
+    limits.timeoutMs,
+  );
 
-  try {
-    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber++) {
-      const page = await document.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: 1 });
-      pageSizes.push({ page: pageNumber, width: viewport.width, height: viewport.height });
+  const { sentences, sections } = buildSentencesFromChunks(output.chunks, output.pageSizes);
 
-      const content = await page.getTextContent();
-      for (const raw of content.items as unknown[]) {
-        const item = raw as PdfJsTextItem;
-        if (typeof item.str !== 'string' || item.str.length === 0) continue;
-        const transform = item.transform;
-        const x = transform[4] ?? 0;
-        // pdf.js は左下原点。GROBID に合わせて左上原点へ直す。
-        const baseline = transform[5] ?? 0;
-        const height = item.height > 0 ? item.height : Math.abs(transform[3] ?? 10);
-        chunks.push({
-          page: pageNumber,
-          text: item.str,
-          x,
-          y: viewport.height - baseline - height,
-          w: item.width,
-          h: height,
-        });
-      }
-      page.cleanup();
-    }
-  } finally {
-    await task.destroy();
-  }
-
-  const { sentences, sections } = buildSentencesFromChunks(chunks, pageSizes);
+  const warnings: string[] = [];
+  if (output.truncatedPages > 0) warnings.push(`先頭 ${limits.maxPages} ページだけを解析（残り ${output.truncatedPages} ページは未処理）`);
+  if (output.truncatedChunks) warnings.push('文字数の上限に達したため途中で打ち切り');
 
   return {
-    version: 1,
+    version: STRUCTURE_VERSION,
     parser: 'fallback',
-    parserNote:
+    parserNote: [
       'pdf.js による簡易解析（GROBID 未接続）。2 段組・数式・脚注で文の区切りと読み順が崩れることがあります。',
+      ...warnings,
+    ].join(' / '),
     parsedAt: new Date().toISOString(),
     title: null,
     abstract: null,
-    pageSizes,
+    pageSizes: output.pageSizes,
     sections,
     sentences,
   };

@@ -1,109 +1,98 @@
-import type { Annotations, ExportPayload, Note, PaperDocument, Translation } from './types.ts';
+import type { Annotations, PaperDocument } from './types.ts';
 import { EXPORT_DATA_ELEMENT_ID } from './export.ts';
+import { findTagEnd, parseAttrs } from './xml.ts';
+import { newId } from './hash.ts';
+import { sanitizeAnnotations, sanitizeDocument, emptySanitizeReport, isRecord, type SanitizeReport } from './validate.ts';
 
 /**
  * 他人が書き出した HTML の読み込み。
  *
  * ここで守る一線は「埋め込まれた JS を絶対に実行しない」こと。
- * 取り込みは正規表現で JSON の script 要素を切り出して JSON.parse するだけで、
+ * 取り込みは該当の script 要素を切り出して JSON.parse するだけで、
  * DOM も作らないし eval も new Function も使わない。
  * 論文の書き出しは人づてに回るファイルなので、実行経路を残さない。
+ *
+ * 探索は正規表現ではなく線形スキャンで行う。理由は 2 つ:
+ *  - `<script[^>]*id=...>` は一致しない入力でバックトラックし、入力長に対して二次で劣化する
+ *    （LogiXiv 製でない大きな HTML を投げたとき＝いちばん起きやすい誤操作で固まる）
+ *  - 属性値に `>` を含む script タグを取りこぼす
+ * さらに、該当 script が複数あるときは「最初の 1 つ」を黙って採らずエラーにする。
+ * 本物の前に偽のデータ script を置いた HTML を配られる経路を残さないため。
  */
 
 export class ImportError extends Error {}
 
-const DATA_RE = new RegExp(
-  `<script[^>]*\\bid=["']${EXPORT_DATA_ELEMENT_ID}["'][^>]*>([\\s\\S]*?)</script\\s*>`,
-  'i',
-);
+/** 取り込み対象の HTML の上限。これを超えるものは書き出しではなく事故とみなす。 */
+const MAX_HTML_BYTES = 400 * 1024 * 1024;
+
+interface FoundScript {
+  json: string;
+  at: number;
+}
+
+function findDataScripts(html: string): FoundScript[] {
+  const found: FoundScript[] = [];
+  let cursor = 0;
+  for (;;) {
+    const open = html.indexOf('<script', cursor);
+    if (open === -1) break;
+    const tagEnd = findTagEnd(html, open);
+    if (tagEnd === -1) break;
+    // '<script' の直後が名前の続きでないこと（<scripting> のような要素を拾わない）。
+    const afterName = html[open + 7];
+    if (afterName !== undefined && /[A-Za-z0-9_-]/.test(afterName)) {
+      cursor = open + 7;
+      continue;
+    }
+    const attrs = parseAttrs(html.slice(open + 7, tagEnd));
+    const close = html.indexOf('</script', tagEnd + 1);
+    const bodyEnd = close === -1 ? html.length : close;
+    if (attrs['id'] === EXPORT_DATA_ELEMENT_ID) {
+      found.push({ json: html.slice(tagEnd + 1, bodyEnd), at: open });
+    }
+    cursor = close === -1 ? html.length : close + 8;
+  }
+  return found;
+}
 
 export function extractPayloadJson(html: string): string {
-  const match = DATA_RE.exec(html);
-  if (!match || match[1] === undefined) {
+  const found = findDataScripts(html);
+  if (found.length === 0) {
     throw new ImportError('LogiXiv の書き出しデータが見つかりません（この HTML は LogiXiv 製ではないかもしれません）');
   }
-  return match[1];
-}
-
-function asString(value: unknown, field: string): string {
-  if (typeof value !== 'string') throw new ImportError(`${field} が文字列ではありません`);
-  return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** 取り込み側で信用するのは注釈だけ。構造は取り込み先のものを使う。 */
-function sanitizeAnnotations(input: unknown): Annotations {
-  if (!isRecord(input)) return { translations: {}, notes: [], glossary: [] };
-
-  const translations: Record<string, Translation> = {};
-  if (isRecord(input['translations'])) {
-    for (const [hash, raw] of Object.entries(input['translations'])) {
-      if (!isRecord(raw)) continue;
-      const text = typeof raw['text'] === 'string' ? raw['text'] : null;
-      if (text === null) continue;
-      const source = raw['source'];
-      translations[hash] = {
-        sentenceHash: hash,
-        text,
-        revisedByHuman: raw['revisedByHuman'] === true,
-        source: source === 'human' || source === 'claude' ? source : 'import',
-        updatedAt: typeof raw['updatedAt'] === 'string' ? raw['updatedAt'] : new Date(0).toISOString(),
-      };
-    }
+  if (found.length > 1) {
+    throw new ImportError(
+      `LogiXiv の書き出しデータが ${found.length} 個見つかりました。どれが本物か判断できないため取り込みません。`,
+    );
   }
-
-  const notes: Note[] = [];
-  if (Array.isArray(input['notes'])) {
-    for (const raw of input['notes']) {
-      if (!isRecord(raw)) continue;
-      const body = typeof raw['body'] === 'string' ? raw['body'] : null;
-      const sentenceHash = typeof raw['sentenceHash'] === 'string' ? raw['sentenceHash'] : null;
-      if (body === null || sentenceHash === null) continue;
-      const createdAt = typeof raw['createdAt'] === 'string' ? raw['createdAt'] : new Date(0).toISOString();
-      notes.push({
-        id: typeof raw['id'] === 'string' ? raw['id'] : `note_imported_${notes.length}`,
-        sentenceHash,
-        body,
-        author: typeof raw['author'] === 'string' ? raw['author'] : null,
-        createdAt,
-        updatedAt: typeof raw['updatedAt'] === 'string' ? raw['updatedAt'] : createdAt,
-      });
-    }
-  }
-
-  const glossary: Annotations['glossary'] = [];
-  if (Array.isArray(input['glossary'])) {
-    for (const raw of input['glossary']) {
-      if (!isRecord(raw)) continue;
-      if (typeof raw['term'] !== 'string' || typeof raw['translation'] !== 'string') continue;
-      glossary.push({
-        term: raw['term'],
-        translation: raw['translation'],
-        note: typeof raw['note'] === 'string' ? raw['note'] : null,
-      });
-    }
-  }
-
-  return { translations, notes, glossary };
+  return found[0]!.json;
 }
 
 export interface ParsedImport {
   exportedAt: string;
   documentTitle: string;
+  /** 取り込み元の文書 ID（表示用。こちらの ID としては使わない）。 */
   documentId: string;
+  /** 検証済みの注釈。既存文書へのマージはこれを使う。 */
   annotations: Annotations;
   /** 取り込み元の全文ハッシュ。どれだけ重なっているかを UI に出すために使う。 */
   sentenceHashes: string[];
   /** PDF も含まれていた場合のみ。新規文書として取り込むときに使う。 */
   pdfBase64: string | null;
-  /** 元の構造。新規文書として取り込むときだけ使う。 */
-  raw: ExportPayload | null;
+  /**
+   * 検証済みの文書。新規文書として取り込むときはこれをそのまま保存してよい。
+   * 生の JSON は**公開しない** — 型で嘘をつくと、その先の保存処理が必ず信用してしまう。
+   */
+  document: PaperDocument | null;
+  /** 検証で落とした件数。 */
+  sanitizeReport: SanitizeReport;
 }
 
 export function parseExportHtml(html: string): ParsedImport {
+  if (html.length > MAX_HTML_BYTES) {
+    throw new ImportError('HTML が大きすぎます');
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(extractPayloadJson(html));
@@ -118,25 +107,31 @@ export function parseExportHtml(html: string): ParsedImport {
   if (parsed['formatVersion'] !== 1) {
     throw new ImportError(`未対応の書き出しバージョンです: ${String(parsed['formatVersion'])}`);
   }
-  const document = parsed['document'];
-  if (!isRecord(document)) throw new ImportError('document がありません');
-  const structure = isRecord(document['structure']) ? document['structure'] : null;
-  const sentences = structure && Array.isArray(structure['sentences']) ? structure['sentences'] : [];
+  const rawDocument = parsed['document'];
+  if (!isRecord(rawDocument)) throw new ImportError('document がありません');
 
-  const sentenceHashes: string[] = [];
-  for (const sentence of sentences) {
-    if (isRecord(sentence) && typeof sentence['hash'] === 'string') sentenceHashes.push(sentence['hash']);
-  }
+  const { document, report } = sanitizeDocument(rawDocument, { id: newId('doc') });
+  // マージ用の注釈は document と同じ検証結果を使う（二重に検証しない）。
+  const annotations = document.annotations;
+
+  const pdfBase64 = typeof parsed['pdfBase64'] === 'string' ? parsed['pdfBase64'] : null;
+  const hasPdf = pdfBase64 !== null && /^[A-Za-z0-9+/=\s]*$/.test(pdfBase64.slice(0, 4096));
 
   return {
     exportedAt: typeof parsed['exportedAt'] === 'string' ? parsed['exportedAt'] : new Date(0).toISOString(),
-    documentTitle: typeof document['title'] === 'string' ? document['title'] : '(無題)',
-    documentId: asString(document['id'] ?? 'unknown', 'document.id'),
-    annotations: sanitizeAnnotations(document['annotations']),
-    sentenceHashes,
-    pdfBase64: typeof parsed['pdfBase64'] === 'string' ? parsed['pdfBase64'] : null,
-    raw: parsed as unknown as ExportPayload,
+    documentTitle: document.title,
+    documentId: typeof rawDocument['id'] === 'string' ? rawDocument['id'] : 'unknown',
+    annotations,
+    sentenceHashes: document.structure.sentences.map((s) => s.hash),
+    pdfBase64: hasPdf ? pdfBase64 : null,
+    document: document.structure.sentences.length > 0 ? document : null,
+    sanitizeReport: report,
   };
+}
+
+/** 注釈だけを検証したいとき（テストや外部ツール向け）。 */
+export function sanitizeImportedAnnotations(value: unknown): Annotations {
+  return sanitizeAnnotations(value, emptySanitizeReport());
 }
 
 /** 取り込み元と取り込み先がどれだけ同じ文を持っているか。 */

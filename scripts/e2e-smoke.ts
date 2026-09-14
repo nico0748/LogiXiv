@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { start } from '../packages/server/src/start.ts';
+import { TOOL_NAMES } from '../packages/mcp/src/server.ts';
 import { makeSamplePdf } from './make-sample-pdf.ts';
 
 const steps: string[] = [];
@@ -212,7 +213,11 @@ try {
 
   send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const tools = (await waitFor(2)) as { result: { tools: { name: string }[] } };
-  assert.equal(tools.result.tools.length, 9, `ツール数が違う: ${tools.result.tools.map((t) => t.name).join(',')}`);
+  assert.deepEqual(
+    tools.result.tools.map((t) => t.name).sort(),
+    [...TOOL_NAMES].sort(),
+    'ツールの一覧が TOOL_NAMES と食い違っている',
+  );
   step(`MCP ツール ${tools.result.tools.length} 個を列挙: ${tools.result.tools.map((t) => t.name).join(', ')}`);
 
   send({ jsonrpc: '2.0', id: 3, method: 'prompts/list' });
@@ -229,11 +234,21 @@ try {
     jsonrpc: '2.0',
     id: 5,
     method: 'tools/call',
-    params: { name: 'get_untranslated_sentences', arguments: { document_id: id, limit: 2, context: 1 } },
+    params: { name: 'get_translation_batch', arguments: { document_id: id, from: 0, limit: 5 } },
   });
-  const untranslated = (await waitFor(5)) as { result: { content: { text: string }[] } };
-  assert.ok(untranslated.result.content[0]!.text.includes('context_before'), '文脈が返っていない');
-  step('MCP の get_untranslated_sentences が前後の文脈を返した');
+  const batch = (await waitFor(5)) as { result: { content: { text: string }[] } };
+  const batchPayload = JSON.parse(batch.result.content[0]!.text) as {
+    window: unknown[][];
+    untranslated: [number, string][];
+  };
+  assert.ok(batchPayload.window.length > 0, '文脈の窓が空');
+  assert.ok(batchPayload.untranslated.length > 0, '未訳の一覧が空');
+  // 文脈が重複展開されていないこと（原文 1 文につき 1 回だけ現れる）。
+  const raw = batch.result.content[0]!.text;
+  const firstText = String(batchPayload.window[0]![1]);
+  const occurrences = raw.split(firstText.slice(0, 30)).length - 1;
+  assert.equal(occurrences, 1, `文脈が重複して展開されている（${occurrences} 回出現）`);
+  step(`MCP の get_translation_batch が重複なしで ${batchPayload.window.length} 文を返した`);
 
   mcp.kill('SIGTERM');
   sseController.abort();

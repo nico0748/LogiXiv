@@ -3,10 +3,13 @@ import {
   applyStructure,
   createDocument,
   deleteNote,
+  describeSanitizeReport,
+  LOGIXIV_VERSION,
   mergeAnnotations,
   parseExportHtml,
   progress,
   searchDocument,
+  sentencesByHash,
   setTranslation,
   structureSummary,
   untranslatedSentences,
@@ -15,7 +18,7 @@ import {
   type PaperDocument,
 } from '@logixiv/core';
 import type { Config } from './config.ts';
-import { DocumentStore } from './store.ts';
+import { DocumentMissingError, DocumentStore } from './store.ts';
 import { EventBus } from './bus.ts';
 import { GrobidUnavailableError, isGrobidAlive, processFulltext } from './grobid.ts';
 import { parseWithPdfJs } from './fallback.ts';
@@ -28,6 +31,7 @@ import { exportDocumentHtml } from './exporter.ts';
 
 export class NotFoundError extends Error {}
 export class BadRequestError extends Error {}
+export class TooLargeError extends Error {}
 
 export type ParserPreference = 'auto' | 'grobid' | 'fallback';
 
@@ -37,11 +41,43 @@ export interface IngestResult {
   warning: string | null;
 }
 
+/** 書き出しは PDF 全体を base64 にしてメモリに載せるので、上限を切っておく。 */
+const MAX_EXPORT_PDF_BYTES = 60 * 1024 * 1024;
+
+/**
+ * 解析の同時実行数。
+ * ワーカースレッドに逃がしたとはいえ、1 本あたり数百 MB 使うので無制限にはしない。
+ */
+const MAX_CONCURRENT_PARSES = 2;
+
+class Semaphore {
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+  private readonly limit: number;
+
+  constructor(limit: number) {
+    this.limit = limit;
+  }
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    if (this.active >= this.limit) {
+      await new Promise<void>((resolve) => this.waiting.push(resolve));
+    }
+    this.active++;
+    try {
+      return await task();
+    } finally {
+      this.active--;
+      this.waiting.shift()?.();
+    }
+  }
+}
+
 export class LogiXivApi {
   readonly store: DocumentStore;
   readonly bus: EventBus;
-
   readonly config: Config;
+  private readonly parseSlots = new Semaphore(MAX_CONCURRENT_PARSES);
 
   constructor(config: Config, bus?: EventBus) {
     this.config = config;
@@ -58,21 +94,48 @@ export class LogiXivApi {
     return this.store.read(id);
   }
 
+  /** store.update の「消えていた」を API 層の 404 に翻訳する。 */
+  private async mutate(
+    id: string,
+    mutate: (document: PaperDocument) => PaperDocument | Promise<PaperDocument>,
+  ): Promise<PaperDocument> {
+    try {
+      return await this.store.update(id, mutate);
+    } catch (error) {
+      if (error instanceof DocumentMissingError) throw new NotFoundError(error.message);
+      throw error;
+    }
+  }
+
   async listDocuments(): Promise<
     { id: string; title: string; updatedAt: string; parser: string; total: number; translated: number }[]
   > {
     const documents = await this.store.list();
-    return documents.map((document) => {
-      const stats = progress(document);
-      return {
-        id: document.id,
-        title: document.title,
-        updatedAt: document.updatedAt,
-        parser: document.structure.parser,
-        total: stats.total,
-        translated: stats.translated,
-      };
-    });
+    const rows = [];
+    for (const document of documents) {
+      // 1 件が壊れていても一覧全体を落とさない。
+      try {
+        const stats = progress(document);
+        rows.push({
+          id: document.id,
+          title: document.title,
+          updatedAt: document.updatedAt,
+          parser: document.structure.parser,
+          total: stats.total,
+          translated: stats.translated,
+        });
+      } catch {
+        rows.push({
+          id: document.id,
+          title: `${document.id}（読み込めませんでした）`,
+          updatedAt: document.updatedAt ?? new Date(0).toISOString(),
+          parser: 'unknown',
+          total: 0,
+          translated: 0,
+        });
+      }
+    }
+    return rows;
   }
 
   async getDocument(id: string): Promise<PaperDocument> {
@@ -102,37 +165,54 @@ export class LogiXivApi {
   }
 
   private async parseStructure(pdf: Uint8Array, fileName: string, preference: ParserPreference) {
-    if (preference === 'fallback') {
-      return { structure: await parseWithPdfJs(pdf), usedFallback: true, warning: null as string | null };
-    }
-
-    try {
-      const { structure } = await processFulltext(pdf, fileName, { baseUrl: this.config.grobidUrl });
-      if (structure.sentences.length === 0) {
-        throw new GrobidUnavailableError('GROBID は文を 1 つも返しませんでした');
+    return this.parseSlots.run(async () => {
+      if (preference === 'fallback') {
+        return { structure: await parseWithPdfJs(pdf), usedFallback: true, warning: null as string | null };
       }
-      return { structure, usedFallback: false, warning: null as string | null };
-    } catch (error) {
-      if (preference === 'grobid') throw error;
-      const reason = error instanceof Error ? error.message : String(error);
-      return {
-        structure: await parseWithPdfJs(pdf),
-        usedFallback: true,
-        warning: `GROBID を使えなかったため簡易解析に切り替えました: ${reason}`,
-      };
-    }
+
+      try {
+        const { structure } = await processFulltext(pdf, fileName, { baseUrl: this.config.grobidUrl });
+        if (structure.sentences.length === 0) {
+          throw new GrobidUnavailableError('GROBID は本文の文を 1 つも返しませんでした');
+        }
+        return { structure, usedFallback: false, warning: null as string | null };
+      } catch (error) {
+        if (preference === 'grobid') throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        return {
+          structure: await parseWithPdfJs(pdf),
+          usedFallback: true,
+          warning: `GROBID を使えなかったため簡易解析に切り替えました: ${reason}`,
+        };
+      }
+    });
   }
 
-  /** 同じ PDF を解析し直して構造だけ差し替える。訳とメモはハッシュで再結合される。 */
-  async reparse(id: string, preference: ParserPreference = 'auto'): Promise<{ document: PaperDocument; rebound: number; orphaned: number; warning: string | null }> {
+  /**
+   * 同じ PDF を解析し直して構造だけ差し替える。訳とメモはハッシュで再結合される。
+   *
+   * 解析は数十秒かかるので、その間に届いた翻訳・メモを消さないよう、
+   * 構造の適用は必ず store.update の中（最新を読み直した後）で行う。
+   */
+  async reparse(
+    id: string,
+    preference: ParserPreference = 'auto',
+  ): Promise<{ document: PaperDocument; rebound: number; orphaned: number; warning: string | null }> {
     const existing = await this.require(id);
     const pdf = await this.store.readPdf(id);
     const { structure, warning } = await this.parseStructure(pdf, existing.sourceFileName, preference);
 
-    const result = applyStructure(existing, structure);
-    await this.store.write(result.document);
+    let rebound = 0;
+    let orphaned = 0;
+    const document = await this.mutate(id, (current) => {
+      const result = applyStructure(current, structure);
+      rebound = result.rebound;
+      orphaned = result.orphaned;
+      return result.document;
+    });
+
     this.bus.publish({ type: 'document.updated', documentId: id, reason: 'reparse' });
-    return { ...result, warning };
+    return { document, rebound, orphaned, warning };
   }
 
   async setTranslation(
@@ -141,9 +221,8 @@ export class LogiXivApi {
     text: string,
     options: { source?: 'claude' | 'human'; revisedByHuman?: boolean } = {},
   ): Promise<{ applied: boolean; reason?: string }> {
-    await this.require(id);
     let outcome: { applied: boolean; reason?: string } = { applied: false };
-    await this.store.update(id, (current) => {
+    await this.mutate(id, (current) => {
       const result = setTranslation(current, sentenceHash, text, options);
       outcome = { applied: result.applied, reason: result.reason };
       return result.document;
@@ -159,17 +238,19 @@ export class LogiXivApi {
     id: string,
     entries: { sentenceHash: string; text: string }[],
     options: { source?: 'claude' | 'human'; revisedByHuman?: boolean } = {},
-  ): Promise<{ applied: number; skipped: { sentenceHash: string; reason: string }[] }> {
-    await this.require(id);
+  ): Promise<{ applied: number; skipped: { sentenceHash: string; reason: string; code: SkipCode }[] }> {
     let applied = 0;
-    const skipped: { sentenceHash: string; reason: string }[] = [];
-    await this.store.update(id, (current) => {
+    const skipped: { sentenceHash: string; reason: string; code: SkipCode }[] = [];
+    await this.mutate(id, (current) => {
       let working = current;
       for (const entry of entries) {
         const result = setTranslation(working, entry.sentenceHash, entry.text, options);
         working = result.document;
         if (result.applied) applied++;
-        else skipped.push({ sentenceHash: entry.sentenceHash, reason: result.reason ?? '不明' });
+        else {
+          const reason = result.reason ?? '不明';
+          skipped.push({ sentenceHash: entry.sentenceHash, reason, code: skipCodeOf(reason) });
+        }
       }
       return working;
     });
@@ -177,22 +258,27 @@ export class LogiXivApi {
     return { applied, skipped };
   }
 
-  async addNote(id: string, sentenceHash: string, body: string, author: string | null = null) {
-    await this.require(id);
-    let created: { id: string } | null = null;
-    await this.store.update(id, (current) => {
+  async addNote(
+    id: string,
+    sentenceHash: string,
+    body: string,
+    author: string | null = null,
+  ): Promise<{ applied: boolean; id?: string; reason?: string }> {
+    let outcome: { applied: boolean; id?: string; reason?: string } = { applied: false };
+    await this.mutate(id, (current) => {
       const result = addNote(current, sentenceHash, body, author);
-      created = { id: result.note.id };
+      outcome = result.applied
+        ? { applied: true, id: result.note!.id }
+        : { applied: false, reason: result.reason };
       return result.document;
     });
-    this.bus.publish({ type: 'note.changed', documentId: id, sentenceHash });
-    return created;
+    if (outcome.applied) this.bus.publish({ type: 'note.changed', documentId: id, sentenceHash });
+    return outcome;
   }
 
   async updateNote(id: string, noteId: string, body: string): Promise<boolean> {
-    await this.require(id);
     let applied = false;
-    await this.store.update(id, (current) => {
+    await this.mutate(id, (current) => {
       const result = updateNote(current, noteId, body);
       applied = result.applied;
       return result.document;
@@ -202,9 +288,8 @@ export class LogiXivApi {
   }
 
   async deleteNote(id: string, noteId: string): Promise<boolean> {
-    await this.require(id);
     let applied = false;
-    await this.store.update(id, (current) => {
+    await this.mutate(id, (current) => {
       const result = deleteNote(current, noteId);
       applied = result.applied;
       return result.document;
@@ -214,8 +299,7 @@ export class LogiXivApi {
   }
 
   async setGlossary(id: string, entries: GlossaryEntry[]): Promise<PaperDocument> {
-    await this.require(id);
-    const document = await this.store.update(id, (current) => ({
+    const document = await this.mutate(id, (current) => ({
       ...current,
       updatedAt: new Date().toISOString(),
       annotations: { ...current.annotations, glossary: entries },
@@ -224,14 +308,55 @@ export class LogiXivApi {
     return document;
   }
 
+  /** 用語集に追記する（既存の語は上書きせず残す）。 */
+  async addGlossaryEntries(id: string, entries: GlossaryEntry[]): Promise<{ added: number; total: number }> {
+    let added = 0;
+    let total = 0;
+    await this.mutate(id, (current) => {
+      const glossary = [...current.annotations.glossary];
+      const seen = new Map(glossary.map((entry, index) => [entry.term.toLowerCase(), index]));
+      for (const entry of entries) {
+        const key = entry.term.toLowerCase();
+        const at = seen.get(key);
+        if (at === undefined) {
+          seen.set(key, glossary.length);
+          glossary.push(entry);
+          added++;
+        } else {
+          glossary[at] = entry;
+        }
+      }
+      total = glossary.length;
+      return { ...current, updatedAt: new Date().toISOString(), annotations: { ...current.annotations, glossary } };
+    });
+    this.bus.publish({ type: 'document.updated', documentId: id, reason: 'glossary' });
+    return { added, total };
+  }
+
   async search(id: string, query: string, limit = 30) {
     const document = await this.require(id);
     return searchDocument(document, query, limit).map((hit) => ({
       sentenceId: hit.sentence.id,
       sentenceHash: hit.sentence.hash,
+      order: hit.sentence.order,
       page: hit.sentence.page,
       text: hit.sentence.text,
+      translation: hit.translation,
+      notes: hit.notes,
       where: hit.where,
+    }));
+  }
+
+  async sentencesByHash(id: string, hashes: string[]) {
+    const document = await this.require(id);
+    return sentencesByHash(document, hashes).map((sentence) => ({
+      sentenceHash: sentence.hash,
+      order: sentence.order,
+      page: sentence.page,
+      text: sentence.text,
+      translation: document.annotations.translations[sentence.hash]?.text ?? null,
+      revisedByHuman: document.annotations.translations[sentence.hash]?.revisedByHuman ?? false,
+      notes: document.annotations.notes.filter((n) => n.sentenceHash === sentence.hash).map((n) => n.body),
     }));
   }
 
@@ -247,6 +372,12 @@ export class LogiXivApi {
 
   async exportHtml(id: string): Promise<{ html: string; fileName: string }> {
     const document = await this.require(id);
+    const size = await this.store.pdfSize(id);
+    if (size > MAX_EXPORT_PDF_BYTES) {
+      throw new TooLargeError(
+        `PDF が大きすぎて 1 ファイルに書き出せません（${Math.round(size / 1024 / 1024)}MB / 上限 ${MAX_EXPORT_PDF_BYTES / 1024 / 1024}MB）`,
+      );
+    }
     const pdf = await this.store.readPdf(id);
     const html = await exportDocumentHtml(this.config, document, pdf);
     const safeTitle = document.title.replace(/[^\p{L}\p{N} ._-]/gu, '').trim() || document.id;
@@ -256,35 +387,38 @@ export class LogiXivApi {
   /**
    * 書き出し HTML の取り込み。埋め込まれた JS は実行せず、JSON だけを取り出してマージする。
    * targetId を省略すると PDF ごと新しい文書として取り込む。
+   *
+   * 新規取り込みでも、core が検証して組み直した document だけを保存する。
+   * 生の JSON をそのまま保存すると、`annotations: null` のような値がディスクに残り、
+   * 一覧 API が恒久的に 500 になる（再起動しても直らない）。
    */
-  async importHtml(html: string, targetId: string | null): Promise<{ documentId: string; report: unknown; note: string }> {
+  async importHtml(
+    html: string,
+    targetId: string | null,
+  ): Promise<{ documentId: string; report: unknown; note: string; warning: string | null }> {
     const parsed = parseExportHtml(html);
+    const warning = describeSanitizeReport(parsed.sanitizeReport);
 
     if (targetId) {
-      const target = await this.require(targetId);
-      const hashes = new Set(target.structure.sentences.map((s) => s.hash));
-      const { annotations, report } = mergeAnnotations(target.annotations, parsed.annotations, hashes);
-      await this.store.update(targetId, (current) => ({
-        ...current,
-        updatedAt: new Date().toISOString(),
-        annotations,
-      }));
+      let report: unknown = null;
+      await this.mutate(targetId, (current) => {
+        const hashes = new Set(current.structure.sentences.map((s) => s.hash));
+        const merged = mergeAnnotations(current.annotations, parsed.annotations, hashes);
+        report = merged.report;
+        return { ...current, updatedAt: new Date().toISOString(), annotations: merged.annotations };
+      });
       this.bus.publish({ type: 'document.updated', documentId: targetId, reason: 'import' });
-      return { documentId: targetId, report, note: '既存の文書に注釈をマージしました' };
+      return { documentId: targetId, report, note: '既存の文書に注釈をマージしました', warning };
     }
 
-    if (!parsed.pdfBase64 || !parsed.raw) {
-      throw new BadRequestError('この書き出しには PDF が含まれていないため、新規文書として取り込めません');
+    if (!parsed.pdfBase64 || !parsed.document) {
+      throw new BadRequestError('この書き出しには PDF か本文が含まれていないため、新規文書として取り込めません');
     }
-    const document: PaperDocument = {
-      ...parsed.raw.document,
-      id: createDocument({ structure: parsed.raw.document.structure, sourceFileName: 'imported.pdf' }).id,
-      updatedAt: new Date().toISOString(),
-    };
+    const document = parsed.document;
     await this.store.writePdf(document.id, Buffer.from(parsed.pdfBase64, 'base64'));
     await this.store.write(document);
     this.bus.publish({ type: 'document.created', documentId: document.id });
-    return { documentId: document.id, report: null, note: '新しい文書として取り込みました' };
+    return { documentId: document.id, report: null, note: '新しい文書として取り込みました', warning };
   }
 
   async deleteDocument(id: string): Promise<void> {
@@ -296,7 +430,7 @@ export class LogiXivApi {
   async health(): Promise<{ ok: true; version: string; grobid: 'up' | 'down'; grobidUrl: string; dataDir: string }> {
     return {
       ok: true,
-      version: '0.1.0',
+      version: LOGIXIV_VERSION,
       grobid: (await isGrobidAlive(this.config.grobidUrl)) ? 'up' : 'down',
       grobidUrl: this.config.grobidUrl,
       dataDir: this.config.dataDir,
@@ -308,4 +442,17 @@ export class LogiXivApi {
     const stats = progress(document);
     return `${document.title} — ${structureSummary(document.structure)} translated=${stats.translated}/${stats.total} human=${stats.revisedByHuman}`;
   }
+}
+
+/**
+ * 書き込みを断った理由の機械可読なコード。
+ * 「人手修正済み（＝放置してよい）」と「該当する文が無い（＝hash を取り直すべき）」は
+ * 必要な対応が正反対なので、文字列の比較で分岐させない。
+ */
+export type SkipCode = 'revised_by_human' | 'unknown_hash' | 'other';
+
+function skipCodeOf(reason: string): SkipCode {
+  if (reason.includes('人手修正済み')) return 'revised_by_human';
+  if (reason.includes('該当する文がありません')) return 'unknown_hash';
+  return 'other';
 }

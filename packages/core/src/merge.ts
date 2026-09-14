@@ -21,12 +21,22 @@ function emptyReport(): MergeReport {
   };
 }
 
-/** 取り込む側の訳が既存の訳に勝つか。 */
+/**
+ * 取り込む側の訳が既存の訳に勝つか。
+ *
+ * 日付が壊れている側は「情報が無い」として扱う。以前は Date.parse の NaN が
+ * どちらの比較でも false になるため、既存の updatedAt が不正な訳だけが
+ * 「何をしても更新されない」状態に固着していた（しかも症状が無反応なので気づけない）。
+ */
 export function incomingWins(existing: Translation, incoming: Translation): boolean {
   if (existing.revisedByHuman !== incoming.revisedByHuman) {
     return incoming.revisedByHuman;
   }
-  return Date.parse(incoming.updatedAt) > Date.parse(existing.updatedAt);
+  const existingAt = Date.parse(existing.updatedAt);
+  const incomingAt = Date.parse(incoming.updatedAt);
+  if (!Number.isFinite(existingAt)) return true;
+  if (!Number.isFinite(incomingAt)) return false;
+  return incomingAt > existingAt;
 }
 
 function noteKey(note: Note): string {

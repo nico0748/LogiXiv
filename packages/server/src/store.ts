@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rename, writeFile, stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { PaperDocument } from '@logixiv/core';
+import { migrateDocument, type PaperDocument } from '@logixiv/core';
 import { type Config, documentDir, documentsDir } from './config.ts';
 
 /**
@@ -14,16 +14,23 @@ import { type Config, documentDir, documentsDir } from './config.ts';
 const DOCUMENT_FILE = 'document.json';
 const PDF_FILE = 'source.pdf';
 
-/** 文書ごとの直列化。SSE や MCP からの同時更新で JSON を壊さないための最小限のロック。 */
+export class DocumentMissingError extends Error {}
+
+/**
+ * 文書ごとの直列化。SSE や MCP からの同時更新で JSON を壊さないための最小限のロック。
+ * 使い終わったキーは掃除する（取り込んだ文書の数だけ単調に増えるのを防ぐ）。
+ */
 const locks = new Map<string, Promise<unknown>>();
 
 function withLock<T>(id: string, task: () => Promise<T>): Promise<T> {
   const previous = locks.get(id) ?? Promise.resolve();
   const next = previous.then(task, task);
-  locks.set(
-    id,
-    next.catch(() => undefined),
-  );
+  const tracked = next.catch(() => undefined);
+  locks.set(id, tracked);
+  void tracked.then(() => {
+    // 自分が最後のチェーンなら解放する。
+    if (locks.get(id) === tracked) locks.delete(id);
+  });
   return next;
 }
 
@@ -65,9 +72,15 @@ export class DocumentStore {
     return documents.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  /** 読み出し時に旧バージョンの構造を移行する。訳は原文から再計算したハッシュで付け替わる。 */
   async read(id: string): Promise<PaperDocument> {
     const raw = await readFile(join(this.dir(id), DOCUMENT_FILE), 'utf8');
-    return JSON.parse(raw) as PaperDocument;
+    const parsed = JSON.parse(raw) as PaperDocument;
+    const migration = migrateDocument(parsed);
+    if (!migration.migrated) return parsed;
+    // 移行結果はそのまま書き戻す（毎回移行し直さないように）。
+    await this.write(migration.document).catch(() => undefined);
+    return migration.document;
   }
 
   async exists(id: string): Promise<boolean> {
@@ -79,45 +92,67 @@ export class DocumentStore {
     }
   }
 
+  private async writeAtomic(dir: string, file: string, data: string | Uint8Array): Promise<void> {
+    const target = join(dir, file);
+    const temporary = `${target}.${process.pid}.${Math.random().toString(16).slice(2, 8)}.tmp`;
+    await writeFile(temporary, data);
+    await rename(temporary, target);
+  }
+
   async write(document: PaperDocument): Promise<void> {
     await withLock(document.id, async () => {
       const dir = this.dir(document.id);
       await mkdir(dir, { recursive: true });
-      const target = join(dir, DOCUMENT_FILE);
-      const temporary = `${target}.${process.pid}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(document, null, 2)}\n`, 'utf8');
-      await rename(temporary, target);
+      await this.writeAtomic(dir, DOCUMENT_FILE, `${JSON.stringify(document, null, 2)}\n`);
     });
   }
 
-  /** 読み → 変更 → 書き を 1 つのロックの中で行う。競合更新で片方が消えるのを防ぐ。 */
-  async update(id: string, mutate: (document: PaperDocument) => PaperDocument | Promise<PaperDocument>): Promise<PaperDocument> {
+  /**
+   * 読み → 変更 → 書き を 1 つのロックの中で行う。
+   * 長い処理（再解析など）を挟むときも、必ずこの中で最新を読み直してから適用すること。
+   * ロックの外で読んだ文書に対して書き戻すと、その間に入った翻訳やメモが黙って消える。
+   *
+   * 途中で文書が削除されていたら DocumentMissingError を投げる（ディレクトリを
+   * 作り直して「PDF の無いゾンビ文書」を復活させないため）。
+   */
+  async update(
+    id: string,
+    mutate: (document: PaperDocument) => PaperDocument | Promise<PaperDocument>,
+  ): Promise<PaperDocument> {
     return withLock(id, async () => {
       const dir = this.dir(id);
-      const current = JSON.parse(await readFile(join(dir, DOCUMENT_FILE), 'utf8')) as PaperDocument;
+      let raw: string;
+      try {
+        raw = await readFile(join(dir, DOCUMENT_FILE), 'utf8');
+      } catch {
+        throw new DocumentMissingError(`文書が見つかりません: ${id}`);
+      }
+      const current = migrateDocument(JSON.parse(raw) as PaperDocument).document;
       const next = await mutate(current);
-      const target = join(dir, DOCUMENT_FILE);
-      const temporary = `${target}.${process.pid}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
-      await rename(temporary, target);
+      await this.writeAtomic(dir, DOCUMENT_FILE, `${JSON.stringify(next, null, 2)}\n`);
       return next;
     });
   }
 
   async writePdf(id: string, bytes: Uint8Array): Promise<void> {
-    const dir = this.dir(id);
-    await mkdir(dir, { recursive: true });
-    const target = join(dir, PDF_FILE);
-    const temporary = `${target}.${process.pid}.tmp`;
-    await writeFile(temporary, bytes);
-    await rename(temporary, target);
+    await withLock(id, async () => {
+      const dir = this.dir(id);
+      await mkdir(dir, { recursive: true });
+      await this.writeAtomic(dir, PDF_FILE, bytes);
+    });
   }
 
   async readPdf(id: string): Promise<Buffer> {
     return readFile(join(this.dir(id), PDF_FILE));
   }
 
+  async pdfSize(id: string): Promise<number> {
+    return (await stat(join(this.dir(id), PDF_FILE))).size;
+  }
+
   async remove(id: string): Promise<void> {
-    await rm(this.dir(id), { recursive: true, force: true });
+    await withLock(id, async () => {
+      await rm(this.dir(id), { recursive: true, force: true });
+    });
   }
 }

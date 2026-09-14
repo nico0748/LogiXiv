@@ -26,46 +26,73 @@ Claude 側の MCP 設定に追加する。
 
 MCP サーバーはファイルを直接触らず、本体へ HTTP で話しかける。書き手を 1 プロセスに
 絞ることで排他制御が 1 箇所で済み、Claude の書き込みがそのまま SSE で
-開いているブラウザへ流れる。本体が落ちているときは、その旨と起動方法をエラーで返す。
+開いているブラウザへ流れる。本体が落ちているときは、その旨と `npm start` の案内をエラーで返す。
+
+最初の 1 本はブラウザから入れる。MCP には取り込みツールを置いていない
+（ローカルの任意パスを読むツールを MCP の面に出さない、という判断）。
 
 ## ツール
 
 | ツール | 用途 |
 | --- | --- |
-| `list_documents` | 取り込み済みの論文と進捗。まずこれで `document_id` を決める |
+| `list_documents` | 取り込み済みの論文と進捗、GROBID の生死。まずこれで `document_id` を決める |
 | `get_document_outline` | タイトル・節構成・ページ数・解析方式・用語集・進捗 |
-| `get_sentences` | 文を範囲・節・ページで取得（原文 + 既存訳 + メモ） |
-| `get_untranslated_sentences` | 未訳の文を前後の文脈込みで取得。翻訳の起点 |
-| `set_translations` | 訳をまとめて書き込む（最大 100 文） |
-| `add_note` | 文にメモを付ける |
-| `search_document` | 原文・訳文・メモを横断検索。訳語の揺れ探し |
-| `set_glossary` | 訳語の対応表を更新 |
+| `get_sentences` | 文を範囲・節・ページで取得（原文 + 既存訳 + メモ）。`from` は**通し番号 (order)** |
+| `get_translation_batch` | 翻訳作業の入口。連続した本文と、そのうちの未訳リストを返す |
+| `set_translations` | 訳をまとめて書き込む（最大 100 文）。結果は JSON |
+| `add_note` | 文にメモを付ける。存在しない hash は拒否される |
+| `search_document` | 原文・訳文・メモを横断検索。ヒットに訳文とメモが入る |
+| `update_glossary` | 用語集を更新。既定は追記、`mode: "replace"` で全置換 |
 | `reparse_document` | 同じ PDF を解析し直す。訳とメモはハッシュで再結合される |
 
 ### 文の指定は必ず `sentenceHash`
 
 順番でも ID でもなくハッシュで指すので、再解析をまたいでも Claude が指した文がずれない。
 
-### 一括で渡し、一括で受け取る
+### 文脈は「範囲」で渡す
 
-`get_untranslated_sentences` は `context_before` / `context_after` を付けて返し、
-`set_translations` は最大 100 文をまとめて受け取る。1 文ずつ往復させると
-前後関係を見ずに訳すことになり、代名詞と時制がすぐ壊れる。
+`get_translation_batch` は連続した文を `window: [[order, 原文, 訳?], …]` の形で返し、
+そのうち未訳のものを `untranslated: [[order, hash], …]` で別に列挙する。
 
-### 人手修正済みは上書きされない
+文ごとに前後 2 文を複製して返していた頃は、同じ文字列が最大 5 回 JSON に載り、
+264 文の論文を訳し切るのに Claude が読むバイトは 210KB（約 6 万トークン）、
+そのうち原文はわずか 12% だった。範囲で渡せば情報量は同じまま 1/4 以下になる。
 
-`revisedByHuman` が立った訳に `set_translations` を当てても書き込まれず、
-`skipped` に理由付きで返る。これは失敗ではなく設計どおりの挙動。
+### 訳さない文は飛ばせる
+
+`get_translation_batch` は `nextFrom` を返す。訳す対象でない文（参考文献の断片・
+ページ番号・数式だけの行）に当たったら、`from` を進めて呼び直せばよい。
+
+以前は「未訳の先頭 N 文」しか返せなかったので、Claude が正しく「これは訳さない」と
+判断した瞬間に同じ 20 文が無限に返ってきた。「分からないところを埋めるな」という
+プロンプトの指示と、手順が矛盾していた。
+
+### 書き込みの結果は機械可読
+
+`set_translations` は `{applied, skipped: [{sentenceHash, reason, code}]}` を返す。
+`code` は次のいずれかで、必要な対応が正反対なので分けてある。
+
+- `revised_by_human` … 人手修正済み。**対応不要**（上書きしないのが仕様）
+- `unknown_hash` … この文書に無い hash。取り直すべき
+- `other` … その他
+
+打ち切りはしない（1 回 100 件上限なので全件返しても小さい）。
+
+### 解析方式による制約はその場で伝える
+
+GROBID 未接続で取り込んだ文書は節が取れない。`get_document_outline` と
+`get_sentences` は、そのとき `caveat` に理由と対処（`reparse_document`）を入れて返す。
 
 ## プロンプト
 
 `translate_paper`（引数: `document_id`、任意で `field`）に手順と訳し方の方針が入っている。
 
 - 1 文は 1 文として訳す（画面上で原文と 1 対 1 に並ぶため、2 文に割らない）
-- 専門用語は用語集に従う。無ければ `set_glossary` に足してから続ける
+- 専門用語は用語集に従う。無ければ `update_glossary` に足してから続ける（既定は追記）
 - 数式・記号・変数名・引用番号は原文のまま残す
 - 原文が曖昧な箇所は片方を選んで訳し切り、`add_note` に理由を残す
 - 分からない箇所を、それらしい日本語で埋めない
+- 訳す対象でない断片は訳さずに飛ばす
 
 ## 動作確認
 
@@ -73,5 +100,6 @@ MCP サーバーはファイルを直接触らず、本体へ HTTP で話しか�
 npm run test:e2e
 ```
 
-MCP を stdio で起動し、`initialize` → `tools/list`（9 個）→ `prompts/list`（1 個）→
-`tools/call` まで通ることを確認する。
+MCP を stdio で起動し、`initialize` → `tools/list`（`TOOL_NAMES` と一致するか）→
+`prompts/list` → `tools/call` まで通ることと、`get_translation_batch` の応答に
+文脈の重複が無いことを確認する。

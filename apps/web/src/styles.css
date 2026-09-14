@@ -76,14 +76,30 @@ textarea {
 }
 
 .flash {
+  position: relative;
   margin: 0.5rem 1rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.5rem 2rem 0.5rem 0.75rem;
   border: 1px solid var(--line);
   border-left: 3px solid var(--note);
   border-radius: 6px;
   background: var(--panel);
   font-size: 0.85rem;
-  cursor: pointer;
+}
+
+.flash-close {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.35rem;
+  padding: 0 0.35rem;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.dropzone.is-busy {
+  opacity: 0.6;
+  pointer-events: none;
 }
 
 /* --- 一覧 ------------------------------------------------------------- */
@@ -293,17 +309,29 @@ textarea {
 .pdf-pane {
   overflow: auto;
   padding: 1rem;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1rem;
+  display: block;
+  /* flex + align-items:center は、ページがペインより広いとき左側のはみ出しが
+     スクロールで到達できなくなる（行頭が永久に読めない）。margin:auto なら
+     収まるときだけ中央寄せになり、溢れたときは左端から始まる。 */
+}
+
+.pdf-page + .pdf-page {
+  margin-top: 1rem;
 }
 
 .pdf-page {
   position: relative;
+  margin-inline: auto;
   background: #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-  flex: none;
+}
+
+/* ズーム中の即時反映用。実解像度の描き直しが終わるまで CSS で拡縮する。 */
+.pdf-page-inner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
 }
 
 .pdf-canvas-slot,
@@ -331,6 +359,14 @@ textarea {
 .pdf-marker.is-active {
   background: rgba(245, 158, 11, 0.35);
   outline: 1px solid rgba(245, 158, 11, 0.9);
+}
+
+/* 検索で絞り込み中、サイドバーに出ていない文のマーカーは押せなくする
+   （押しても対応するカードが無く、無反応に見えるため）。 */
+.pdf-marker.is-filtered-out {
+  background: transparent;
+  pointer-events: none;
+  opacity: 0.25;
 }
 
 .sidebar {
@@ -437,8 +473,14 @@ textarea {
 }
 
 .card:hover .card-toolbar,
+.card:focus-within .card-toolbar,
 .card.is-active .card-toolbar {
   opacity: 1;
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .card-toolbar button {

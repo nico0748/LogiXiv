@@ -50,7 +50,7 @@ export function Library({ onOpen }: Props): React.JSX.Element {
       </header>
 
       <div
-        className={`dropzone${dragging ? ' is-dragging' : ''}`}
+        className={`dropzone${dragging ? ' is-dragging' : ''}${busy ? ' is-busy' : ''}`}
         onDragOver={(event) => {
           event.preventDefault();
           setDragging(true);
@@ -59,8 +59,13 @@ export function Library({ onOpen }: Props): React.JSX.Element {
         onDrop={(event) => {
           event.preventDefault();
           setDragging(false);
-          const file = event.dataTransfer.files[0];
-          if (file) void upload(file);
+          // 解析中のドロップは無視する。受け付けると並行アップロードが走り、
+          // どの文書が開かれるか不定になる。
+          if (busy) return;
+          const files = event.dataTransfer.files;
+          if (files.length === 0) return;
+          if (files.length > 1) setMessage(`${files.length} 件のうち 1 件目だけを取り込みます。`);
+          void upload(files[0]!);
         }}
       >
         <p>PDF をここにドロップ</p>
@@ -82,8 +87,11 @@ export function Library({ onOpen }: Props): React.JSX.Element {
       </div>
 
       {message && (
-        <p className="flash" onClick={() => setMessage(null)}>
+        <p className="flash" role="status" aria-live="polite">
           {message}
+          <button type="button" className="flash-close" aria-label="閉じる" onClick={() => setMessage(null)}>
+            ×
+          </button>
         </p>
       )}
 
@@ -122,7 +130,12 @@ export function Library({ onOpen }: Props): React.JSX.Element {
               title="削除"
               onClick={() => {
                 if (!window.confirm(`「${document.title}」を削除します。よろしいですか？`)) return;
-                void api.deleteDocument(document.id).then(reload);
+                void api
+                  .deleteDocument(document.id)
+                  .then(reload)
+                  .catch((cause: unknown) =>
+                    setMessage(`削除に失敗しました: ${cause instanceof Error ? cause.message : String(cause)}`),
+                  );
               }}
             >
               削除

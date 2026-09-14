@@ -17,23 +17,50 @@ function escapePdfText(text: string): string {
   return text.replace(/[\\()]/g, (c) => `\\${c}`);
 }
 
-export function makeSamplePdf(): Uint8Array {
-  const content = [
-    'BT',
-    '/F1 12 Tf',
-    '14 TL',
-    '50 780 Td',
-    ...LINES.map((line) => `(${escapePdfText(line)}) Tj T*`),
-    'ET',
-  ].join('\n');
+export interface SamplePdfOptions {
+  /** ページ数。複数ページの挙動（描画・スクロール・上限）を見たいときに増やす。 */
+  pages?: number;
+  /** 1 ページあたりの行。既定は LINES。 */
+  lines?: string[];
+}
 
-  const objects = [
-    '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
-    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    `<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`,
-  ];
+export function makeSamplePdf(options: SamplePdfOptions = {}): Uint8Array {
+  const pageCount = Math.max(1, options.pages ?? 1);
+  const lines = options.lines ?? LINES;
+
+  const objects: string[] = [];
+  const add = (body: string): number => {
+    objects.push(body);
+    return objects.length; // 1 始まりのオブジェクト番号
+  };
+
+  // 1: Catalog, 2: Pages（子が決まってから本文を差し替える）
+  add('placeholder-catalog');
+  add('placeholder-pages');
+  const fontId = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+
+  const pageIds: number[] = [];
+  for (let page = 1; page <= pageCount; page++) {
+    const content = [
+      'BT',
+      '/F1 12 Tf',
+      '14 TL',
+      '50 780 Td',
+      `(${escapePdfText(`Page ${page}.`)}) Tj T*`,
+      ...lines.map((line) => `(${escapePdfText(line)}) Tj T*`),
+      'ET',
+    ].join('\n');
+    const contentId = add(`<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`);
+    pageIds.push(
+      add(
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] ` +
+          `/Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`,
+      ),
+    );
+  }
+
+  objects[0] = '<< /Type /Catalog /Pages 2 0 R >>';
+  objects[1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`;
 
   let pdf = '%PDF-1.4\n';
   const offsets: number[] = [];

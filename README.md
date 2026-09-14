@@ -31,6 +31,8 @@ LogiXiv は **OSS の、ローカル実行 Web アプリ**を採っている。
 
 ## 動かす
 
+必要なのは **Node 22.6 以上**（`--experimental-strip-types` を使うため。`.nvmrc` あり）。
+
 ```bash
 git clone https://github.com/nico0748/LogiXiv.git
 cd LogiXiv
@@ -53,6 +55,9 @@ npm run dev        # http://localhost:5173（/api は本体へプロキシ）
 ```bash
 docker compose -f docker/grobid.yml up -d      # http://localhost:8070
 ```
+
+使うのは軽量な CRF 版（`grobid/grobid:0.9.1-crf`）。文の分割と座標付けはこれで実用になる。
+精度が要るなら `-full`（Deep Learning 入り、GPU 推奨）に差し替えられる。
 
 `LOGIXIV_GROBID_URL` で別のホストを指せる。GROBID に届かないときは pdf.js による
 簡易解析に自動で切り替わり、その旨が UI のバッジと `parserNote` に出る。
@@ -94,8 +99,8 @@ GROBID に `segmentSentences=1` と `teiCoordinates=s` を付けて投げると�
 ## 構成
 
 ```
-packages/core     型・TEIパーサ・文分割・エクスポート/インポート・マージ（唯一の真実）
-packages/server   ローカル API（GROBIDプロキシ、ファイルストア、SSE）
+packages/core     型・TEIパーサ・文分割・検証・エクスポート/インポート・マージ・移行（唯一の真実、外部依存ゼロ）
+packages/server   ローカル API（GROBIDプロキシ、ファイルストア、SSE、解析ワーカー）
 packages/mcp      Claude 用 MCP サーバー（stdio、ツール9個＋プロンプト1個）
 apps/web          Vite + React の本体 UI
 apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア（pdf.js 同梱）
@@ -107,10 +112,15 @@ apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア�
 ## 主要な設計判断
 
 - **構造データと注釈を分離した。** 再解析で訳が消えないよう、原文の正規化ハッシュで再結合する
+- **正規化で文字間のハイフンを落とす。** GROBID の `block-sparse` と、行末で割れた `block-` + `sparse` を
+  同じハッシュにするため。これが無いと「GROBID を後から入れて再解析」で訳が外れる
 - **メモは衝突しても消さない。** 訳は「正解が 1 つ」だがメモは「多いほど良い」。マージ規則を非対称にした
 - **人手修正フラグ。** `revisedByHuman` が立った訳を機械が上書きしない
 - **エクスポート HTML に静的フォールバック。** JS が壊れても対訳とメモが素の HTML として読める
-- **インポート時に埋め込み JS を実行しない。** 正規表現で JSON を切り出して `JSON.parse` するだけ
+- **取り込む JSON は全部検証する。** 埋め込み JS を実行しないのは当然として、
+  型が合わない値をストアに書かせない（1 回の取り込みで一覧 API を恒久的に壊せてしまう）
+- **PDF 解析はワーカースレッド。** pdf.js は Node では同一スレッドで動くので、
+  大きな PDF 1 本でサーバー全体が数十秒止まっていた
 - **`consolidateHeader=0`。** GROBID の既定値 1 は CrossRef へ問い合わせに行く。未公開原稿のタイトルを外部に出さない
 
 詳しくは [docs/architecture.md](docs/architecture.md) と [docs/mcp.md](docs/mcp.md)。
@@ -118,8 +128,8 @@ apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア�
 ## テスト
 
 ```bash
-npm run typecheck   # 全パッケージの型チェック
-npm test            # core のユニットテスト（18 本）
+npm run typecheck   # 全パッケージ（apps/ 含む）の型チェック
+npm test            # core 47 本 + server 15 本のユニット/API テスト
 npm run test:e2e    # 取り込み→翻訳→SSE→書き出し→取り込み→MCP 起動の通し確認
 ```
 
@@ -129,9 +139,11 @@ GROBID を上げた状態で確認したいときは `LOGIXIV_GROBID_URL` を指
 ## 既知の制約
 
 - スキャン PDF（画像のみ）は扱えない。先に OCR を通す必要がある
-- 書き出し HTML は大きい（PDF + ビューア約 1.8MB）
+- 書き出し HTML は大きい（PDF + ビューア約 1.8MB）。PDF 60MB 超は書き出せない
 - 回転ページや特殊な CropBox で座標がずれ得る
 - 文分割の手動修正 UI が未実装
+- フォールバック解析は 400 ページで打ち切る（それ以上は GROBID を使う）
+- 正規化の副作用として `re-cover` と `recover` は同じハッシュになる
 
 ## これから
 

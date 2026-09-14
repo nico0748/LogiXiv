@@ -109,7 +109,8 @@ test('parseTei は文・座標・見出し・ページサイズを取り出す',
 
   const last = structure.sentences[3]!;
   assert.equal(last.page, 2);
-  assert.equal(last.sectionId, 'sec_2');
+  // 節 ID は並び順ではなく見出しの内容から作る（抄録の有無でずれないように）。
+  assert.equal(last.sectionId, structure.sections.find((s) => s.title === '2. Method')!.id);
 });
 
 test('parseTei は座標が欠けていることを parserNote で知らせる', () => {

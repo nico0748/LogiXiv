@@ -25,3 +25,4 @@ process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
 
 export { createMcpServer };
+export { TOOL_NAMES } from './server.ts';

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { Note, PaperDocument, Sentence } from './api.ts';
 
 /**
@@ -7,20 +7,26 @@ import type { Note, PaperDocument, Sentence } from './api.ts';
  * 訳は「クリックしたら編集できる」だけにしてある。編集モードの切り替えを
  * 明示的なボタンにすると、読みながら気になった 1 文を直す動作が重くなるため。
  * 保存すると revisedByHuman が立ち、以後 Claude の訳で上書きされなくなる。
+ *
+ * 見出しとカードは .sidebar の直接の子にする。ラッパの <div> で包むと
+ * その div が position:sticky の包含ブロックになり、見出しがカード 1 枚ぶんで
+ * 流れて消える（＝どの節を読んでいるか分からなくなる）。
  */
 
 interface Props {
   document: PaperDocument;
   selectedId: string | null;
   filter: string;
-  onSelect: (sentenceId: string) => void;
-  onSaveTranslation: (hash: string, text: string) => Promise<void>;
-  onAddNote: (hash: string, body: string) => Promise<void>;
-  onDeleteNote: (noteId: string) => Promise<void>;
+  visibleSentences: Sentence[];
+  onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar') => void;
+  onSaveTranslation: (hash: string, text: string) => Promise<boolean>;
+  onAddNote: (hash: string, body: string) => Promise<boolean>;
+  onDeleteNote: (noteId: string) => Promise<boolean>;
+  scrollTarget: { id: string; token: number } | null;
 }
 
 export function Sidebar(props: Props): React.JSX.Element {
-  const { document: paper, selectedId, filter } = props;
+  const { document: paper, selectedId, visibleSentences, scrollTarget } = props;
   const listRef = useRef<HTMLDivElement>(null);
 
   const notesByHash = useMemo(() => {
@@ -38,39 +44,23 @@ export function Sidebar(props: Props): React.JSX.Element {
     [paper.structure.sections],
   );
 
-  const needle = filter.trim().toLowerCase();
-  const visible = useMemo(() => {
-    if (needle.length === 0) return paper.structure.sentences;
-    return paper.structure.sentences.filter((sentence) => {
-      const haystack = [
-        sentence.text,
-        paper.annotations.translations[sentence.hash]?.text ?? '',
-        ...(notesByHash.get(sentence.hash) ?? []).map((note) => note.body),
-      ]
-        .join(' ')
-        .toLowerCase();
-      return haystack.includes(needle);
-    });
-  }, [needle, paper, notesByHash]);
-
   useEffect(() => {
-    if (!selectedId) return;
-    listRef.current?.querySelector(`[data-card-for="${selectedId}"]`)?.scrollIntoView({
-      block: 'center',
-      behavior: 'smooth',
-    });
-  }, [selectedId]);
+    if (!scrollTarget) return;
+    listRef.current
+      ?.querySelector(`[data-card-for="${CSS.escape(scrollTarget.id)}"]`)
+      ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [scrollTarget]);
 
   let lastSection: string | null | undefined;
 
   return (
     <div className="sidebar" ref={listRef}>
-      {visible.length === 0 && <p className="pane-message">一致する文がありません。</p>}
-      {visible.map((sentence) => {
+      {visibleSentences.length === 0 && <p className="pane-message">一致する文がありません。</p>}
+      {visibleSentences.map((sentence) => {
         const heading = sentence.sectionId !== lastSection ? sectionTitles.get(sentence.sectionId ?? '') : undefined;
         lastSection = sentence.sectionId;
         return (
-          <div key={sentence.id}>
+          <Fragment key={sentence.id}>
             {heading && <h2 className="sidebar-section">{heading}</h2>}
             <SentenceCard
               sentence={sentence}
@@ -82,7 +72,7 @@ export function Sidebar(props: Props): React.JSX.Element {
               onAddNote={props.onAddNote}
               onDeleteNote={props.onDeleteNote}
             />
-          </div>
+          </Fragment>
         );
       })}
     </div>
@@ -94,10 +84,10 @@ interface CardProps {
   document: PaperDocument;
   notes: Note[];
   active: boolean;
-  onSelect: (sentenceId: string) => void;
-  onSaveTranslation: (hash: string, text: string) => Promise<void>;
-  onAddNote: (hash: string, body: string) => Promise<void>;
-  onDeleteNote: (noteId: string) => Promise<void>;
+  onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar') => void;
+  onSaveTranslation: (hash: string, text: string) => Promise<boolean>;
+  onAddNote: (hash: string, body: string) => Promise<boolean>;
+  onDeleteNote: (noteId: string) => Promise<boolean>;
 }
 
 function SentenceCard(props: CardProps): React.JSX.Element {
@@ -110,24 +100,37 @@ function SentenceCard(props: CardProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    // 編集中は SSE 由来の更新で下書きを潰さない。
     if (!editing) setDraft(translation?.text ?? '');
   }, [translation?.text, editing]);
 
   const save = async (): Promise<void> => {
     setBusy(true);
     try {
-      await props.onSaveTranslation(sentence.hash, draft);
-      setEditing(false);
+      if (await props.onSaveTranslation(sentence.hash, draft)) setEditing(false);
     } finally {
       setBusy(false);
     }
   };
 
+  const select = (): void => props.onSelect(sentence.id, 'sidebar');
+
   return (
     <article
       data-card-for={sentence.id}
       className={`card${active ? ' is-active' : ''}`}
-      onClick={() => props.onSelect(sentence.id)}
+      // カードは「文を選ぶ」操作なので、マウスにもキーボードにも同じ入口を出す。
+      role="button"
+      tabIndex={0}
+      aria-pressed={active}
+      onClick={select}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          select();
+        }
+      }}
     >
       {editing ? (
         <div className="card-editor" onClick={(event) => event.stopPropagation()}>
@@ -135,15 +138,17 @@ function SentenceCard(props: CardProps): React.JSX.Element {
             value={draft}
             autoFocus
             rows={3}
+            aria-label="訳文"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
+              event.stopPropagation();
               if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void save();
               if (event.key === 'Escape') setEditing(false);
             }}
           />
           <div className="card-actions">
             <button type="button" disabled={busy} onClick={() => void save()}>
-              保存
+              {busy ? '保存中…' : '保存'}
             </button>
             <button type="button" onClick={() => setEditing(false)}>
               取消
@@ -174,6 +179,7 @@ function SentenceCard(props: CardProps): React.JSX.Element {
             type="button"
             className="note-delete"
             title="メモを削除"
+            aria-label="メモを削除"
             onClick={(event) => {
               event.stopPropagation();
               void props.onDeleteNote(note.id);
@@ -190,18 +196,26 @@ function SentenceCard(props: CardProps): React.JSX.Element {
             value={noteDraft}
             rows={2}
             autoFocus
+            aria-label="メモ"
             placeholder="訳語の判断、原文の曖昧さ、他の論文との関係など"
+            onKeyDown={(event) => event.stopPropagation()}
             onChange={(event) => setNoteDraft(event.target.value)}
           />
           <div className="card-actions">
             <button
               type="button"
-              disabled={noteDraft.trim().length === 0}
+              disabled={busy || noteDraft.trim().length === 0}
               onClick={() => {
-                void props.onAddNote(sentence.hash, noteDraft.trim()).then(() => {
-                  setNoteDraft('');
-                  setNoteOpen(false);
-                });
+                setBusy(true);
+                void props
+                  .onAddNote(sentence.hash, noteDraft.trim())
+                  .then((ok) => {
+                    if (ok) {
+                      setNoteDraft('');
+                      setNoteOpen(false);
+                    }
+                  })
+                  .finally(() => setBusy(false));
               }}
             >
               メモを追加

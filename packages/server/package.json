@@ -5,12 +5,25 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
-  "bin": { "logixiv": "./dist/cli.js" },
-  "scripts": { "build": "tsc -b" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "logixiv": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b && chmod +x dist/cli.js",
+    "test": "node --test --experimental-strip-types test/*.test.ts"
+  },
   "dependencies": {
     "@logixiv/core": "0.1.0",
     "pdfjs-dist": "6.3.289"
   },
-  "devDependencies": { "typescript": "5.9.3", "@types/node": "22.18.1" }
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "22.18.1"
+  }
 }

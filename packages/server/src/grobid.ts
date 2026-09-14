@@ -69,7 +69,7 @@ export async function processFulltext(
     response = await fetch(`${options.baseUrl}/api/processFulltextDocument`, {
       method: 'POST',
       headers: { 'Content-Type': contentType, Accept: 'application/xml' },
-      body: new Uint8Array(body),
+      body,
       signal: AbortSignal.timeout(options.timeoutMs ?? 180_000),
     });
   } catch (error) {

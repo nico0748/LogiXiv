@@ -12,7 +12,8 @@ export class LogiXivNotRunningError extends Error {
   constructor(baseUrl: string, cause: string) {
     super(
       `LogiXiv 本体 (${baseUrl}) に接続できません: ${cause}\n` +
-        '別のターミナルで `npx logixiv` を実行してから、もう一度試してください。',
+        'リポジトリのディレクトリで `npm start` を実行して本体を起動してから、もう一度試してください。\n' +
+        '別のポートで動かしている場合は、MCP の設定で環境変数 LOGIXIV_URL をそのアドレスに合わせてください。',
     );
   }
 }
@@ -24,6 +25,33 @@ export interface DocumentSummary {
   parser: string;
   total: number;
   translated: number;
+}
+
+export interface SkippedWrite {
+  sentenceHash: string;
+  reason: string;
+  code: 'revised_by_human' | 'unknown_hash' | 'other';
+}
+
+export interface SearchHit {
+  sentenceId: string;
+  sentenceHash: string;
+  order: number;
+  page: number;
+  text: string;
+  translation: string | null;
+  notes: string[];
+  where: string[];
+}
+
+export interface SentenceView {
+  sentenceHash: string;
+  order: number;
+  page: number;
+  text: string;
+  translation: string | null;
+  revisedByHuman: boolean;
+  notes: string[];
 }
 
 export class LogiXivClient {
@@ -39,7 +67,7 @@ export class LogiXivClient {
       response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
         headers: { Accept: 'application/json', ...(init?.headers ?? {}) },
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(180_000),
       });
     } catch (error) {
       throw new LogiXivNotRunningError(this.baseUrl, error instanceof Error ? error.message : String(error));
@@ -72,20 +100,22 @@ export class LogiXivClient {
     return this.request<PaperDocument>(`/api/documents/${encodeURIComponent(id)}`);
   }
 
-  untranslated(id: string, limit: number) {
-    return this.request<{ sentences: { sentenceHash: string; order: number; page: number; text: string }[] }>(
-      `/api/documents/${encodeURIComponent(id)}/untranslated?limit=${limit}`,
+  search(id: string, query: string) {
+    return this.request<{ hits: SearchHit[] }>(
+      `/api/documents/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`,
     );
   }
 
-  search(id: string, query: string) {
-    return this.request<{
-      hits: { sentenceId: string; sentenceHash: string; page: number; text: string; where: string[] }[];
-    }>(`/api/documents/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`);
+  sentencesByHash(id: string, hashes: string[]) {
+    return this.request<{ sentences: SentenceView[] }>(`/api/documents/${encodeURIComponent(id)}/sentences`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hashes }),
+    });
   }
 
   setTranslations(id: string, entries: { sentenceHash: string; text: string }[]) {
-    return this.request<{ applied: number; skipped: { sentenceHash: string; reason: string }[] }>(
+    return this.request<{ applied: number; skipped: SkippedWrite[] }>(
       `/api/documents/${encodeURIComponent(id)}/translations`,
       {
         method: 'PUT',
@@ -96,15 +126,27 @@ export class LogiXivClient {
   }
 
   addNote(id: string, sentenceHash: string, body: string, author: string | null) {
-    return this.request<{ id: string }>(`/api/documents/${encodeURIComponent(id)}/notes`, {
+    return this.request<{ applied: boolean; id?: string; reason?: string }>(
+      `/api/documents/${encodeURIComponent(id)}/notes`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sentenceHash, body, author }),
+      },
+    );
+  }
+
+  /** 追記。既存の用語集を消さない。 */
+  addGlossaryEntries(id: string, entries: { term: string; translation: string; note?: string | null }[]) {
+    return this.request<{ added: number; total: number }>(`/api/documents/${encodeURIComponent(id)}/glossary`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sentenceHash, body, author }),
+      body: JSON.stringify({ entries }),
     });
   }
 
-  setGlossary(id: string, entries: { term: string; translation: string; note?: string }[]) {
-    return this.request<{ ok: true }>(`/api/documents/${encodeURIComponent(id)}/glossary`, {
+  replaceGlossary(id: string, entries: { term: string; translation: string; note?: string | null }[]) {
+    return this.request<{ ok: true; total: number }>(`/api/documents/${encodeURIComponent(id)}/glossary`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ entries }),

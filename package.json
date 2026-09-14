@@ -12,11 +12,13 @@
     "apps/web",
     "apps/viewer"
   ],
-  "engines": { "node": ">=20.10" },
+  "engines": {
+    "node": ">=22.6"
+  },
   "scripts": {
     "build": "npm run build -w @logixiv/core && npm run build -w @logixiv/server && npm run build -w @logixiv/mcp && npm run build -w @logixiv/viewer && npm run build -w @logixiv/web",
-    "typecheck": "tsc -b packages/core packages/server packages/mcp --pretty false",
-    "test": "npm run test -w @logixiv/core",
+    "typecheck": "tsc -b packages/core packages/server packages/mcp --pretty false && tsc -p apps/web --noEmit --pretty false && tsc -p apps/viewer --noEmit --pretty false",
+    "test": "npm run test -w @logixiv/core && npm run test -w @logixiv/server",
     "test:e2e": "node --experimental-strip-types scripts/e2e-smoke.ts",
     "dev": "npm run dev -w @logixiv/web",
     "start": "node packages/server/dist/cli.js",

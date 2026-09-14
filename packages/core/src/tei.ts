@@ -1,5 +1,5 @@
 import { parseXml, findPath, firstChild, descendants, textContent, type XmlElement } from './xml.ts';
-import { sentenceHash, sentenceId } from './hash.ts';
+import { STRUCTURE_VERSION, sentenceHash, sentenceId, stableId } from './hash.ts';
 import type { DocumentStructure, PageSize, Rect, Section, Sentence } from './types.ts';
 
 /**
@@ -44,11 +44,34 @@ function tidy(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * 本文として辿らない要素。
+ *
+ * GROBID は <body> の直下に図表・脚注・数式も <s> 付きで出す。素通しすると
+ * 図キャプション・表のセルの数値・脚注・数式が「文」としてサイドバーに並び、
+ * order も本文と入り混じって読めなくなる。座標を持たないものが多いので
+ * 「座標あり n/m 文」の警告まで誤作動していた。
+ */
+const SKIP_ELEMENTS = new Set([
+  'figure',
+  'figdesc',
+  'table',
+  'formula',
+  'note',
+  'listbibl',
+  'biblstruct',
+  'teiheader',
+  'facsimile',
+]);
+
 interface Collector {
   sentences: Sentence[];
   sections: Section[];
   occurrences: Map<string, number>;
+  sectionIds: Set<string>;
   currentSectionId: string | null;
+  /** 本文として採らなかった <s> の数。UI へ出すために数えておく。 */
+  skipped: number;
 }
 
 function pushSentence(collector: Collector, element: XmlElement): void {
@@ -70,6 +93,23 @@ function pushSentence(collector: Collector, element: XmlElement): void {
 }
 
 /**
+ * 節 ID は見出しの内容から作る。
+ * 並び順から作ると、includeAbstract の有無だけで本文の節 ID が 1 つずつずれて、
+ * 設定違いの再解析で UI の参照が全部外れる。
+ */
+function registerSection(collector: Collector, title: string): string {
+  let disambiguator = 0;
+  let id = stableId('sec', title);
+  while (collector.sectionIds.has(id)) {
+    disambiguator++;
+    id = stableId('sec', title, disambiguator);
+  }
+  collector.sectionIds.add(id);
+  collector.sections.push({ id, title, level: 1, order: collector.sections.length });
+  return id;
+}
+
+/**
  * body を文書順に歩く。div に入るたびに head を見出しとして拾い、
  * その div の中の <s> をその節に属させる。
  */
@@ -77,20 +117,22 @@ function walk(node: XmlElement, collector: Collector): void {
   for (const child of node.children) {
     if (child.type !== 'element') continue;
 
+    if (SKIP_ELEMENTS.has(child.name.toLowerCase())) {
+      for (const _ of descendants(child, 's')) collector.skipped++;
+      continue;
+    }
+
     if (child.name === 'div') {
       const previous = collector.currentSectionId;
       const head = firstChild(child, 'head');
       if (head) {
-        const title = tidy(textContent(head));
-        if (title.length > 0) {
+        const rawTitle = tidy(textContent(head));
+        if (rawTitle.length > 0) {
           const n = head.attrs['n'] ?? '';
-          const id = `sec_${collector.sections.length}`;
-          collector.sections.push({
-            id,
-            title: n ? `${n} ${title}` : title,
-            level: n ? n.replace(/\.$/, '').split('.').length : 1,
-            order: collector.sections.length,
-          });
+          const title = n ? `${n} ${rawTitle}` : rawTitle;
+          const id = registerSection(collector, title);
+          const section = collector.sections[collector.sections.length - 1]!;
+          section.level = n ? n.replace(/\.$/, '').split('.').length : 1;
           collector.currentSectionId = id;
         }
       }
@@ -131,16 +173,16 @@ export function parseTei(xml: string, options: ParseTeiOptions = {}): DocumentSt
     sentences: [],
     sections: [],
     occurrences: new Map(),
+    sectionIds: new Set(),
     currentSectionId: null,
+    skipped: 0,
   };
 
   if (includeAbstract && abstractElement) {
     collector.sections.push({ id: 'sec_abstract', title: 'Abstract', level: 1, order: 0 });
+    collector.sectionIds.add('sec_abstract');
     collector.currentSectionId = 'sec_abstract';
-    const abstractSentences = [...descendants(abstractElement, 's')];
-    if (abstractSentences.length > 0) {
-      for (const s of abstractSentences) pushSentence(collector, s);
-    }
+    for (const s of descendants(abstractElement, 's')) pushSentence(collector, s);
     collector.currentSectionId = null;
   }
 
@@ -149,15 +191,16 @@ export function parseTei(xml: string, options: ParseTeiOptions = {}): DocumentSt
 
   const withCoords = collector.sentences.filter((s) => s.rects.length > 0).length;
   const total = collector.sentences.length;
+  const skippedNote = collector.skipped > 0 ? `。図表・脚注・数式の ${collector.skipped} 文は本文から除外` : '';
   const parserNote =
     total === 0
-      ? 'GROBID は文を返しませんでした。segmentSentences=1 を付けているか確認してください。'
+      ? 'GROBID は本文の文を返しませんでした。segmentSentences=1 を付けているか確認してください。'
       : withCoords === total
-        ? 'GROBID による文単位解析（全文に PDF 座標あり）'
-        : `GROBID による文単位解析（座標あり ${withCoords}/${total} 文。teiCoordinates=s を確認してください）`;
+        ? `GROBID による文単位解析（全文に PDF 座標あり）${skippedNote}`
+        : `GROBID による文単位解析（座標あり ${withCoords}/${total} 文。teiCoordinates=s を確認してください）${skippedNote}`;
 
   return {
-    version: 1,
+    version: STRUCTURE_VERSION,
     parser: 'grobid',
     parserNote,
     parsedAt: new Date().toISOString(),

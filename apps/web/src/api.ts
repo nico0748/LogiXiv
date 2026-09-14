@@ -53,7 +53,7 @@ export interface PaperDocument {
   createdAt: string;
   updatedAt: string;
   structure: {
-    version: 1;
+    version: number;
     parser: 'grobid' | 'fallback';
     parserNote: string;
     parsedAt: string;
@@ -133,7 +133,7 @@ export const api = {
     }),
 
   addNote: (id: string, sentenceHash: string, body: string) =>
-    request<{ id: string }>(`/api/documents/${id}/notes`, {
+    request<{ applied: boolean; id?: string; reason?: string }>(`/api/documents/${id}/notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sentenceHash, body, author: 'me' }),
@@ -150,7 +150,7 @@ export const api = {
     }),
 
   importHtml: (id: string, html: string) =>
-    request<{ documentId: string; report: unknown; note: string }>(`/api/documents/${id}/import`, {
+    request<{ documentId: string; report: unknown; note: string; warning: string | null }>(`/api/documents/${id}/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/html' },
       body: html,

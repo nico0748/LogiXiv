@@ -16,18 +16,40 @@ export interface TextChunk {
   h: number;
 }
 
-/** 文末とみなさない略語。ピリオドの後ろが大文字でも切らない。 */
+/**
+ * 文末とみなさない略語。**単語として完全一致**で照合する。
+ * 以前は「ピリオド直前 12 文字の endsWith」で見ていたため、'st' が best/test/first に、
+ * 'ms' が systems/terms/algorithms に当たって、学術英語の大半の文が結合していた。
+ */
 const ABBREVIATIONS = new Set([
-  'e.g', 'i.e', 'et al', 'cf', 'vs', 'fig', 'figs', 'eq', 'eqs', 'ref', 'refs',
-  'sec', 'tab', 'approx', 'no', 'vol', 'pp', 'ca', 'resp', 'dr', 'prof', 'mr', 'ms', 'mrs', 'st',
+  'e.g', 'i.e', 'al', 'cf', 'vs', 'fig', 'figs', 'eq', 'eqs', 'ref', 'refs',
+  'sec', 'secs', 'tab', 'tabs', 'approx', 'vol', 'vols', 'pp', 'ca', 'resp', 'est',
+  'dr', 'prof', 'mr', 'ms', 'mrs', 'st', 'inc', 'ltd', 'dept', 'univ', 'etc', 'ibid', 'vs',
+]);
+
+/** 直後に数字が続くときだけ略語として扱うもの（"No. 3" と "…is a no." を区別する）。 */
+const ABBREVIATIONS_BEFORE_NUMBER = new Set(['no', 'nos', 'p', 'pp', 'ch', 'chap', 'eq', 'fig', 'tab', 'sec', 'vol', 'art']);
+
+/**
+ * 「〜 X.」で終わる文を人名イニシャルと誤認しないための、直前に来る一般名詞。
+ * 論文では "we call this method X." "results are in group A." が普通に出る。
+ */
+const LABEL_HEADS = new Set([
+  'method', 'methods', 'model', 'models', 'group', 'groups', 'class', 'classes', 'case', 'cases',
+  'type', 'types', 'variant', 'variants', 'dataset', 'datasets', 'algorithm', 'algorithms',
+  'table', 'figure', 'appendix', 'section', 'condition', 'conditions', 'set', 'sets',
+  'strategy', 'strategies', 'setting', 'settings', 'task', 'tasks', 'baseline', 'baselines',
+  'system', 'systems', 'version', 'versions', 'option', 'options', 'scheme', 'schemes',
 ]);
 
 const TERMINATORS = new Set(['.', '!', '?', '。', '！', '？']);
 
 /**
  * 英語の学術文向けの文分割。
- * 「ピリオド＋空白＋大文字」を基本に、略語・小数・単一大文字イニシャル・
- * 閉じ括弧や引用符の後置きを例外として扱う。
+ *
+ * 方針として、迷ったときは**切る側**に倒してある。切りすぎは画面上ですぐ分かり、
+ * 将来の手動結合 UI で直せるが、切れなさすぎ（2 文が 1 枚のカードに同居する）は
+ * 対訳の 1 対 1 対応そのものを壊すため。
  */
 export function splitIntoSentences(text: string): string[] {
   const out: string[] = [];
@@ -43,8 +65,8 @@ export function splitIntoSentences(text: string): string[] {
     if (ch === '.' && !isSentenceEndingPeriod(text, i)) continue;
 
     const after = text.slice(end);
-    // 文末の後には空白が要る（"3.14" のような並びを切らない）。
-    if (after.length > 0 && !/^\s/.test(after) && !/^[。！？]/.test(ch)) continue;
+    // 欧文の文末には空白が要る（"3.14" のような並びを切らない）。CJK の終端記号は空白不要。
+    if (after.length > 0 && !/^\s/.test(after) && !/[。！？]/.test(ch)) continue;
 
     const candidate = text.slice(start, end).trim();
     if (candidate.length > 0) out.push(candidate);
@@ -56,25 +78,41 @@ export function splitIntoSentences(text: string): string[] {
   return out.filter((s) => /\p{L}/u.test(s));
 }
 
+/**
+ * index の直前にある「語」を取り出す（"e.g" のようにドットを含む形も拾う）。
+ * 直前の空白は読み飛ばす — "method X." の判定で "method" まで遡る必要があるため。
+ */
+function wordBefore(text: string, index: number): string {
+  const match = /([\p{L}\p{N}.]+)\s*$/u.exec(text.slice(Math.max(0, index - 32), index));
+  return (match?.[1] ?? '').toLowerCase();
+}
+
 function isSentenceEndingPeriod(text: string, index: number): boolean {
-  // 小数点・バージョン番号。
+  // 小数点・バージョン番号・省略記号。
   if (/\d/.test(text[index - 1] ?? '') && /\d/.test(text[index + 1] ?? '')) return false;
-  // 単一大文字のイニシャル ("J. Doe")。
-  const prev2 = text[index - 2] ?? ' ';
-  if (/[A-Z]/.test(text[index - 1] ?? '') && !/\p{L}/u.test(prev2)) return false;
-  // 略語。
-  const before = text.slice(Math.max(0, index - 12), index).toLowerCase();
-  for (const abbr of ABBREVIATIONS) {
-    if (before.endsWith(abbr)) return false;
+  if (text[index + 1] === '.' || text[index - 1] === '.') return false;
+
+  const word = wordBefore(text, index);
+
+  // 'al' が入っているので "et al." もここで止まる。
+  if (ABBREVIATIONS.has(word)) return false;
+  if (ABBREVIATIONS_BEFORE_NUMBER.has(word) && /^\s*\d/.test(text.slice(index + 1))) return false;
+
+  // 単一大文字。"J. Doe" のイニシャルか、"we call this method X." のラベルか。
+  if (/^[A-Z]$/.test(text[index - 1] ?? '') && !/\p{L}/u.test(text[index - 2] ?? ' ')) {
+    const head = wordBefore(text, index - 1);
+    if (LABEL_HEADS.has(head)) return true; // ラベルなので文末
+    // もう 1 つイニシャルが続く（"J. R. R.") か、直後が大文字始まりの語ならイニシャル扱い。
+    if (/^\s*(?:[A-Z]\.|\p{Lu}\p{Ll})/u.test(text.slice(index + 1))) return false;
   }
-  // 省略記号は 1 文の途中とみなす。
-  if (text[index + 1] === '.') return false;
-  if (text[index - 1] === '.') return false;
+
   return true;
 }
 
 interface Line {
   page: number;
+  /** 行の識別子。矩形をまとめる単位でもある。 */
+  index: number;
   chunks: TextChunk[];
   y: number;
 }
@@ -83,6 +121,7 @@ interface Line {
 function groupIntoLines(chunks: TextChunk[]): Line[] {
   const byPage = new Map<number, TextChunk[]>();
   for (const chunk of chunks) {
+    if (chunk.text.length === 0) continue;
     const list = byPage.get(chunk.page);
     if (list) list.push(chunk);
     else byPage.set(chunk.page, [chunk]);
@@ -97,7 +136,7 @@ function groupIntoLines(chunks: TextChunk[]): Line[] {
       if (current && Math.abs(item.y - current.y) <= tolerance) {
         current.chunks.push(item);
       } else {
-        current = { page, chunks: [item], y: item.y };
+        current = { page, index: lines.length, chunks: [item], y: item.y };
         lines.push(current);
       }
     }
@@ -106,13 +145,19 @@ function groupIntoLines(chunks: TextChunk[]): Line[] {
   return lines;
 }
 
-function mergeRects(chunks: TextChunk[]): Rect[] {
-  const byLine = new Map<string, TextChunk[]>();
-  for (const chunk of chunks) {
-    const key = `${chunk.page}:${Math.round(chunk.y)}`;
-    const list = byLine.get(key);
-    if (list) list.push(chunk);
-    else byLine.set(key, [chunk]);
+/**
+ * 矩形は行単位でまとめる。以前は `Math.round(y)` の一致で束ねていたため、
+ * 同じ行でも y が丸め境界をまたぐと矩形が 2 つに割れてハイライトが二重になっていた。
+ */
+function mergeRects(owners: { chunk: TextChunk; line: number }[]): Rect[] {
+  const byLine = new Map<number, TextChunk[]>();
+  for (const { chunk, line } of owners) {
+    const list = byLine.get(line);
+    if (list) {
+      if (!list.includes(chunk)) list.push(chunk);
+    } else {
+      byLine.set(line, [chunk]);
+    }
   }
   const rects: Rect[] = [];
   for (const list of byLine.values()) {
@@ -136,28 +181,65 @@ export interface FallbackResult {
 }
 
 /**
- * 文字片から文を組み立てる。行末ハイフネーションはここで結合する。
+ * 行末ハイフンを落として良いかの判断材料。
+ * 同じ文書の**行の途中**に "block-sparse" のような形で現れるハイフン付き複合語を集めておき、
+ * 行末で割れた語がそれに一致するならハイフンを残す。
+ * 辞書を持たずに "state-of-the-art" を守り、"informa-" + "tion" は結合できる。
+ */
+function collectInlineHyphenated(lines: Line[]): Set<string> {
+  const seen = new Set<string>();
+  for (const line of lines) {
+    const text = line.chunks.map((c) => c.text).join('');
+    for (const match of text.matchAll(/\p{L}+(?:-\p{L}+)+/gu)) {
+      seen.add(match[0].toLowerCase());
+    }
+  }
+  return seen;
+}
+
+/**
+ * 文字片から文を組み立てる。
  * 見出しは検出しないので sections は常に空（GROBID 経路との差が UI で分かるようにする）。
  */
 export function buildSentencesFromChunks(chunks: TextChunk[], _pages: PageSize[]): FallbackResult {
   const lines = groupIntoLines(chunks);
+  const inlineHyphenated = collectInlineHyphenated(lines);
 
-  // 行を連結しつつ、連結後の文字位置 → 文字片 の対応表を作る。
+  // 行を連結しつつ、連結後の文字位置 → （文字片, 行）の対応表を作る。
   let buffer = '';
-  const owners: TextChunk[] = [];
+  const owners: { chunk: TextChunk; line: number }[] = [];
+
+  const push = (text: string, chunk: TextChunk, line: number): void => {
+    buffer += text;
+    for (let k = 0; k < text.length; k++) owners.push({ chunk, line });
+  };
+
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li]!;
     for (const chunk of line.chunks) {
-      const text = chunk.text;
-      for (let k = 0; k < text.length; k++) owners.push(chunk);
-      buffer += text;
-      if (!text.endsWith(' ')) {
-        buffer += ' ';
-        owners.push(chunk);
-      }
+      if (chunk.text.length === 0) continue;
+      push(chunk.text, chunk, line.index);
+      if (!chunk.text.endsWith(' ')) push(' ', chunk, line.index);
     }
-    // 行末ハイフンは次の行と直結する。
-    if (/-\s$/.test(buffer)) {
+
+    // 行末ハイフンの処理。次の行の先頭が英字のときだけ結合を検討する。
+    const nextLine = lines[li + 1];
+    if (!nextLine || nextLine.page !== line.page) continue;
+    // ハイフンを含む語全体を取る。"state-of-the-" の末尾から "the" だけを見ると、
+    // 文書内の用例 "state-of-the-art" と照合できない。
+    const hyphen = /((?:\p{L}+-)*\p{L}+)-\s$/u.exec(buffer);
+    if (!hyphen) continue;
+    const nextText = nextLine.chunks.map((c) => c.text).join('').trimStart();
+    const nextWord = /^(\p{L}+)/u.exec(nextText)?.[1];
+    if (!nextWord) continue;
+
+    const joined = `${hyphen[1]!}-${nextWord}`.toLowerCase();
+    if (inlineHyphenated.has(joined)) {
+      // 本来ハイフンを含む複合語。ハイフンを残したまま行を直結する（空白だけ落とす）。
+      buffer = buffer.slice(0, -1);
+      owners.length = buffer.length;
+    } else {
+      // 真のハイフネーション。ハイフンごと落とす。
       const cut = buffer.lastIndexOf('-');
       buffer = buffer.slice(0, cut);
       owners.length = cut;
@@ -173,7 +255,7 @@ export function buildSentencesFromChunks(chunks: TextChunk[], _pages: PageSize[]
     const to = from + raw.length;
     cursor = to;
 
-    const covered = [...new Set(owners.slice(from, to))];
+    const covered = owners.slice(from, to);
     const hash = sentenceHash(raw);
     const occurrence = occurrences.get(hash) ?? 0;
     occurrences.set(hash, occurrence + 1);
@@ -181,7 +263,7 @@ export function buildSentencesFromChunks(chunks: TextChunk[], _pages: PageSize[]
       id: sentenceId(hash, occurrence),
       hash,
       order: sentences.length,
-      page: covered[0]?.page ?? 1,
+      page: covered[0]?.chunk.page ?? 1,
       text: raw,
       rects: mergeRects(covered),
       sectionId: null,

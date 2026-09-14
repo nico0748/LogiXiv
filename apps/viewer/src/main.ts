@@ -1,5 +1,5 @@
 import './style.css';
-import type { ExportPayload, Note, Sentence } from './types.ts';
+import type { ExportPayload, Note, Section, Sentence } from './types.ts';
 import { base64ToBytes, loadPdf, renderPage } from './pdf.ts';
 
 /**
@@ -11,6 +11,7 @@ import { base64ToBytes, loadPdf, renderPage } from './pdf.ts';
  */
 
 const DATA_ELEMENT_ID = 'logixiv-data';
+const RESIZE_DEBOUNCE_MS = 300;
 
 function readPayload(): ExportPayload | null {
   const element = document.getElementById(DATA_ELEMENT_ID);
@@ -44,7 +45,7 @@ function boot(): void {
 
   const { document: paper, pdfBase64 } = payload;
   const sentences = paper.structure.sentences;
-  const sectionTitles = new Map(paper.structure.sections.map((s) => [s.id, s.title]));
+  const sectionTitles = new Map(paper.structure.sections.map((s: Section) => [s.id, s.title]));
   const notesByHash = new Map<string, Note[]>();
   for (const note of paper.annotations.notes) {
     const list = notesByHash.get(note.sentenceHash);
@@ -60,6 +61,7 @@ function boot(): void {
   const search = el('input', 'lxv-search');
   search.type = 'search';
   search.placeholder = '原文・訳文・メモを検索';
+  search.setAttribute('aria-label', '文書内検索');
   const meta = el(
     'span',
     'lxv-meta',
@@ -69,25 +71,41 @@ function boot(): void {
 
   const pdfColumn = el('main', 'lxv-pdf');
   const sidebar = el('aside', 'lxv-sidebar');
+  const emptyMessage = el('p', 'lxv-empty', '一致する文がありません。');
+  emptyMessage.hidden = true;
   layout.append(header, pdfColumn, sidebar);
   root.append(layout);
 
   // --- サイドバー（1 文 = 1 カード）---------------------------------------
   const cards = new Map<string, HTMLElement>();
+  /** 見出しと、その見出しに属するカード。0 件になったら見出しごと隠す。 */
+  const groups: { heading: HTMLElement | null; cards: HTMLElement[] }[] = [];
+  let currentGroup: { heading: HTMLElement | null; cards: HTMLElement[] } = { heading: null, cards: [] };
+  groups.push(currentGroup);
+
   let lastSection: string | null | undefined;
+  sidebar.append(emptyMessage);
   for (const sentence of sentences) {
     if (sentence.sectionId !== lastSection) {
       lastSection = sentence.sectionId;
       const heading = lastSection ? sectionTitles.get(lastSection) : null;
-      if (heading) sidebar.append(el('h2', 'lxv-section', heading));
+      if (heading) {
+        const element = el('h2', 'lxv-section', heading);
+        sidebar.append(element);
+        currentGroup = { heading: element, cards: [] };
+        groups.push(currentGroup);
+      }
     }
-    sidebar.append(buildCard(sentence));
+    const card = buildCard(sentence);
+    currentGroup.cards.push(card);
+    sidebar.append(card);
   }
 
   function buildCard(sentence: Sentence): HTMLElement {
     const card = el('article', 'lxv-card');
     card.dataset['id'] = sentence.id;
     card.tabIndex = 0;
+    card.setAttribute('role', 'button');
 
     const translation = paper.annotations.translations[sentence.hash];
     if (translation) {
@@ -107,7 +125,10 @@ function boot(): void {
 
     card.addEventListener('click', () => select(sentence.id, 'sidebar'));
     card.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') select(sentence.id, 'sidebar');
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        select(sentence.id, 'sidebar');
+      }
     });
     cards.set(sentence.id, card);
     return card;
@@ -116,6 +137,8 @@ function boot(): void {
   // --- PDF とマーカー -----------------------------------------------------
   const markers = new Map<string, HTMLElement[]>();
   let selectedId: string | null = null;
+  /** 検索で絞り込んだ結果。null なら絞り込みなし。 */
+  let visibleIds: Set<string> | null = null;
 
   function select(id: string, origin: 'pdf' | 'sidebar'): void {
     if (selectedId) {
@@ -131,8 +154,12 @@ function boot(): void {
     else markers.get(id)?.[0]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
 
+  let renderToken = 0;
+
   async function renderPdf(): Promise<void> {
+    const token = ++renderToken;
     pdfColumn.textContent = '';
+    markers.clear();
     const status = el('p', 'lxv-status', 'PDF を読み込んでいます…');
     pdfColumn.append(status);
 
@@ -143,32 +170,40 @@ function boot(): void {
       status.textContent = `PDF を開けませんでした: ${error instanceof Error ? error.message : String(error)}`;
       return;
     }
+    if (token !== renderToken) return;
     status.remove();
 
-    const cssWidth = Math.max(320, Math.min(pdfColumn.clientWidth - 32, 900));
-    const byPage = new Map<number, Sentence[]>();
+    const cssWidth = Math.max(320, Math.min(pdfColumn.clientWidth - 32, 1400));
+    const byPage = new Map<number, Set<Sentence>>();
     for (const sentence of sentences) {
       for (const rect of sentence.rects) {
         const list = byPage.get(rect.page);
-        if (list) list.push(sentence);
-        else byPage.set(rect.page, [sentence]);
+        if (list) list.add(sentence);
+        else byPage.set(rect.page, new Set([sentence]));
       }
     }
 
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
       const rendered = await renderPage(pdf, pageNumber, cssWidth);
+      if (token !== renderToken) return;
       const overlay = el('div', 'lxv-overlay');
-      for (const sentence of new Set(byPage.get(pageNumber) ?? [])) {
+      for (const sentence of byPage.get(pageNumber) ?? []) {
         for (const rect of sentence.rects) {
           if (rect.page !== pageNumber) continue;
           const marker = el('button', 'lxv-marker');
           marker.type = 'button';
+          // 文書全体で数千個になるのでタブ順から外す。操作はサイドバーに一本化する。
+          marker.tabIndex = -1;
+          marker.setAttribute('aria-hidden', 'true');
           marker.style.left = `${rect.x * rendered.scale}px`;
           marker.style.top = `${rect.y * rendered.scale}px`;
           marker.style.width = `${rect.w * rendered.scale}px`;
           marker.style.height = `${rect.h * rendered.scale}px`;
-          marker.title = sentence.text.slice(0, 120);
+          marker.title = sentence.text;
           if (paper.annotations.translations[sentence.hash]) marker.classList.add('is-translated');
+          // 描画前に選ばれていた文・絞り込み済みの文の状態をここで反映する。
+          if (sentence.id === selectedId) marker.classList.add('is-active');
+          if (visibleIds !== null && !visibleIds.has(sentence.id)) marker.classList.add('is-filtered-out');
           marker.addEventListener('click', () => select(sentence.id, 'pdf'));
           overlay.append(marker);
           const list = markers.get(sentence.id);
@@ -182,15 +217,21 @@ function boot(): void {
   }
 
   // --- 検索 ---------------------------------------------------------------
-  search.addEventListener('input', () => {
+  function applyFilter(): void {
     const needle = search.value.trim().toLowerCase();
+    if (needle.length === 0) {
+      visibleIds = null;
+      for (const card of cards.values()) card.hidden = false;
+      for (const group of groups) if (group.heading) group.heading.hidden = false;
+      for (const list of markers.values()) for (const marker of list) marker.classList.remove('is-filtered-out');
+      emptyMessage.hidden = true;
+      return;
+    }
+
+    visibleIds = new Set<string>();
     for (const sentence of sentences) {
       const card = cards.get(sentence.id);
       if (!card) continue;
-      if (needle.length === 0) {
-        card.hidden = false;
-        continue;
-      }
       const haystack = [
         sentence.text,
         paper.annotations.translations[sentence.hash]?.text ?? '',
@@ -198,10 +239,39 @@ function boot(): void {
       ]
         .join(' ')
         .toLowerCase();
-      card.hidden = !haystack.includes(needle);
+      const matched = haystack.includes(needle);
+      card.hidden = !matched;
+      if (matched) visibleIds.add(sentence.id);
     }
+
+    // 配下が全部消えた見出しは一緒に隠す（見出しだけが宙に浮くのを防ぐ）。
+    for (const group of groups) {
+      if (!group.heading) continue;
+      group.heading.hidden = group.cards.every((card) => card.hidden);
+    }
+
+    for (const [id, list] of markers) {
+      for (const marker of list) marker.classList.toggle('is-filtered-out', !visibleIds.has(id));
+    }
+    emptyMessage.hidden = visibleIds.size > 0;
+  }
+
+  search.addEventListener('input', applyFilter);
+
+  // 幅が変わったら描き直す（描画幅を起動時に固定するとページがはみ出したままになる）。
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastWidth = 0;
+  window.addEventListener('resize', () => {
+    const width = pdfColumn.clientWidth;
+    if (Math.abs(width - lastWidth) < 24) return;
+    lastWidth = width;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      void renderPdf().then(applyFilter);
+    }, RESIZE_DEBOUNCE_MS);
   });
 
+  lastWidth = pdfColumn.clientWidth;
   void renderPdf();
 }
 

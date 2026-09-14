@@ -72,10 +72,12 @@
 .lxv-pdf {
   overflow: auto;
   padding: 1rem;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1rem;
+  /* flex + align-items:center はページがペインより広いとき左端に到達できなくなる。 */
+  display: block;
+}
+
+.lxv-page + .lxv-page {
+  margin-top: 1rem;
 }
 
 .lxv-status {
@@ -84,6 +86,7 @@
 
 .lxv-page {
   position: relative;
+  margin-inline: auto;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
   background: #fff;
 }
@@ -114,6 +117,17 @@
 .lxv-marker.is-active {
   background: rgba(245, 158, 11, 0.35);
   outline: 1px solid rgba(245, 158, 11, 0.9);
+}
+
+.lxv-marker.is-filtered-out {
+  background: transparent;
+  pointer-events: none;
+  opacity: 0.25;
+}
+
+.lxv-empty {
+  padding: 1.5rem 0;
+  color: var(--lxv-muted);
 }
 
 .lxv-sidebar {

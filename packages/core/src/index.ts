@@ -5,6 +5,8 @@ export * from './tei.ts';
 export * from './sentences.ts';
 export * from './document.ts';
 export * from './merge.ts';
+export * from './migrate.ts';
+export * from './validate.ts';
 export * from './escape.ts';
 export * from './export.ts';
 export * from './import.ts';

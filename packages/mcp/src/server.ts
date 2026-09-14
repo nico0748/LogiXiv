@@ -1,26 +1,31 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { progress, type PaperDocument, type Sentence } from '@logixiv/core';
+import { LOGIXIV_VERSION, progress, type PaperDocument, type Sentence } from '@logixiv/core';
 import { LogiXivClient } from './client.ts';
 
 /**
  * Claude から LogiXiv を触るための MCP サーバー。
  *
- * 設計方針は 2 つ。
+ * 設計方針は 3 つ。
+ *
  * 1. 文の指定は必ず sentenceHash で行う。順番や ID ではなく本文由来の値なので、
  *    再解析をまたいでも Claude の指した文がずれない。
- * 2. 文脈をまとめて渡し、訳もまとめて受け取る。1 文ずつ往復すると
- *    前後関係を見ずに訳すことになり、代名詞と時制がすぐ壊れる。
+ *
+ * 2. 文脈は「連続した平文の並び」で渡す。文ごとに前後 2 文を複製していた頃は、
+ *    受信バイトの 88% が重複テキストで、原文はわずか 12% だった（264 文の論文で 210KB）。
+ *    範囲 + そのうちの未訳リスト、という形なら情報量を保ったまま 1/4 以下になる。
+ *
+ * 3. 書き込みの結果は機械可読な JSON で返す。「人手修正済み（＝放置してよい）」と
+ *    「該当する文が無い（＝hash を取り直すべき）」は必要な対応が正反対なので、
+ *    人間向けの文章に混ぜない。
  */
-
-const TOOL_COUNT = 9;
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
 function jsonResult(value: unknown) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] };
+  return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
 }
 
 function errorResult(error: unknown) {
@@ -30,34 +35,47 @@ function errorResult(error: unknown) {
   };
 }
 
+/** 解析方式によって取れないものがあることを、その場で伝える。 */
+function fallbackCaveat(document: PaperDocument): string | undefined {
+  if (document.structure.parser === 'grobid') return undefined;
+  return 'この文書は簡易解析（pdf.js）で取り込まれています。節が取れず、参考文献・ページ番号・数式の断片が本文に混ざることがあります。GROBID を起動して reparse_document すると改善します。';
+}
+
 function sentenceView(document: PaperDocument, sentence: Sentence) {
   const translation = document.annotations.translations[sentence.hash];
   const notes = document.annotations.notes
     .filter((note) => note.sentenceHash === sentence.hash)
     .map((note) => note.body);
-  return {
-    sentenceHash: sentence.hash,
+  const view: Record<string, unknown> = {
+    hash: sentence.hash,
     order: sentence.order,
     page: sentence.page,
-    section: document.structure.sections.find((s) => s.id === sentence.sectionId)?.title ?? null,
     source: sentence.text,
-    translation: translation?.text ?? null,
-    revisedByHuman: translation?.revisedByHuman ?? false,
-    notes,
   };
+  // 常に同じ値・常に空のフィールドは落とす。Claude が読むトークンをそのぶん節約する。
+  const section = document.structure.sections.find((s) => s.id === sentence.sectionId)?.title;
+  if (section) view['section'] = section;
+  if (translation) {
+    view['translation'] = translation.text;
+    if (translation.revisedByHuman) view['revisedByHuman'] = true;
+  }
+  if (notes.length > 0) view['notes'] = notes;
+  return view;
 }
 
 export function createMcpServer(baseUrl: string): McpServer {
   const client = new LogiXivClient(baseUrl);
   const server = new McpServer(
-    { name: 'logixiv', version: '0.1.0' },
+    { name: 'logixiv', version: LOGIXIV_VERSION },
     {
       instructions:
         'LogiXiv は論文 PDF を 1 文単位で読むためのローカルツールです。' +
-        'まず list_documents で対象を選び、get_untranslated_sentences で未訳の文を前後の文脈込みで受け取り、' +
+        'まず list_documents で対象を選び、get_translation_batch で未訳の文を前後の文脈ごと受け取り、' +
         'set_translations でまとめて書き戻してください。' +
         '訳しにくい箇所は勝手に意訳せず add_note に判断を残すのが望ましい運用です。' +
-        '人手修正済み (revisedByHuman) の訳は上書きされません。',
+        '人手修正済み (revisedByHuman) の訳は上書きされません。' +
+        '訳す対象でない文（参考文献・ページ番号・数式の断片など）に当たったら、' +
+        'get_translation_batch の from を進めて飛ばしてください。',
     },
   );
 
@@ -65,16 +83,30 @@ export function createMcpServer(baseUrl: string): McpServer {
     'list_documents',
     {
       title: '文書一覧',
-      description: 'LogiXiv に取り込まれている論文の一覧と翻訳の進捗を返す。まずこれを呼んで document_id を決める。',
+      description:
+        'LogiXiv に取り込まれている論文の一覧と翻訳の進捗、本体の状態（GROBID の生死を含む）を返す。' +
+        'まずこれを呼んで document_id を決める。',
       inputSchema: {},
     },
     async () => {
       try {
-        const { documents } = await client.listDocuments();
+        const [{ documents }, health] = await Promise.all([
+          client.listDocuments(),
+          client.health().catch(() => null),
+        ]);
         if (documents.length === 0) {
-          return textResult('取り込み済みの論文がありません。LogiXiv の画面から PDF を追加してください。');
+          return textResult(
+            '取り込み済みの論文がありません。LogiXiv の画面（既定では http://127.0.0.1:4173）を開いて PDF をドラッグしてください。' +
+              (health?.grobid === 'down'
+                ? '\nGROBID が未接続です。精度の高い文分割には docker compose -f docker/grobid.yml up -d を先に実行してください。'
+                : ''),
+          );
         }
-        return jsonResult(documents);
+        return jsonResult({
+          documents,
+          grobid: health?.grobid ?? 'unknown',
+          hint: health?.grobid === 'down' ? 'GROBID 未接続。簡易解析の文書は節が取れません。' : undefined,
+        });
       } catch (error) {
         return errorResult(error);
       }
@@ -86,7 +118,7 @@ export function createMcpServer(baseUrl: string): McpServer {
     {
       title: '文書の概要',
       description:
-        '論文のタイトル・節構成・ページ数・解析方式・翻訳の進捗を返す。全文を読み込まずに構造だけ把握したいときに使う。',
+        '論文のタイトル・節構成・ページ数・解析方式・用語集・翻訳の進捗を返す。全文を読み込まずに構造だけ把握したいときに使う。',
       inputSchema: { document_id: z.string().describe('list_documents が返した id') },
     },
     async ({ document_id }) => {
@@ -98,6 +130,7 @@ export function createMcpServer(baseUrl: string): McpServer {
           title: document.title,
           parser: document.structure.parser,
           parserNote: document.structure.parserNote,
+          caveat: fallbackCaveat(document),
           pages: document.structure.pageSizes.length,
           sentences: document.structure.sentences.length,
           translated: stats.translated,
@@ -106,6 +139,7 @@ export function createMcpServer(baseUrl: string): McpServer {
           sections: document.structure.sections.map((section) => ({
             id: section.id,
             title: section.title,
+            firstOrder: document.structure.sentences.find((s) => s.sectionId === section.id)?.order ?? null,
             sentences: document.structure.sentences.filter((s) => s.sectionId === section.id).length,
           })),
           glossary: document.annotations.glossary,
@@ -121,10 +155,11 @@ export function createMcpServer(baseUrl: string): McpServer {
     {
       title: '文を取得',
       description:
-        '文を範囲指定で取得する。原文・既存訳・メモが 1 件ずつ揃って返るので、訳の見直しや前後関係の確認に使う。',
+        '文を範囲指定で取得する。原文・既存訳・メモが揃って返るので、訳の見直しや前後関係の確認に使う。' +
+        'from は**文の通し番号 (order)** で、節やページで絞っても意味は変わらない。',
       inputSchema: {
         document_id: z.string(),
-        from: z.number().int().min(0).default(0).describe('開始位置（文の通し番号、0 始まり）'),
+        from: z.number().int().min(0).default(0).describe('開始する文の通し番号 (order)。0 始まり'),
         limit: z.number().int().min(1).max(200).default(40),
         section_id: z.string().optional().describe('指定するとその節だけに絞る'),
         page: z.number().int().min(1).optional().describe('指定するとそのページだけに絞る'),
@@ -134,12 +169,28 @@ export function createMcpServer(baseUrl: string): McpServer {
       try {
         const document = await client.getDocument(document_id);
         let sentences = document.structure.sentences;
-        if (section_id) sentences = sentences.filter((s) => s.sectionId === section_id);
+        if (section_id) {
+          const known = document.structure.sections.some((s) => s.id === section_id);
+          if (!known) {
+            return textResult(
+              `節 ${section_id} はこの文書にありません。${
+                document.structure.sections.length === 0
+                  ? (fallbackCaveat(document) ?? '節が 1 つも検出されていません。')
+                  : `使える節: ${document.structure.sections.map((s) => s.id).join(', ')}`
+              }`,
+            );
+          }
+          sentences = sentences.filter((s) => s.sectionId === section_id);
+        }
         if (page !== undefined) sentences = sentences.filter((s) => s.page === page);
-        const slice = sentences.slice(from, from + limit);
+
+        // from は order。フィルタ後の添字ではない。
+        const slice = sentences.filter((s) => s.order >= from).slice(0, limit);
+        const last = slice[slice.length - 1];
         return jsonResult({
-          total: sentences.length,
+          matched: sentences.length,
           returned: slice.length,
+          nextFrom: last && sentences.some((s) => s.order > last.order) ? last.order + 1 : null,
           sentences: slice.map((sentence) => sentenceView(document, sentence)),
         });
       } catch (error) {
@@ -149,34 +200,49 @@ export function createMcpServer(baseUrl: string): McpServer {
   );
 
   server.registerTool(
-    'get_untranslated_sentences',
+    'get_translation_batch',
     {
-      title: '未訳の文を取得',
+      title: '翻訳する範囲を取得',
       description:
-        'まだ訳が付いていない文を原文の順に返す。context_before / context_after で前後の文も付くので、' +
-        '代名詞や時制を前の文に合わせて訳せる。翻訳作業はこのツールから始めるのが基本。',
+        '翻訳作業の入口。指定位置以降の連続した文を平文の配列で返し、そのうち未訳のものを別に列挙する。' +
+        '文脈は配列そのもの（重複が無い）ので、前後関係を見ながら訳せる。' +
+        '訳す対象でない文に当たったら、返ってきた nextFrom を from に入れて呼び直せば飛ばせる。',
       inputSchema: {
         document_id: z.string(),
-        limit: z.number().int().min(1).max(60).default(20),
-        context: z.number().int().min(0).max(5).default(2).describe('前後に付ける文脈の文数'),
+        from: z.number().int().min(0).default(0).describe('開始する文の通し番号 (order)'),
+        limit: z.number().int().min(1).max(120).default(40).describe('返す文の総数（未訳・既訳の両方を含む）'),
       },
     },
-    async ({ document_id, limit, context }) => {
+    async ({ document_id, from, limit }) => {
       try {
         const document = await client.getDocument(document_id);
         const all = document.structure.sentences;
-        const targets = all.filter((s) => !document.annotations.translations[s.hash]).slice(0, limit);
-        if (targets.length === 0) {
-          return textResult('未訳の文はありません。');
+        const window = all.filter((s) => s.order >= from).slice(0, limit);
+        const remaining = all.filter((s) => !document.annotations.translations[s.hash]).length;
+
+        if (window.length === 0) {
+          return textResult(
+            remaining === 0
+              ? '未訳の文はありません。翻訳は完了しています。'
+              : `order ${from} 以降に文がありません。未訳は残り ${remaining} 文なので、from を 0 に戻して未訳の位置を確認してください。`,
+          );
         }
+
+        const last = window[window.length - 1]!;
         return jsonResult({
-          glossary: document.annotations.glossary,
-          remaining: all.filter((s) => !document.annotations.translations[s.hash]).length,
-          sentences: targets.map((sentence) => ({
-            ...sentenceView(document, sentence),
-            context_before: all.slice(Math.max(0, sentence.order - context), sentence.order).map((s) => s.text),
-            context_after: all.slice(sentence.order + 1, sentence.order + 1 + context).map((s) => s.text),
-          })),
+          caveat: fallbackCaveat(document),
+          glossary: document.annotations.glossary.length > 0 ? document.annotations.glossary : undefined,
+          remainingUntranslated: remaining,
+          nextFrom: all.some((s) => s.order > last.order) ? last.order + 1 : null,
+          // 連続する本文。文脈はこの並びそのもの。
+          window: window.map((sentence) => {
+            const translation = document.annotations.translations[sentence.hash];
+            return translation ? [sentence.order, sentence.text, translation.text] : [sentence.order, sentence.text];
+          }),
+          // 訳を書き戻す対象。order と hash の対応表。
+          untranslated: window
+            .filter((s) => !document.annotations.translations[s.hash])
+            .map((s) => [s.order, s.hash]),
         });
       } catch (error) {
         return errorResult(error);
@@ -189,14 +255,15 @@ export function createMcpServer(baseUrl: string): McpServer {
     {
       title: '訳を書き込む',
       description:
-        '訳をまとめて書き込む。sentenceHash で文を指定する。' +
-        '人手修正済みの訳は上書きされず、その旨が skipped に返る（これは失敗ではない）。',
+        '訳をまとめて書き込む。sentenceHash で文を指定する。結果は JSON で返る。' +
+        'skipped の code が revised_by_human なら対応不要（人手修正済みなので上書きしない仕様）、' +
+        'unknown_hash なら hash が間違っているので取り直すこと。',
       inputSchema: {
         document_id: z.string(),
         translations: z
           .array(
             z.object({
-              sentenceHash: z.string().describe('get_untranslated_sentences などが返した値をそのまま使う'),
+              sentenceHash: z.string().describe('get_translation_batch の untranslated が返した hash'),
               text: z.string().describe('日本語訳'),
             }),
           )
@@ -207,14 +274,16 @@ export function createMcpServer(baseUrl: string): McpServer {
     async ({ document_id, translations }) => {
       try {
         const result = await client.setTranslations(document_id, translations);
-        const lines = [`${result.applied} 件の訳を書き込みました。`];
-        if (result.skipped.length > 0) {
-          lines.push(`${result.skipped.length} 件は書き込みませんでした:`);
-          for (const skipped of result.skipped.slice(0, 10)) {
-            lines.push(`  ${skipped.sentenceHash}: ${skipped.reason}`);
-          }
-        }
-        return textResult(lines.join('\n'));
+        const unknown = result.skipped.filter((s) => s.code === 'unknown_hash');
+        return jsonResult({
+          applied: result.applied,
+          // 打ち切らない。100 件上限なので全件出しても小さい。
+          skipped: result.skipped,
+          hint:
+            unknown.length > 0
+              ? `${unknown.length} 件の hash がこの文書にありません。get_translation_batch を呼び直して hash を取り直してください。`
+              : undefined,
+        });
       } catch (error) {
         return errorResult(error);
       }
@@ -227,7 +296,7 @@ export function createMcpServer(baseUrl: string): McpServer {
       title: 'メモを残す',
       description:
         '文にメモを付ける。訳語の選択理由、原文の曖昧さ、他の論文との関係など、訳文に押し込めない判断を残す場所。' +
-        'メモは他人の書き出しを取り込んでも消えない。',
+        'メモは他人の書き出しを取り込んでも消えない。存在しない hash は拒否される。',
       inputSchema: {
         document_id: z.string(),
         sentence_hash: z.string(),
@@ -238,6 +307,9 @@ export function createMcpServer(baseUrl: string): McpServer {
     async ({ document_id, sentence_hash, body, author }) => {
       try {
         const note = await client.addNote(document_id, sentence_hash, body, author ?? 'claude');
+        if (!note.applied) {
+          return errorResult(new Error(`メモを追加できませんでした: ${note.reason ?? '不明'}`));
+        }
         return textResult(`メモを追加しました (${note.id})`);
       } catch (error) {
         return errorResult(error);
@@ -249,14 +321,16 @@ export function createMcpServer(baseUrl: string): McpServer {
     'search_document',
     {
       title: '文書内検索',
-      description: '原文・訳文・メモを横断して検索する。訳語の揺れを探すときに使う。',
+      description:
+        '原文・訳文・メモを横断して検索する。ヒットには訳文とメモも入るので、' +
+        '訳語の揺れをこのツールだけで確認できる。直したい文の hash もそのまま返る。',
       inputSchema: { document_id: z.string(), query: z.string().min(1) },
     },
     async ({ document_id, query }) => {
       try {
         const { hits } = await client.search(document_id, query);
         if (hits.length === 0) return textResult(`「${query}」に一致する箇所はありませんでした。`);
-        return jsonResult(hits);
+        return jsonResult({ hits });
       } catch (error) {
         return errorResult(error);
       }
@@ -264,12 +338,13 @@ export function createMcpServer(baseUrl: string): McpServer {
   );
 
   server.registerTool(
-    'set_glossary',
+    'update_glossary',
     {
       title: '用語集を更新',
       description:
-        '訳語の対応表を置き換える。以後の翻訳ではここに載っている訳語を優先すること。' +
-        '既存の訳文は自動では書き換わらないので、必要なら search_document で探して set_translations で直す。',
+        '訳語の対応表を更新する。既定は追記（既存の語は消さない）。mode に replace を渡したときだけ全置換になる。' +
+        '以後の翻訳ではここに載っている訳語を優先すること。既存の訳文は自動では書き換わらないので、' +
+        '必要なら search_document で探して set_translations で直す。',
       inputSchema: {
         document_id: z.string(),
         entries: z
@@ -281,12 +356,20 @@ export function createMcpServer(baseUrl: string): McpServer {
             }),
           )
           .max(500),
+        mode: z
+          .enum(['append', 'replace'])
+          .default('append')
+          .describe('append は追記（既定）。replace は既存の用語集を全部消して置き換える'),
       },
     },
-    async ({ document_id, entries }) => {
+    async ({ document_id, entries, mode }) => {
       try {
-        await client.setGlossary(document_id, entries);
-        return textResult(`用語集を ${entries.length} 件で更新しました。`);
+        if (mode === 'replace') {
+          const result = await client.replaceGlossary(document_id, entries);
+          return textResult(`用語集を ${result.total} 件で置き換えました（既存の内容は消えました）。`);
+        }
+        const result = await client.addGlossaryEntries(document_id, entries);
+        return textResult(`用語集に ${result.added} 件追加しました（合計 ${result.total} 件）。`);
       } catch (error) {
         return errorResult(error);
       }
@@ -298,7 +381,7 @@ export function createMcpServer(baseUrl: string): McpServer {
     {
       title: '再解析',
       description:
-        '同じ PDF を解析し直して文の区切りと座標を作り直す。訳とメモは本文のハッシュで再結合されるので消えない。' +
+        '同じ PDF を解析し直して文の区切りと座標を作り直す。訳とメモは本文のハッシュで再結合されるので基本的に消えない。' +
         'GROBID を後から立ち上げたときや、文の分割がおかしいときに使う。',
       inputSchema: {
         document_id: z.string(),
@@ -308,10 +391,15 @@ export function createMcpServer(baseUrl: string): McpServer {
     async ({ document_id, parser }) => {
       try {
         const result = await client.reparse(document_id, parser);
-        const lines = [`再解析しました。訳の再結合 ${result.rebound} 件、対応が見つからなかった注釈 ${result.orphaned} 件。`];
+        const lines = [
+          `再解析しました。訳の再結合 ${result.rebound} 件、対応が見つからなかった注釈 ${result.orphaned} 件。`,
+        ];
         if (result.warning) lines.push(result.warning);
         if (result.orphaned > 0) {
-          lines.push('対応が見つからなかった注釈も削除はされていません。文の区切りが変わった可能性があります。');
+          lines.push(
+            '対応が見つからなかった注釈も削除はされていません。文の区切りが変わった可能性があるので、' +
+              'get_document_outline で文数を確認してください。',
+          );
         }
         return textResult(lines.join('\n'));
       } catch (error) {
@@ -340,16 +428,19 @@ export function createMcpServer(baseUrl: string): McpServer {
               `LogiXiv の文書 ${document_id} を翻訳してください。${field ? `分野は「${field}」です。` : ''}`,
               '',
               '手順:',
-              '1. get_document_outline で節構成と用語集を確認する。',
-              '2. get_untranslated_sentences を context=2 で呼び、前後の文を見ながら訳す。',
-              '3. set_translations でまとめて書き戻す。2 と 3 を未訳が無くなるまで繰り返す。',
+              '1. get_document_outline で節構成・解析方式・用語集を確認する。',
+              '2. get_translation_batch を from=0 で呼ぶ。window が連続した本文、untranslated が訳すべき文の [order, hash]。',
+              '3. 訳を set_translations でまとめて書き戻す。',
+              '4. 返ってきた nextFrom を from に入れて 2 に戻る。nextFrom が null になったら終わり。',
               '',
               '訳し方の方針:',
               '- 1 文は 1 文として訳す。読みやすさのために 2 文に割ったり、隣の文と混ぜたりしない（画面上で原文と 1 対 1 に並ぶため）。',
-              '- 専門用語は用語集に従う。用語集に無い重要語を決めたら set_glossary に足してから続ける。',
+              '- 専門用語は用語集に従う。用語集に無い重要語を決めたら update_glossary に足してから続ける（既定は追記なので既存の判断は消えない）。',
               '- 数式・記号・変数名・引用番号は原文のまま残す。',
               '- 原文が曖昧で複数に読める箇所は、片方を選んで訳し切ったうえで add_note に「なぜそちらを選んだか」を書く。',
               '- 訳が確定できない箇所を、それらしい日本語で埋めない。分からないことは add_note に書く。',
+              '- 参考文献の断片・ページ番号・数式だけの行など、訳す対象でないものは訳さずに飛ばす（from を進める）。',
+              '  簡易解析の文書ではこれらが本文に混ざる。無理に日本語を当てない。',
             ].join('\n'),
           },
         },
@@ -360,4 +451,15 @@ export function createMcpServer(baseUrl: string): McpServer {
   return server;
 }
 
-export { TOOL_COUNT };
+/** e2e が実際のツール数と突き合わせるための定数。ここを増やしたらツールも増やすこと。 */
+export const TOOL_NAMES = [
+  'list_documents',
+  'get_document_outline',
+  'get_sentences',
+  'get_translation_batch',
+  'set_translations',
+  'add_note',
+  'search_document',
+  'update_glossary',
+  'reparse_document',
+] as const;
