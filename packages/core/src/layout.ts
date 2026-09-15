@@ -469,6 +469,35 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
   const columnWidth = new Map<string, number>();
   for (const [key, widths] of widthsByColumn) columnWidth.set(key, percentile(widths, 0.1));
 
+  // 段ごとの代表的な右端。幅と同じ理由で最大値は使わない（全幅の 1 行に引きずられる）。
+  const rightsByColumn = new Map<string, number[]>();
+  for (const line of lines) {
+    const key = `${line.page}:${line.column}`;
+    const list = rightsByColumn.get(key);
+    if (list) list.push(line.right);
+    else rightsByColumn.set(key, [line.right]);
+  }
+  const columnRight = new Map<string, number>();
+  for (const [key, rights] of rightsByColumn) columnRight.set(key, percentile(rights, 0.05));
+
+  /**
+   * その行が段の右端まで届いているか。
+   *
+   * 届いている＝組版の都合で折り返しただけで、段落はまだ続いている。
+   * 届いていない＝段落の最終行。欧文の組版では、段落の最後の行だけが右を余らせる
+   * （TeX の \parfillskip）ので、文末記号より信用できる手掛かりになる。
+   */
+  const reachesRight = (line: Line): boolean => {
+    const key = `${line.page}:${line.column}`;
+    const right = columnRight.get(key);
+    const width = columnWidth.get(key);
+    if (right === undefined || width === undefined || width <= 0) return false;
+    // 許容量は段幅に対する比。字送りの端数や行末の約物で数 pt はずれる。
+    // ここを緩めると、両端揃えでない組版（草稿・プレプリント）で
+    // 段落の最終行まで「右端に届いた」ことになり、塊が次の見出しまで伸びる。
+    return line.right >= right - Math.max(2, width * 0.03);
+  };
+
   // 柱・ノンブルの候補: ページ内で最初か最後の行で、隣の行との間隔が広いもの。
   const edgeCandidate = new Set<number>();
   for (const [page, pageLines] of byPage) {
@@ -520,13 +549,28 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
    *
    * 段が狭いほどキャプションは折り返す。先頭行しか落とせていないと、
    * 「pipeline.」のような残骸が本文の文として並び、対訳の相手がいないカードになる。
-   * 終端記号で終わるまでを 1 つの塊として、同じ段の直下に続く行を拾う。
+   *
+   * 塊の終わりは**版面**で決める。以前は `open = !/[.!?]$/` だけで見ていたので、
+   * `Figure 1: Block-sparse attention pattern learned on PubMed.` のように
+   * 先頭行が文末で終わるキャプションはそこで閉じ、残りの
+   * `Darker cells are retained.` が本文の文として節と節の間に挿し込まれていた。
+   * キャプションは 2 文以上あるのが普通なので、これは珍しい形ではない。
+   *
+   * 代わりに「右端まで届いている行は段落の途中」とみなす。閉じるのは
+   * 段の右端に届かない行＝段落の最終行のときだけ。終端記号は、右端に届かない行が
+   * 本当に文として閉じているかの**補強**としてだけ使う（途中で折り返した行が
+   * たまたま右を余らせても、文が閉じていなければ塊は続く）。
+   * 続きかどうかは、さらに同じページ・同じ段・行送り・文字の大きさでも絞る。
    */
   const continuation = new Set<number>();
   {
     const ordered = [...lines].sort((a, b) => a.index - b.index);
+    /** 塊がまだ続いているか。 */
     let open = false;
+    /** 塊の先頭行の文字高。見出しや本文に化けた行で塊が伸びるのを止めるために持つ。 */
+    let blockHeight = 0;
     let previous: Line | undefined;
+    const stillOpen = (line: Line): boolean => reachesRight(line) || !/[.!?]$/.test(line.text);
     for (const line of ordered) {
       const starts = isCaption(line.text) || (REFERENCE_ENTRY.test(line.text) && REFERENCE_SHAPE.test(line.text));
       const spacing = stats.get(line.page)?.spacing ?? 13;
@@ -534,12 +578,15 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         previous !== undefined &&
         previous.page === line.page &&
         previous.column === line.column &&
-        line.y - previous.y <= spacing * 1.6;
+        line.y - previous.y <= spacing * 1.6 &&
+        // 文字の大きさが変わったら別の要素（見出し・本文）。キャプションの続きは同じ大きさで組まれる。
+        Math.abs(line.height - blockHeight) <= Math.max(0.5, blockHeight * 0.08);
       if (starts) {
-        open = !/[.!?]$/.test(line.text);
+        blockHeight = line.height;
+        open = stillOpen(line);
       } else if (open && adjacent) {
         continuation.add(line.index);
-        open = !/[.!?]$/.test(line.text);
+        open = stillOpen(line);
       } else {
         open = false;
       }
@@ -637,4 +684,49 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
 
     return { ...line, role: 'body' as const };
   });
+}
+
+/**
+ * 表題らしい行を 1 ページ目から拾う。
+ *
+ * 簡易解析では題名が取れないので、これまでは本文 1 文目をそのまま題名にしていた。
+ * ところが論文の 1 文目は「表題＋著者名」がひとつながりになった行で、
+ * `Block Sparse Attention for Long Documents Jane Q. Doe, Alan R. Roe, and Mei Tanaka`
+ * が一覧にもヘッダーにも「Claude にこう言う」のコピー文にも出ていた。
+ *
+ * 論文の表題は、1 ページ目のいちばん大きな文字で、いちばん上にある。
+ * 著者名は必ずそれより小さい。だから「最大の文字高を持つ行のかたまり」を
+ * 上から取れば、著者名は自然に落ちる。判断できないときは null を返し、
+ * 呼び出し側の従来のやり方に任せる（間違った題名を自信ありげに出すよりよい）。
+ */
+export function guessTitleFromChunks(chunks: TextChunk[]): string | null {
+  const firstPage = chunks.filter((chunk) => chunk.page === 1);
+  if (firstPage.length === 0) return null;
+
+  const lines = buildLines(firstPage).sort((a, b) => a.y - b.y);
+  if (lines.length === 0) return null;
+
+  // 本文の文字高（＝最頻値ではなく中央値。表題や見出しに引きずられない）。
+  const body = median(lines.map((line) => line.height));
+  if (body <= 0) return null;
+
+  const largest = Math.max(...lines.map((line) => line.height));
+  // 本文と同じ大きさしか無いページでは、表題を見分けられない。
+  if (largest < body * 1.15) return null;
+
+  const TOLERANCE = 0.9;
+  const parts: string[] = [];
+  for (const line of lines) {
+    if (line.height >= largest * TOLERANCE) {
+      parts.push(line.text.trim());
+      continue;
+    }
+    // いちど表題が始まったら、小さい行が来た時点で終わり（そこから先は著者名）。
+    if (parts.length > 0) break;
+  }
+
+  const title = parts.join(' ').replace(/\s+/g, ' ').trim();
+  // 短すぎるもの（柱やページ番号）と、長すぎるもの（表題ではない何か）は使わない。
+  if (title.length < 8 || title.length > 300) return null;
+  return title;
 }

@@ -71,6 +71,34 @@ export function createDocument(input: CreateDocumentInput): PaperDocument {
   };
 }
 
+/**
+ * 訳を消す。
+ *
+ * これが無かったので、いちど訳が付いた文は二度と未訳に戻せなかった。
+ * 影響は「気に入らない訳を消せない」だけでは済まない。`skip_sentences` は
+ * 既訳の文を対象外にできない（未訳の集計が減らないため）ので、
+ * Claude が参考文献の断片や数式に先に訳を付けてしまうと、
+ * その文を「訳す対象ではない」に移す道が塞がる。簡易解析ではそれが普通に起きる。
+ *
+ * 訳と同じく hash 単位なので、同じ本文が何か所に出ていても 1 回で消える。
+ */
+export function deleteTranslation(
+  document: PaperDocument,
+  sentenceHash: string,
+): { document: PaperDocument; deleted: boolean } {
+  if (!document.annotations.translations[sentenceHash]) return { document, deleted: false };
+  const translations = { ...document.annotations.translations };
+  delete translations[sentenceHash];
+  return {
+    document: {
+      ...document,
+      updatedAt: new Date().toISOString(),
+      annotations: { ...document.annotations, translations },
+    },
+    deleted: true,
+  };
+}
+
 export function setTranslation(
   document: PaperDocument,
   sentenceHash: string,

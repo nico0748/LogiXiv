@@ -12,6 +12,16 @@ import type { Health } from './api.ts';
  *
  * 出すのは 3 つだけ。(1) 接続の設定をそのまま貼れる形で、(2) Claude に言う文、
  * (3) 今つながっているかどうか。長い説明は手順書に任せる。
+ *
+ * (1) では**貼り先のファイル名**まで出す。JSON だけ渡して「MCP 設定に足す」と
+ * 言っていた頃、はじめての人はここで完全に止まった。設定が JSON で、
+ * クリップボードに入っていて、置き場所だけが分からない、という止まり方をする。
+ * 置き場所は OS ごとに違うので、動いている本体に訊く（health.mcp.configPath）。
+ *
+ * (3) は「押しても何も始まらない」への答え。このボタンは一番目立つ青なので
+ * 「押せば訳が進む」と読まれるが、実際は説明が開くだけだった。設定前と設定後で
+ * 画面が 1 文字も変わらないので、自分の設定が効いているのか、待てばいいのかが
+ * 判断できない。MCP から本体に呼び出しが来たかどうかを、そのまま出す。
  */
 
 interface Props {
@@ -22,6 +32,15 @@ interface Props {
   /** 直近に訳が書き込まれた時刻（SSE で更新）。 */
   lastWriteAt: number | null;
   onClose: () => void;
+}
+
+/** 「3 秒前」程度で十分。時計を出しても読み手がやることは変わらない。 */
+function relativeTime(at: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 60) return `${seconds} 秒前`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} 分前`;
+  return `${Math.round(minutes / 60)} 時間前`;
 }
 
 function configJson(entry: string | null, url: string): string {
@@ -74,6 +93,9 @@ export function TranslatePanel({ health, documentTitle, remaining, lastWriteAt, 
   };
 
   const active = lastWriteAt !== null && Date.now() - lastWriteAt < 60_000;
+  const contactedAt = health?.mcp?.lastContactAt ?? null;
+  const configPath = health?.mcp?.configPath ?? null;
+  const addCommand = health?.mcp?.addCommand ?? null;
 
   return (
     <div className="translate-panel" role="dialog" aria-label="Claude に翻訳してもらう">
@@ -95,11 +117,30 @@ export function TranslatePanel({ health, documentTitle, remaining, lastWriteAt, 
 
       <ol className="translate-steps">
         <li>
-          <span>Claude 側の MCP 設定にこれを足す（一度だけ）</span>
+          <span>
+            Claude Desktop の設定ファイルにこれを足して、Claude を起動し直す（一度だけ）
+          </span>
+          {configPath && (
+            <p className="translate-path">
+              貼り先: <code>{configPath}</code>
+              <button type="button" className="translate-inline" onClick={() => copy('貼り先のパス', configPath)}>
+                パスをコピー
+              </button>
+            </p>
+          )}
           <pre className="translate-code">{configJson(entry, url)}</pre>
           <button type="button" onClick={() => copy('設定', configJson(entry, url))}>
             設定をコピー
           </button>
+          {addCommand && (
+            <details className="translate-alt">
+              <summary>Claude Code を使っている場合（端末で 1 行）</summary>
+              <pre className="translate-code">{addCommand}</pre>
+              <button type="button" onClick={() => copy('コマンド', addCommand)}>
+                コマンドをコピー
+              </button>
+            </details>
+          )}
           {entry === null && (
             <p className="translate-warn">
               MCP サーバーがまだビルドされていません。<code>npm run build</code> を実行してください。
@@ -115,6 +156,16 @@ export function TranslatePanel({ health, documentTitle, remaining, lastWriteAt, 
         </li>
         <li>
           <span>この画面はそのままで構いません。訳は届いたそばから反映されます。</span>
+          {contactedAt === null ? (
+            <p className="translate-status is-waiting">
+              まだ Claude からの接続はありません。設定を足したら Claude を起動し直してください。
+              つながるとここの表示が変わります。
+            </p>
+          ) : (
+            <p className="translate-status is-connected">
+              Claude とつながっています（最後のやりとり: {relativeTime(contactedAt)}）。
+            </p>
+          )}
         </li>
       </ol>
 

@@ -23,6 +23,7 @@ interface Props {
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;
   onToggleSkip: (hash: string, skip: boolean) => Promise<boolean>;
+  onDeleteTranslation: (hash: string, alsoSkip: boolean) => Promise<boolean>;
   onMergeWithNext: (hashes: [string, string]) => Promise<boolean>;
   onSplit: (hash: string, offsets: number[]) => Promise<boolean>;
   scrollTarget: { id: string; token: number } | null;
@@ -59,16 +60,23 @@ export function Sidebar(props: Props): React.JSX.Element {
     const nextById = new Map<string, Sentence>();
     const hashCounts = new Map<string, number>();
     const pairCounts = new Map<string, number>();
+    // 2 回目以降の出現に印を付ける。訳は本文ごとに 1 つなので、
+    // 一度も触っていないカードに訳が入っていることがある。何が起きたのか
+    // 分からないまま「勝手に訳が出た」と読まれていた。
+    const repeated = new Set<string>();
+    const seen = new Set<string>();
     for (let i = 0; i < all.length; i++) {
       const sentence = all[i]!;
       hashCounts.set(sentence.hash, (hashCounts.get(sentence.hash) ?? 0) + 1);
+      if (seen.has(sentence.hash)) repeated.add(sentence.id);
+      else seen.add(sentence.hash);
       const next = all[i + 1];
       if (!next) continue;
       nextById.set(sentence.id, next);
       const key = `${sentence.hash}|${next.hash}`;
       pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
     }
-    return { nextById, hashCounts, pairCounts };
+    return { nextById, hashCounts, pairCounts, repeated };
   }, [paper.structure.sentences]);
 
   useEffect(() => {
@@ -113,9 +121,11 @@ export function Sidebar(props: Props): React.JSX.Element {
               onAddNote={props.onAddNote}
               onDeleteNote={props.onDeleteNote}
               onToggleSkip={props.onToggleSkip}
+              onDeleteTranslation={props.onDeleteTranslation}
               next={next}
               mergeOccurrences={next ? (relations.pairCounts.get(`${sentence.hash}|${next.hash}`) ?? 1) : 0}
               splitOccurrences={relations.hashCounts.get(sentence.hash) ?? 1}
+              repeat={relations.repeated.has(sentence.id)}
               onMergeWithNext={props.onMergeWithNext}
               onSplit={props.onSplit}
             />
@@ -136,12 +146,16 @@ interface CardProps {
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;
   onToggleSkip: (hash: string, skip: boolean) => Promise<boolean>;
+  /** 訳を消す。`alsoSkip` を立てると、消してそのまま「訳さない」に移す。 */
+  onDeleteTranslation: (hash: string, alsoSkip: boolean) => Promise<boolean>;
   /** 本文の並びで次に来る文。最後の文では null。 */
   next: Sentence | null;
   /** 結合が何か所に効くか。 */
   mergeOccurrences: number;
   /** 分割が何か所に効くか。 */
   splitOccurrences: number;
+  /** 同じ本文がこれより前にも出ているか。訳を共有していることの説明に使う。 */
+  repeat: boolean;
   onMergeWithNext: (hashes: [string, string]) => Promise<boolean>;
   onSplit: (hash: string, offsets: number[]) => Promise<boolean>;
 }
@@ -174,6 +188,8 @@ function SentenceCard(props: CardProps): React.JSX.Element {
   const [noteDraft, setNoteDraft] = useState('');
   const [noteOpen, setNoteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** 訳を消す前の確認。ダイアログを出さず、そのカードの中で訊く。 */
+  const [confirming, setConfirming] = useState<'skip' | 'delete' | null>(null);
   /** 分割の切れ目を選んでいる最中か。 */
   const [choosingSplit, setChoosingSplit] = useState(false);
   const splitRef = useRef<HTMLDivElement>(null);
@@ -324,9 +340,17 @@ function SentenceCard(props: CardProps): React.JSX.Element {
         </p>
       )}
 
+      {props.repeat && (
+        <p className="card-repeat">同じ本文が前にも出ています（訳は共通）</p>
+      )}
+
       {notes.map((note) => (
         <p key={note.id} className="card-note">
           {note.body}
+          {/* 誰のメモかを出す。メモは衝突しても消さない規則で積み上がるので、
+              Claude の「自信が無い」と同僚の断定と自分の書きかけが混ざる。
+              誰が言ったかが判断材料そのもの。 */}
+          {note.author && <span className="card-note-author">{note.author}</span>}
           <button
             type="button"
             className="note-delete"
@@ -379,6 +403,33 @@ function SentenceCard(props: CardProps): React.JSX.Element {
         </div>
       )}
 
+      {confirming && (
+        <div className="card-confirm" onClick={(event) => event.stopPropagation()}>
+          <span>
+            {confirming === 'skip'
+              ? 'この訳を消して、訳す対象から外します。訳は元に戻せません。'
+              : 'この訳を消して、未訳に戻します。元に戻せません。'}
+            {props.splitOccurrences > 1 && `（同じ本文の ${props.splitOccurrences} か所すべてに効きます）`}
+          </span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void props
+                .onDeleteTranslation(sentence.hash, confirming === 'skip')
+                .then(() => setConfirming(null))
+                .finally(() => setBusy(false));
+            }}
+          >
+            {confirming === 'skip' ? '消して外す' : '消す'}
+          </button>
+          <button type="button" onClick={() => setConfirming(null)}>
+            やめる
+          </button>
+        </div>
+      )}
+
       <div className="card-toolbar" onClick={(event) => event.stopPropagation()}>
         <button type="button" onClick={() => setEditing(true)}>
           訳を編集
@@ -386,13 +437,36 @@ function SentenceCard(props: CardProps): React.JSX.Element {
         <button type="button" onClick={() => setNoteOpen(true)}>
           メモ
         </button>
-        <button
-          type="button"
-          title={isSkipped ? '訳す対象に戻す' : '訳す対象から外す（参考文献・数式など）'}
-          onClick={() => void props.onToggleSkip(sentence.hash, !isSkipped)}
-        >
-          {isSkipped ? '訳す対象に戻す' : '訳さない'}
-        </button>
+        {translation ? (
+          /* 既訳の文は skip できない（未訳の集計が減らないので、記録しても嘘になる）。
+             押しても無反応だった頃、壊れているのか自分が間違えたのかも分からなかった。
+             訳を消すことが前提だと分かる文言にして、取り返しのつかない操作なので
+             その場で一度確かめる。 */
+          <button
+            type="button"
+            title="この文の訳を消して、訳す対象から外します"
+            onClick={() => setConfirming(confirming === 'skip' ? null : 'skip')}
+          >
+            訳を消して外す
+          </button>
+        ) : (
+          <button
+            type="button"
+            title={isSkipped ? '訳す対象に戻す' : '訳す対象から外す（参考文献・数式など）'}
+            onClick={() => void props.onToggleSkip(sentence.hash, !isSkipped)}
+          >
+            {isSkipped ? '訳す対象に戻す' : '訳さない'}
+          </button>
+        )}
+        {translation && (
+          <button
+            type="button"
+            title="この文の訳を消して、未訳に戻します"
+            onClick={() => setConfirming(confirming === 'delete' ? null : 'delete')}
+          >
+            訳を消す
+          </button>
+        )}
         <button
           type="button"
           // disabled にすると Tab で飛ばされ、なぜ押せないのかを知る手段が無くなる。

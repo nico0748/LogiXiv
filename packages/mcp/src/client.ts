@@ -67,7 +67,13 @@ export class LogiXivClient {
     try {
       response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
-        headers: { Accept: 'application/json', ...(init?.headers ?? {}) },
+        headers: {
+          Accept: 'application/json',
+          // 本体に「MCP から来た」と分かるようにする。画面側で
+          // 「設定が効いているのか分からない」を解くために要る。
+          'X-LogiXiv-Client': 'mcp',
+          ...(init?.headers ?? {}),
+        },
         signal: AbortSignal.timeout(180_000),
       });
     } catch (error) {

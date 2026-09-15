@@ -153,7 +153,11 @@ function boot(): void {
 
     for (const note of notesByHash.get(sentence.hash) ?? []) {
       const noteElement = el('p', 'lxv-note', note.body);
-      if (note.author) noteElement.title = note.author;
+      // 書き手を title 属性にだけ入れていたので、ホバーしないと見えなかった。
+      // メモは取り込みのたびに積み上がる（衝突しても消さない規則なので）ため、
+      // Claude の「自信が無い」と同僚の断定と自分の書きかけが混ざる。
+      // 誰が言ったかが判断材料そのものなので、本文と同じ面に出す。
+      if (note.author) noteElement.append(el('span', 'lxv-note-author', note.author));
       card.append(noteElement);
     }
 

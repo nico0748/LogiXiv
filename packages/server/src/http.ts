@@ -191,6 +191,11 @@ async function handle(
     return;
   }
 
+  // MCP から来た呼び出しを記録する。画面の「訳す」で、設定が効いているのか
+  // どうかを人が確かめられるようにするため（押しても何も始まらないボタンの前で、
+  // 自分の設定が悪いのか待てばいいのかが判断できなかった）。
+  if (request.headers['x-logixiv-client'] === 'mcp') api.noteMcpContact();
+
   const url = new URL(request.url ?? '/', 'http://localhost');
   const path = url.pathname;
   const method = request.method ?? 'GET';
@@ -418,9 +423,18 @@ async function handle(
     if (translationMatch && method === 'PUT') {
       const body = await readJson<{ text?: unknown; source?: unknown }>(request);
       const text = requireString(body.text, 'text', MAX_TEXT_FIELD);
-      if (text.trim().length === 0) throw new BadRequestError('text が空です');
+      // 空文字での「消したつもり」を黙って通さない。消す操作は DELETE にある。
+      if (text.trim().length === 0) {
+        throw new BadRequestError('訳が空です。訳を消すときは「訳を消す」を使ってください');
+      }
       const source = body.source === 'claude' ? 'claude' : 'human';
       sendJson(response, 200, await api.setTranslation(id, translationMatch[1]!, text, { source }));
+      return;
+    }
+    if (translationMatch && method === 'DELETE') {
+      // ?skip=1 で「消して、そのうえで訳さない」。既訳の文を対象外にする唯一の道。
+      const alsoSkip = url.searchParams.get('skip') === '1';
+      sendJson(response, 200, await api.deleteTranslation(id, translationMatch[1]!, { alsoSkip }));
       return;
     }
 

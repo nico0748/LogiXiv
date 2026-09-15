@@ -64,7 +64,17 @@ docker compose -f docker/grobid.yml up -d      # http://localhost:8070
 
 ### Claude から使う（MCP）
 
-`claude_desktop_config.json`（または Claude Code の MCP 設定）に追加する。
+**画面の「訳す」ボタンを押すのが確実。** 絶対パス入りの設定と、貼り先のファイル、
+Claude に言う一文がその場に出る。つながったかどうかもそこで分かる。
+以下は同じことを手で書く場合の説明。
+
+Claude Desktop なら、設定ファイルはここにある（無ければ作る）。
+
+| OS | 場所 |
+| --- | --- |
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
 
 ```json
 {
@@ -78,8 +88,30 @@ docker compose -f docker/grobid.yml up -d      # http://localhost:8070
 }
 ```
 
+書き換えたら **Claude Desktop を起動し直す**。
+
+Claude Code なら 1 行で済む。
+
+```bash
+claude mcp add-json logixiv '{"command":"node","args":["/path/to/LogiXiv/packages/mcp/dist/index.js"],"env":{"LOGIXIV_URL":"http://127.0.0.1:4173"}}'
+```
+
 本体（`npm start`）を起動したうえで、Claude に「LogiXiv の論文を訳して」と頼めばよい。
 `translate_paper` プロンプトに手順がまとめてある。
+
+うまくつながったかどうかは、画面の「訳す」を開けば分かる。Claude から
+一度でも呼び出しが届いていれば「Claude とつながっています」に変わる。
+
+### 文の数え方（「202 文」と言いながら 273 行あるとき）
+
+訳は**文そのもの**ではなく**本文の正規化ハッシュ**に付く。同じ本文が
+Introduction と Results に出てくれば、1 件の訳が両方に反映される。だから
+
+- ヘッダーの `3 / 202 文` は**異なり文**の数（＝作業量）
+- サイドバーに並ぶのは**延べ**の行数
+
+で、後者の方が多くなる。食い違うときはヘッダーに「画面には延べ 273 行」と出る。
+2 回目以降の出現には「同じ本文が前にも出ています」と印が付く。
 
 ## 技術的な中核 — なぜ「1 文ごと」が成立するか
 

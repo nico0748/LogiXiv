@@ -615,7 +615,7 @@ export function createMcpServer(baseUrl: string): McpServer {
         if (result.alreadyTranslated?.length > 0) {
           hints.push(
             `${result.alreadyTranslated.length} 件は既に訳が付いているので対象外にしませんでした` +
-              '（外したいなら、先に画面側で訳を消す必要があります）。',
+              '（外したいなら、画面のその文で「訳を消して外す」を押してください）。',
           );
         }
         return jsonResult({

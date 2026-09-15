@@ -102,7 +102,16 @@ export interface Health {
   grobidUrl: string;
   dataDir: string;
   /** Claude 用の MCP 設定を画面に出すための情報。 */
-  mcp?: { entry: string | null; url: string };
+  mcp?: {
+    entry: string | null;
+    url: string;
+    /** この OS での Claude Desktop の設定ファイル。貼り先を画面に出すため。 */
+    configPath?: string;
+    /** 端末で 1 行で済ませたい人向け（Claude Code）。 */
+    addCommand?: string | null;
+    /** MCP から最後に呼ばれた時刻（epoch ms）。null なら一度もつながっていない。 */
+    lastContactAt?: number | null;
+  };
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -201,6 +210,13 @@ export const api = {
       body: JSON.stringify({ sentenceHash, body, author: 'me' }),
     }),
 
+  /** 訳を消す。`alsoSkip` を立てると、消したうえで「訳さない」に移す。 */
+  deleteTranslation: (id: string, hash: string, alsoSkip = false) =>
+    request<{ deleted: boolean; skipped: boolean }>(
+      `/api/documents/${id}/translations/${hash}${alsoSkip ? '?skip=1' : ''}`,
+      { method: 'DELETE' },
+    ),
+
   skipSentence: (id: string, hash: string, reason = 'other') =>
     request<{ applied: number; remaining: number }>(`/api/documents/${id}/skip`, {
       method: 'POST',
@@ -240,7 +256,7 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  reparse: (id: string) =>
+  reparse: (id: string, parser: 'auto' | 'grobid' | 'fallback' = 'auto') =>
     request<{
       rebound: number;
       orphaned: number;
@@ -250,7 +266,7 @@ export const api = {
     }>(`/api/documents/${id}/reparse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ parser: 'auto' }),
+      body: JSON.stringify({ parser }),
     }),
 
   /** 他人の書き出しを新しい文書として取り込む（PDF ごと入る）。 */

@@ -39,6 +39,10 @@ function rebuildOrder(sentences: Sentence[]): Sentence[] {
  * 横に離れているものはまとめない。段組の左右は y がほぼ同じなので、距離を見ないと
  * 1 本の枠が柱間を跨いで無関係な段まで光る。許容量は空白 1 個ぶん（文字高の 0.6 倍）。
  * 二段組の柱間は狭くても 12pt（layout.ts の MIN_GUTTER）あるので、これで混ざらない。
+ *
+ * 解析側（sentences.ts の mergeRects）は、行の途中で終わる文には**その文が占めた
+ * x 範囲だけ**の矩形を出す。1 行を共有していた 2 文を結合すると、ここで空白 1 個ぶんの
+ * 隙間を跨いで 1 本の枠に戻る（逆に、結合していない文の枠が繋がることはない）。
  */
 function normalizeRects(rects: readonly Rect[]): Rect[] {
   const merged: Rect[] = [];

@@ -20,6 +20,14 @@ export interface Config {
   mcpEntry: string | null;
   /** 画面や設定例に出す、この本体の URL。 */
   publicUrl: string;
+  /**
+   * Claude Desktop の設定ファイルの置き場所（この OS での既定）。
+   *
+   * 「MCP 設定にこれを足す」と書いておきながら、**どのファイルなのかを
+   * どこにも書いていなかった**。JSON をクリップボードに持ったまま手が止まる。
+   * OS ごとに場所が違うので、動いている側が自分の OS の答えを出す。
+   */
+  claudeConfigPath: string;
 }
 
 /** 同じリポジトリの中から MCP の入口を探す。見つからなければ null（未ビルド）。 */
@@ -32,6 +40,19 @@ function findMcpEntry(): string | null {
     if (existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+/** この OS での Claude Desktop の設定ファイル。存在しなくても、作るべき場所として出す。 */
+function claudeDesktopConfigPath(): string {
+  const home = homedir();
+  if (process.platform === 'darwin') {
+    return join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
+  }
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
+    return join(appData, 'Claude', 'claude_desktop_config.json');
+  }
+  return join(home, '.config', 'Claude', 'claude_desktop_config.json');
 }
 
 function envString(name: string): string | undefined {
@@ -48,6 +69,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     port,
     mcpEntry: overrides.mcpEntry ?? envString('LOGIXIV_MCP_ENTRY') ?? findMcpEntry(),
     publicUrl: overrides.publicUrl ?? `http://${host}:${port}`,
+    claudeConfigPath: overrides.claudeConfigPath ?? claudeDesktopConfigPath(),
     dataDir: resolve(dataDir),
     grobidUrl: (overrides.grobidUrl ?? envString('LOGIXIV_GROBID_URL') ?? 'http://localhost:8070').replace(/\/$/, ''),
     webDir: overrides.webDir ?? envString('LOGIXIV_WEB_DIR') ?? null,

@@ -19,6 +19,9 @@
  *    画面に "Sma- ller ones" と出ていても一致扱いになる。
  * 4. 取りこぼしだけでなく、余計に作った文も数える。
  * 5. 読み順も見る。段の左右が入れ替わっても、集合としては全部見つかる。
+ * 6. 正規化ハッシュが一致しても**字面**が違えば別に数える。normalizeSentence は
+ *    語中のハイフンを畳むので（`long-range` も `longrange` も同じハッシュになる）、
+ *    再現率だけ見ていると「本来のハイフンを黙って消した」壊れ方が 100% のまま通る。
  */
 
 import { normalizeSentence } from '../packages/core/src/index.ts';
@@ -35,6 +38,8 @@ const MAX_LEAKS = 1;
 const MAX_SPURIOUS_RATIO = 0.05;
 /** 画面に出る文字列にハイフネーションの残骸が混ざっている数の上限。 */
 const MAX_HYPHEN_ARTEFACTS = 0;
+/** 正規化すると一致するのに字面が違う文（＝原文を黙って書き換えた文）の上限。 */
+const MAX_REWRITTEN = 0;
 
 interface Result {
   label: string;
@@ -46,6 +51,8 @@ interface Result {
   order: number;
   leaks: number;
   hyphenated: number;
+  /** 正規化すれば一致するのに、画面に出る字面が正解と違う文の数。 */
+  rewritten: number;
   sentences: number;
   sections: number;
   ms: number;
@@ -116,6 +123,11 @@ async function measure(label: string, spec: PaperSpec): Promise<Result> {
   // 画面に出る文字列の検査。行末ハイフンが残っていると "Sma- ller" のまま表示される。
   const hyphenated = structure.sentences.filter((s) => /\p{L}-\s+\p{L}/u.test(s.text)).length;
 
+  // 字面そのものの照合。空白の詰め方だけ揃えて、ハイフンには触れずに比べる。
+  // 正規化して一致した数との差が、「正規化すれば同じだが画面に出る字は違う」文の数。
+  const flatten = (text: string): string => text.replace(/\s+/g, ' ').trim();
+  const exact = multisetOverlap(paper.expectedSentences.map(flatten), structure.sentences.map((s) => flatten(s.text)));
+
   return {
     label,
     recall: expected.length === 0 ? 1 : found / expected.length,
@@ -125,6 +137,7 @@ async function measure(label: string, spec: PaperSpec): Promise<Result> {
     order: orderScore(expected, got),
     leaks,
     hyphenated,
+    rewritten: Math.max(0, found - exact),
     sentences: structure.sentences.length,
     sections: structure.sections.length,
     ms,
@@ -141,16 +154,21 @@ const results = [
   await measure('1 ページのみ', { pages: 1, columns: 2 }),
   await measure('紛らわしい言い回し', { pages: 6, columns: 2, pathological: true }),
   await measure('段抜きの図キャプション', { pages: 6, columns: 2, spanFigure: true }),
+  // 文書内に 1 回しか出ない複合語が行末で割れる形。用例に頼った判定だとハイフンが落ちる。
+  await measure('行末の複合語', { pages: 6, columns: 2, hyphenTraps: true }),
+  // 1 行目が文末で終わるキャプション。終端記号だけで閉じると 2 文目が本文に混ざる。
+  await measure('文末で折り返すキャプション', { pages: 6, columns: 2, splitCaption: true }),
 ];
 
-console.log('レイアウト             再現率   読順  余分  混入  ハイフン  文数  節  解析');
-console.log('---------------------------------------------------------------------------');
+console.log('レイアウト             再現率   読順  余分  混入  ハイフン  書換  文数  節  解析');
+console.log('---------------------------------------------------------------------------------');
 for (const r of results) {
   console.log(
     `${r.label.padEnd(20)} ${`${Math.round(r.recall * 100)}%`.padStart(5)} (${r.found}/${r.expected})  ` +
       `${`${Math.round(r.order * 100)}%`.padStart(4)} ` +
       `${String(r.spurious).padStart(4)} ${String(r.leaks).padStart(5)} ` +
-      `${String(r.hyphenated).padStart(7)} ${String(r.sentences).padStart(6)} ` +
+      `${String(r.hyphenated).padStart(7)} ${String(r.rewritten).padStart(5)} ` +
+      `${String(r.sentences).padStart(5)} ` +
       `${String(r.sections).padStart(3)} ${String(r.ms).padStart(6)}ms`,
   );
 }
@@ -161,17 +179,19 @@ const failures = results.filter(
     r.order < MIN_ORDER ||
     r.leaks > MAX_LEAKS ||
     r.hyphenated > MAX_HYPHEN_ARTEFACTS ||
+    r.rewritten > MAX_REWRITTEN ||
     r.spurious > Math.ceil(r.expected * MAX_SPURIOUS_RATIO),
 );
 if (failures.length > 0) {
   console.error(
     `\n品質が基準を下回りました（再現率 >= ${MIN_RECALL * 100}% / 読順 >= ${MIN_ORDER * 100}% / ` +
-      `混入 <= ${MAX_LEAKS} / ハイフン残り <= ${MAX_HYPHEN_ARTEFACTS} / 余分 <= ${MAX_SPURIOUS_RATIO * 100}%）:\n` +
+      `混入 <= ${MAX_LEAKS} / ハイフン残り <= ${MAX_HYPHEN_ARTEFACTS} / 書換 <= ${MAX_REWRITTEN} / ` +
+      `余分 <= ${MAX_SPURIOUS_RATIO * 100}%）:\n` +
       failures
         .map(
           (f) =>
             `  ${f.label}: 再現率 ${Math.round(f.recall * 100)}% / 読順 ${Math.round(f.order * 100)}% / ` +
-            `余分 ${f.spurious} / 混入 ${f.leaks} / ハイフン ${f.hyphenated}`,
+            `余分 ${f.spurious} / 混入 ${f.leaks} / ハイフン ${f.hyphenated} / 書換 ${f.rewritten}`,
         )
         .join('\n'),
   );

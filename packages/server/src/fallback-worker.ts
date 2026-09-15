@@ -29,6 +29,8 @@ export interface FallbackWorkerOutput {
   truncatedPages: number;
   /** 文字片の上限で打ち切ったか。 */
   truncatedChunks: boolean;
+  /** PDF のメタデータに入っていた題名。無いことも、ファイル名が入っていることも多い。 */
+  metadataTitle: string | null;
 }
 
 interface PdfJsTextItem {
@@ -61,6 +63,16 @@ async function run(input: FallbackWorkerInput): Promise<FallbackWorkerOutput> {
   });
 
   const document = await task.promise;
+  // メタデータの題名は当たれば一番正確なので先に見る。ただし空だったり
+  // `untitled.dvi` のような組版の痕跡が入っていたりするので、呼び出し側で選別する。
+  let metadataTitle: string | null = null;
+  try {
+    const meta = (await document.getMetadata()) as { info?: { Title?: unknown } };
+    const value = meta.info?.Title;
+    if (typeof value === 'string' && value.trim().length > 0) metadataTitle = value.trim();
+  } catch {
+    /* メタデータが壊れていても解析そのものは続ける。 */
+  }
   const chunks: TextChunk[] = [];
   const pageSizes: PageSize[] = [];
   let truncatedChunks = false;
@@ -103,6 +115,7 @@ async function run(input: FallbackWorkerInput): Promise<FallbackWorkerOutput> {
       pageSizes,
       truncatedPages: Math.max(0, document.numPages - pageCount),
       truncatedChunks,
+      metadataTitle,
     };
   } finally {
     await task.destroy();

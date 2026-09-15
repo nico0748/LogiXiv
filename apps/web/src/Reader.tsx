@@ -3,6 +3,7 @@ import { api, subscribe, type Health, type PaperDocument, type Sentence } from '
 import { PdfPane } from './PdfPane.tsx';
 import { Sidebar } from './Sidebar.tsx';
 import { GlossaryPanel } from './GlossaryPanel.tsx';
+import { ReparsePanel } from './ReparsePanel.tsx';
 import { TranslatePanel } from './TranslatePanel.tsx';
 
 interface Props {
@@ -54,6 +55,7 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [translateOpen, setTranslateOpen] = useState(false);
+  const [reparseOpen, setReparseOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   /** 直近に訳が届いた時刻。「いま Claude が書いている」を画面に出すため。 */
@@ -92,6 +94,19 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     void reload();
     void api.health().then(setHealth).catch(() => setHealth(null));
   }, [reload]);
+
+  // 「訳す」を開いている間だけ health を取り直す。この画面は
+  // 「Claude とつながったか」を待つ画面なので、待っている値が
+  // 更新されないと、待てばいいのか設定が悪いのか分からないまま止まる。
+  useEffect(() => {
+    if (!translateOpen) return;
+    const timer = setInterval(() => {
+      void api.health().then(setHealth).catch(() => {
+        /* 本体が一瞬落ちても、次の周期で戻る。表示は前の値のままでよい。 */
+      });
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [translateOpen]);
 
   // MCP 経由で Claude が書いた訳を、リロードせずに反映する。
   useEffect(() => {
@@ -204,7 +219,13 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
       if (paper.annotations.translations[hash]) translated++;
       else if (skipped[hash]) skippedCount++;
     }
-    return { total: hashes.size, translated, skipped: skippedCount };
+    return {
+      total: hashes.size,
+      translated,
+      skipped: skippedCount,
+      // サイドバーに並ぶのは延べ数。異なり文より多いと、数えて合わないのが見える。
+      occurrences: paper.structure.sentences.length,
+    };
   }, [paper]);
 
   if (error && !paper) {
@@ -324,8 +345,19 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
         <span className={`badge${paper.structure.parser === 'grobid' ? ' is-good' : ' is-warn'}`}>
           {paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}
         </span>
-        <span className="toolbar-progress" title="訳は同じ本文ごとに 1 つ付きます">
+        {/* 訳は「異なり文」に付くので分母はその数。ところがサイドバーには
+            延べで並ぶので、数が合わないように見える（202 文と言いながら 273 行）。
+            食い違うときだけ、延べの数も一緒に出して種明かしをする。 */}
+        <span
+          className="toolbar-progress"
+          title={
+            stats.occurrences > stats.total
+              ? `同じ本文の文が ${stats.occurrences - stats.total} 回くり返されています。訳は本文ごとに 1 つ付き、出てくる全部に反映されます。`
+              : '訳は同じ本文ごとに 1 つ付きます'
+          }
+        >
           {stats.translated} / {stats.total} 文
+          {stats.occurrences > stats.total && `（画面には延べ ${stats.occurrences} 行）`}
           {stats.skipped > 0 && `（訳さない ${stats.skipped}）`}
         </span>
 
@@ -407,28 +439,44 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
             event.target.value = '';
           }}
         />
-        <button
-          type="button"
-          disabled={busyAction !== null}
-          onClick={() =>
-            void run('再解析', async () => {
-              const result = await api.reparse(documentId);
+        <button type="button" disabled={busyAction !== null} onClick={() => setReparseOpen(true)}>
+          {busyAction === '再解析' ? '再解析中…' : '再解析'}
+        </button>
+      </header>
+
+      {reparseOpen && (
+        <ReparsePanel
+          document={paper}
+          grobidUp={health?.grobid === 'up'}
+          busy={busyAction === '再解析'}
+          onClose={() => setReparseOpen(false)}
+          onRun={async (parser) => {
+            const before = paper.structure.parser;
+            await run('再解析', async () => {
+              const result = await api.reparse(documentId, parser);
               await reload();
+              setReparseOpen(false);
               const edits =
                 result.editsReapplied > 0 || result.editsDropped > 0
                   ? ` / 区切りの直し ${result.editsReapplied} 件を再適用${
                       result.editsDropped > 0 ? `・${result.editsDropped} 件は本文が変わったため解除` : ''
                     }`
                   : '';
-              return `再解析しました（訳の再結合 ${result.rebound} 件 / 対応なし ${result.orphaned} 件${edits}）${
+              // 「対応なし n 件」だけでは、消えたのか外れただけなのかが分からない。
+              // 戻し方まで書く（ここが分からないと、訳を作り直すしかなくなる）。
+              const orphanNote =
+                result.orphaned > 0
+                  ? `。外れた訳は消えていません — 「再解析」から${
+                      before === 'grobid' ? 'GROBID' : '簡易解析'
+                    }を選び直すと戻ります`
+                  : '';
+              return `再解析しました（訳の再結合 ${result.rebound} 件 / 対応なし ${result.orphaned} 件${edits}）${orphanNote}${
                 result.warning ? ` — ${result.warning}` : ''
               }`;
-            })
-          }
-        >
-          {busyAction === '再解析' ? '再解析中…' : '再解析'}
-        </button>
-      </header>
+            });
+          }}
+        />
+      )}
 
       {translateOpen && (
         <TranslatePanel
@@ -515,6 +563,14 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
               else await api.unskipSentence(documentId, hash);
               await reload();
               return null;
+            })
+          }
+          onDeleteTranslation={(hash, alsoSkip) =>
+            run('訳の削除', async () => {
+              const result = await api.deleteTranslation(documentId, hash, alsoSkip);
+              await reload();
+              if (!result.deleted) return '訳はもうありませんでした。';
+              return result.skipped ? '訳を消して、訳す対象から外しました。' : '訳を消しました。';
             })
           }
         />

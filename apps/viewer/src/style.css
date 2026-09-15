@@ -207,6 +207,17 @@
   font-size: 0.82rem;
 }
 
+/* 誰のメモかは本文と同じ面に出す（属性に隠すとホバーしないと見えない）。 */
+.lxv-note-author {
+  margin-left: 0.4rem;
+  opacity: 0.7;
+  font-size: 0.75rem;
+}
+
+.lxv-note-author::before {
+  content: '— ';
+}
+
 @media (max-width: 900px) {
   .lxv-layout {
     grid-template-columns: minmax(0, 1fr);

@@ -17,7 +17,7 @@ import {
   sanitizeStructure,
 } from '../src/validate.ts';
 import { migrateDocument } from '../src/migrate.ts';
-import type { PaperDocument, Translation } from '../src/types.ts';
+import type { PaperDocument, Rect, Translation } from '../src/types.ts';
 
 /**
  * サイクル1の批評で見つかった不具合の回帰テスト。
@@ -88,6 +88,24 @@ test('真のハイフネーションは結合する', () => {
   assert.equal(sentences[0]!.text, 'We use information retrieval here.');
 });
 
+test('文書内に 1 回しか出ない複合語は行末で割れてもハイフンが残り、音節で割れた 1 語は繋がる', () => {
+  // 実測で壊れていた形。2 段組の論文で `long-range` が文書内に 1 回だけ出て行末で割れ、
+  // `longrange` になっていた（同じ論文の `straight-through` は、たまたま行中に用例が
+  // あったので無事だった＝論文ごとに当たり外れが変わる）。
+  // 同じ文書に真のハイフネーションも混ぜてある。どちらか片側に倒すだけの規則では通らない。
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'We study the dependency structure of very long-', x: 50, y: 100, w: 235, h: 10 },
+    { page: 1, text: 'range interactions in the encoder of the model.', x: 50, y: 112, w: 230, h: 10 },
+    { page: 1, text: 'The encoder keeps the amount of mutual informa-', x: 50, y: 124, w: 235, h: 10 },
+    { page: 1, text: 'tion between the two views as high as it can be.', x: 50, y: 136, w: 232, h: 10 },
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, []);
+  assert.deepEqual(sentences.map((s) => s.text), [
+    'We study the dependency structure of very long-range interactions in the encoder of the model.',
+    'The encoder keeps the amount of mutual information between the two views as high as it can be.',
+  ]);
+});
+
 test('数式のマイナスを行末ハイフンとして食べない', () => {
   const chunks: TextChunk[] = [
     { page: 1, text: 'The value is 5 -', x: 50, y: 100, w: 80, h: 10 },
@@ -116,6 +134,80 @@ test('同一行の矩形は丸め境界をまたいでも 1 つにまとまる',
   ];
   const { sentences } = buildSentencesFromChunks(chunks, []);
   assert.equal(sentences[0]!.rects.length, 1, '視覚的に 1 行なら矩形も 1 つ');
+});
+
+/** 点 (page, x, y) に当たる文の通し番号を全部返す。1 つだけなら、その点で迷いなく選べる。 */
+function hitTest(sentences: readonly { order: number; rects: readonly Rect[] }[], page: number, x: number, y: number) {
+  return sentences
+    .filter((sentence) =>
+      sentence.rects.some(
+        (rect) => rect.page === page && x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h,
+      ),
+    )
+    .map((sentence) => sentence.order);
+}
+
+test('1 行を 2 文が共有しても、それぞれの矩形が重ならない', () => {
+  // pdf.js は 1 行まるごとを 1 個の文字片で返すことがある。行の途中で文が終わると、
+  // 以前はその行が前後どちらの文にも行いっぱいの幅で入り、押した位置と関係なく
+  // 隣の文が選ばれていた（後の文に完全に覆われて二度と選べない文まで出た）。
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'We evaluate on the test. We then report results.', x: 50, y: 100, w: 240, h: 10 },
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, []);
+  assert.equal(sentences.length, 2);
+
+  const [first, second] = sentences as [(typeof sentences)[number], (typeof sentences)[number]];
+  assert.equal(first.rects.length, 1);
+  assert.equal(second.rects.length, 1);
+  const left = first.rects[0]!;
+  const right = second.rects[0]!;
+  assert.ok(left.w > 0 && right.w > 0, '幅ゼロの矩形は押せない');
+  assert.ok(
+    left.x + left.w <= right.x,
+    `同じ行の 2 文が重なっている: ${JSON.stringify(left)} / ${JSON.stringify(right)}`,
+  );
+  // 行の左端は前の文、右端は次の文。ここが入れ替わると PDF の連動が壊れる。
+  assert.deepEqual(hitTest(sentences, 1, left.x + 1, 105), [0]);
+  assert.deepEqual(hitTest(sentences, 1, right.x + right.w - 1, 105), [1]);
+});
+
+test('行の途中で終わった文は、次の文に覆われずクリックで選べる', () => {
+  // 2 行目の途中で 1 文目が終わり、同じ行から 2 文目が始まる形。
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'Sparse attention reduces the quadratic', x: 50, y: 100, w: 190, h: 10 },
+    { page: 1, text: 'cost of self-attention. We evaluate the', x: 50, y: 112, w: 190, h: 10 },
+    { page: 1, text: 'kernel on academic documents.', x: 50, y: 124, w: 150, h: 10 },
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, []);
+  assert.equal(sentences.length, 2);
+
+  for (const sentence of sentences) {
+    // どの文にも「自分だけが当たる点」が要る。無ければ画面上で永久に選べない。
+    const exclusive = sentence.rects.some((rect) =>
+      [0.02, 0.5, 0.98].some((ratio) => {
+        const hits = hitTest(sentences, rect.page, rect.x + rect.w * ratio, rect.y + rect.h / 2);
+        return hits.length === 1 && hits[0] === sentence.order;
+      }),
+    );
+    assert.ok(exclusive, `他の文に覆われて選べない: ${sentence.text}`);
+  }
+
+  // 共有した行（y=112）では、左が 1 文目・右が 2 文目。
+  const shared = (order: number) => sentences[order]!.rects.find((rect) => Math.abs(rect.y - 112) < 1)!;
+  assert.ok(shared(0).x + shared(0).w <= shared(1).x, '共有行で矩形が重なっている');
+  assert.deepEqual(hitTest(sentences, 1, shared(0).x + 1, 117), [0]);
+  assert.deepEqual(hitTest(sentences, 1, shared(1).x + shared(1).w - 1, 117), [1]);
+});
+
+test('文字片をまるごと使う文の矩形は、文字片の外接矩形から変わらない', () => {
+  // 按分は「文字片の一部だけを使ったとき」の話。全部使う普通の文で枠が縮むと、
+  // ハイライトが本文より狭くなって読みにくくなる。
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'We release the code.', x: 50, y: 100, w: 120, h: 10 },
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, []);
+  assert.deepEqual(sentences[0]!.rects, [{ page: 1, x: 50, y: 100, w: 120, h: 10 }]);
 });
 
 // --- 正規化とハッシュ衝突 ------------------------------------------------

@@ -309,6 +309,30 @@ test('折り返したキャプションの続きの行も本文にしない', ()
   assert.equal(texts.length, 2);
 });
 
+test('キャプションの 1 行目が文末で終わっても、2 文目が本文に混ざらない', () => {
+  // 実測で壊れていた形。`Figure 1: ... learned on PubMed.` で塊が閉じ、
+  // 続きの `Darker cells are retained.` だけが `2.1 Complexity` と `3 Experiments` の
+  // 間に本文の文として挿し込まれていた。キャプションが 2 文以上あるのは普通のこと。
+  const chunks: TextChunk[] = [
+    chunk(1, 50, 100, 'We evaluate the model on the benchmark suite for every seed.'),
+    // 段の右端まで届く 1 行目。組版の都合で折り返しただけなので、文末で終わっていても続く。
+    chunk(1, 50, 113, 'Figure 1: Block-sparse attention learned on the PubMed split.'),
+    // 右端に届かない＝キャプションの最終行。ここで塊が閉じる。
+    chunk(1, 50, 126, 'Darker cells are retained across every head of the layer.'),
+    chunk(1, 50, 139, 'The results are reported in the next section of the paper.'),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const texts = sentences.map((s) => s.text);
+  assert.ok(
+    !texts.some((t) => t.includes('Darker cells')),
+    `キャプションの 2 文目が本文に混ざった: ${JSON.stringify(texts)}`,
+  );
+  assert.deepEqual(texts, [
+    'We evaluate the model on the benchmark suite for every seed.',
+    'The results are reported in the next section of the paper.',
+  ]);
+});
+
 test('段幅いっぱいの数式も落とす（幅で門を作らない）', () => {
   // 段が狭いほど数式は段幅いっぱいになる。幅を条件にすると 3 段組で軒並み本文に混ざる。
   const chunks: TextChunk[] = [

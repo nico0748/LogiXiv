@@ -23,6 +23,10 @@ export interface PaperSpec {
   pathological?: boolean;
   /** ページ中ほどに段抜きの図キャプションを置く（帯の読み順を測る）。 */
   spanFigure?: boolean;
+  /** 行末で割れる複合語を仕込む（文書内に 1 回しか出ない形で置く）。 */
+  hyphenTraps?: boolean;
+  /** 1 行目が文末で終わる図キャプションを置く（2 文目が本文に混ざらないかを測る）。 */
+  splitCaption?: boolean;
 }
 
 export interface GeneratedPaper {
@@ -90,6 +94,24 @@ const PATHOLOGICAL: ((n: number) => string[])[] = [
   ],
 ];
 
+/**
+ * 行末で割れる語の仕掛け。`keep` が true なら本来ハイフンを含む複合語で、
+ * 行末で割れてもハイフンが残らなければならない。false は音節で割れた 1 語で、
+ * ハイフンごと落として繋がなければならない。
+ *
+ * ここに置く複合語は**文書内でこの 1 回しか出さない**。行中に用例があると
+ * 「文書内に用例があれば残す」という既存の手掛かりだけで通ってしまい、
+ * 語形の判定が壊れても測定に出ない（実際、実物の論文で `straight-through` は
+ * たまたま用例があって無事、`long-range` は用例が無く `longrange` になっていた）。
+ */
+const HYPHEN_TRAPS: { left: string; right: string; keep: boolean }[] = [
+  { left: 'long', right: 'range', keep: true },
+  { left: 'straight', right: 'through', keep: true },
+  { left: 'well', right: 'known', keep: true },
+  { left: 'sparsi', right: 'fication', keep: false },
+  { left: 'differen', right: 'tiable', keep: false },
+];
+
 const NON_BODY = [
   'Figure 1: Overview of the proposed pipeline.',
   'Table 1: Accuracy on the held-out split.',
@@ -108,6 +130,65 @@ const BANNER = [
 
 function escapePdfText(text: string): string {
   return text.replace(/[\\()]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Helvetica の字送り幅（1000 分率）。行を段幅いっぱいに詰めるのに要る。
+ * 標準 14 書体なので PDF にフォントを埋め込まずに済み、依存も増えない。
+ */
+const HELVETICA_WIDTH = ((): Map<string, number> => {
+  const table = new Map<string, number>();
+  const put = (chars: string, width: number): void => {
+    for (const ch of chars) table.set(ch, width);
+  };
+  put("'", 191);
+  put('|', 260);
+  put(' !.,/:;I[]\\ft', 278);
+  put('()-`', 333);
+  put('{}', 334);
+  put('"', 355);
+  put('*', 389);
+  put('^', 469);
+  put('ilj', 222);
+  put('cksvxzJ', 500);
+  put('0123456789#$_abdeghnopquL?', 556);
+  put('+<=>~', 584);
+  put('FTZ', 611);
+  put('&ABEKSVXY', 667);
+  put('CDHNRUw', 722);
+  put('GOQ', 778);
+  put('Mm', 833);
+  put('%', 889);
+  put('W', 944);
+  put('@', 1015);
+  return table;
+})();
+
+function helveticaWidth(text: string, size: number): number {
+  let total = 0;
+  for (const ch of text) total += HELVETICA_WIDTH.get(ch) ?? 556;
+  return (total * size) / 1000;
+}
+
+/**
+ * 字送り幅で折り返す。実際の論文は両端揃えなので、最終行以外はどれも段の右端に届く。
+ * `wrap` は文字数で折り返すので、細い字ばかりの行と太い字ばかりの行で右端が
+ * 10% 以上ずれ、組版には無い揺れが入る。「右端に届いた行か」を見る場面ではこちらを使う。
+ */
+function packByWidth(text: string, width: number, size: number): string[] {
+  const lines: string[] = [];
+  let current = '';
+  for (const word of text.split(' ')) {
+    const next = current.length === 0 ? word : `${current} ${word}`;
+    if (current.length > 0 && helveticaWidth(next, size) > width) {
+      lines.push(current);
+      current = word;
+      continue;
+    }
+    current = next;
+  }
+  if (current.length > 0) lines.push(current);
+  return lines;
 }
 
 /**
@@ -252,7 +333,52 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
     flush();
   };
 
+  /**
+   * 行末ハイフンの仕掛けを置く。折り返し任せだと割れる位置が運になるので、
+   * 行はこちらで割って置く（`wrap` は語の途中でしか割らないため、
+   * 複合語のハイフンを行末に持ってこられない）。
+   */
+  const emitHyphenTrap = (trap: (typeof HYPHEN_TRAPS)[number], n: number): void => {
+    const head = `We compare the ${trap.left}-`;
+    const tail = `${trap.right} variant against the dense baseline in run ${n}.`;
+    // 正解は「人が紙面で読む通りの 1 文」。複合語ならハイフン付き、
+    // 音節で割れた語ならハイフン無しで繋がった形。
+    expectedSentences.push(`We compare the ${trap.left}${trap.keep ? '-' : ''}${tail}`);
+    pushLine(head, 10);
+    for (const wrapped of wrap(tail, charsPerLine)) pushLine(wrapped, 10);
+  };
+
+  /**
+   * 1 行目がちょうど段の右端で文末になる図キャプションを置く。
+   *
+   * 実際の論文は両端揃えなので、折り返した行はどれも段の右端に届く。
+   * ここも**字送り幅**で詰めて同じ状態を作る（文字数で詰めると、細い字ばかりの行と
+   * 太い字ばかりの行で右端が 10% 以上ずれ、「右端に届いた行か」を見る解析側の
+   * 判定に、実際の組版には無い揺れが入ってしまう）。
+   */
+  const emitSplitCaption = (): void => {
+    // 短い語を並べておくと、語単位で詰めても右端の近くまで埋まる。
+    // 段数を変えてもどこで切れても文として読める形にしてある。
+    const pool = 'Figure 3: Block-sparse maps for the PubMed, arXiv and PMC sets of abstracts'.split(' ');
+    let first = '';
+    for (const word of pool) {
+      const next = first.length === 0 ? word : `${first} ${word}`;
+      if (helveticaWidth(`${next}.`, 10) > columnWidth) break;
+      first = next;
+    }
+    first = first.replace(/,$/, '');
+    // 続きは 2 文にしておく。1 文だけだと、塊が閉じてしまっても混入は 1 件で、
+    // 表題ありの層で元から 1 件出ているぶんに紛れて門番をすり抜ける。
+    const rest = ['Darker cells are retained across every head.', 'The mask is recomputed once per epoch.'];
+    // 混入を文単位で数えられるよう、正解にも 1 文ずつ渡す。
+    expectedNonBody.push(`${first}.`, ...rest);
+    // 1 行目は上で段幅ちょうどまで詰めてあるので、折り返しは必ずピリオドの直後で起きる。
+    for (const packed of packByWidth(`${first}. ${rest.join(' ')}`, columnWidth, 10)) pushLine(packed, 10);
+  };
+
   const paragraphs = spec.pathological ? [...BODY_TEMPLATES, ...PATHOLOGICAL] : BODY_TEMPLATES;
+  let trapsDone = false;
+  let splitCaptionDone = false;
 
   while (placedLines < capacity - reserve) {
     if (block % 3 === 0 && sectionIndex < sectionTitles.length) {
@@ -263,6 +389,14 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
       const index = block * 3 + i;
       emit(paragraphs[index % paragraphs.length]!(index), 'body');
       if (placedLines >= capacity - reserve) break;
+    }
+    if (spec.hyphenTraps && !trapsDone && block === 0) {
+      trapsDone = true;
+      HYPHEN_TRAPS.forEach((trap, index) => emitHyphenTrap(trap, index));
+    }
+    if (spec.splitCaption && !splitCaptionDone && block === 1) {
+      splitCaptionDone = true;
+      emitSplitCaption();
     }
     if (block % 3 === 2 && placedLines < capacity - reserve) {
       // 図・表・数式を順に回す。ここを固定の添字にしていたので、

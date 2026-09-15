@@ -746,6 +746,71 @@ test('題名は直せる', async () => {
   assert.equal(empty.status, 400);
 });
 
+test('訳は消せる。消してそのまま訳さないに移せる', async () => {
+  // これが無かった頃、いちど訳が付いた文は二度と未訳に戻せなかった。
+  // skip_sentences は既訳の文を対象外にできないので、Claude が参考文献の
+  // 断片に先に訳を付けると、その文を片付ける道が塞がっていた。
+  const id = await ingest();
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  const [a, b] = document.structure.sentences;
+
+  for (const hash of [a!.hash, b!.hash]) {
+    await fetch(`${baseUrl}/api/documents/${id}/translations/${hash}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: '訳', source: 'human' }),
+    });
+  }
+
+  // 空文字での「消したつもり」は通さず、消し方を案内する。
+  const empty = await fetch(`${baseUrl}/api/documents/${id}/translations/${a!.hash}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: '   ', source: 'human' }),
+  });
+  assert.equal(empty.status, 400);
+  assert.match(((await empty.json()) as { error: string }).error, /訳を消す/);
+
+  const removed = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/translations/${a!.hash}`, { method: 'DELETE' })
+  ).json()) as { deleted: boolean; skipped: boolean };
+  assert.deepEqual(removed, { deleted: true, skipped: false });
+
+  const both = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/translations/${b!.hash}?skip=1`, { method: 'DELETE' })
+  ).json()) as { deleted: boolean; skipped: boolean };
+  assert.deepEqual(both, { deleted: true, skipped: true });
+
+  const after = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    annotations: { translations: Record<string, unknown>; skipped?: Record<string, unknown> };
+  };
+  assert.equal(Object.keys(after.annotations.translations).length, 0);
+  assert.deepEqual(Object.keys(after.annotations.skipped ?? {}), [b!.hash]);
+
+  // もう無い訳を消しても壊れない（二重クリック）。
+  const again = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/translations/${a!.hash}`, { method: 'DELETE' })
+  ).json()) as { deleted: boolean };
+  assert.equal(again.deleted, false);
+});
+
+test('health は MCP の貼り先と、つながったかどうかを返す', async () => {
+  // JSON だけ渡して「MCP 設定に足す」と言っていた頃、はじめての人はここで止まった。
+  const before = (await (await fetch(`${baseUrl}/api/health`)).json()) as {
+    mcp: { configPath: string; addCommand: string | null; lastContactAt: number | null };
+  };
+  assert.match(before.mcp.configPath, /claude_desktop_config\.json$/);
+  assert.equal(before.mcp.lastContactAt, null);
+
+  await fetch(`${baseUrl}/api/health`, { headers: { 'X-LogiXiv-Client': 'mcp' } });
+  const after = (await (await fetch(`${baseUrl}/api/health`)).json()) as {
+    mcp: { lastContactAt: number | null };
+  };
+  assert.equal(typeof after.mcp.lastContactAt, 'number');
+});
+
 test('題名の改行・制御文字・双方向記号は表示に出る前に落とす', async () => {
   // 題名は一覧・ツールバー・書き出した HTML の <h1> にそのまま出る。
   // 1 行のはずの場所が崩れ、U+202E は後ろの文字を逆順に見せる。

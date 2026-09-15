@@ -1,5 +1,12 @@
 import { Worker } from 'node:worker_threads';
-import { buildSentencesFromChunks, STRUCTURE_VERSION, type DocumentStructure } from '@logixiv/core';
+import {
+  buildSentencesFromChunks,
+  guessTitleFromChunks,
+  sanitizeTitle,
+  STRUCTURE_VERSION,
+  type DocumentStructure,
+  type TextChunk,
+} from '@logixiv/core';
 import type { FallbackWorkerInput, FallbackWorkerOutput } from './fallback-worker.ts';
 
 /**
@@ -69,6 +76,23 @@ function runWorker(input: FallbackWorkerInput, timeoutMs: number): Promise<Fallb
   });
 }
 
+/**
+ * 題名を決める。メタデータ → 1 ページ目の最大文字 → 諦める（null）。
+ *
+ * メタデータの Title は当たれば一番正確だが、`untitled.dvi`・`Microsoft Word - …`・
+ * ファイル名そのものが入っていることが多いので、そういうものは捨てる。
+ * 捨てたときは版面から推測する。どちらも駄目なら null を返し、
+ * 従来どおり本文 1 文目とファイル名へ落ちる。
+ */
+function pickTitle(metadataTitle: string | null, chunks: TextChunk[]): string | null {
+  const meta = metadataTitle === null ? '' : sanitizeTitle(metadataTitle);
+  const looksLikeFileName = /\.(pdf|dvi|tex|docx?|ps)$/i.test(meta) || /^Microsoft Word\b/i.test(meta);
+  if (meta.length >= 8 && meta.length <= 300 && !looksLikeFileName) return meta;
+
+  const guessed = guessTitleFromChunks(chunks);
+  return guessed === null ? null : sanitizeTitle(guessed);
+}
+
 export async function parseWithPdfJs(
   pdf: Uint8Array,
   limits: FallbackLimits = DEFAULT_FALLBACK_LIMITS,
@@ -94,7 +118,7 @@ export async function parseWithPdfJs(
       ...warnings,
     ].join(' / '),
     parsedAt: new Date().toISOString(),
-    title: null,
+    title: pickTitle(output.metadataTitle, output.chunks),
     abstract: null,
     pageSizes: output.pageSizes,
     sections,

@@ -4,6 +4,7 @@ import {
   applyStructure,
   createDocument,
   deleteNote,
+  deleteTranslation,
   describeSanitizeReport,
   editSentenceBoundary,
   LOGIXIV_VERSION,
@@ -94,6 +95,8 @@ export class LogiXivApi {
   readonly bus: EventBus;
   readonly config: Config;
   private readonly parseSlots = new Semaphore(MAX_CONCURRENT_PARSES);
+  /** MCP から最後に呼ばれた時刻。プロセスを跨いで残す必要はない（今つながっているかの話）。 */
+  private lastMcpContactAt: number | null = null;
 
   constructor(config: Config, bus?: EventBus) {
     this.config = config;
@@ -312,6 +315,33 @@ export class LogiXivApi {
       this.bus.publish({ type: 'translation.updated', documentId: id, sentenceHash });
     }
     return outcome;
+  }
+
+  /**
+   * 訳を消す。`alsoSkip` を立てると、消したうえで「訳さない」に移す。
+   *
+   * この 2 つを 1 回にしたのは、既訳の文を対象外にしたいときの唯一の道だから。
+   * 別々に呼ばせると、消した直後の一瞬だけ「未訳」に見える状態が画面に出る。
+   */
+  async deleteTranslation(
+    id: string,
+    sentenceHash: string,
+    options: { alsoSkip?: boolean } = {},
+  ): Promise<{ deleted: boolean; skipped: boolean }> {
+    let deleted = false;
+    let skipped = false;
+    await this.mutate(id, (current) => {
+      const removed = deleteTranslation(current, sentenceHash);
+      deleted = removed.deleted;
+      if (!options.alsoSkip) return removed.document;
+      const result = skipSentences(removed.document, [sentenceHash], 'other');
+      skipped = result.applied > 0;
+      return result.document;
+    });
+    if (deleted || skipped) {
+      this.bus.publish({ type: 'translation.updated', documentId: id, sentenceHash });
+    }
+    return { deleted, skipped };
   }
 
   /** 訳をまとめて書き込む。Claude が 20 文ずつ返してくるので、1 文ずつ往復させない。 */
@@ -773,13 +803,24 @@ export class LogiXivApi {
     this.bus.publish({ type: 'document.deleted', documentId: id });
   }
 
+  /** MCP から呼ばれたことを記録する（health で「つながっている」を出すため）。 */
+  noteMcpContact(): void {
+    this.lastMcpContactAt = Date.now();
+  }
+
   async health(): Promise<{
     ok: true;
     version: string;
     grobid: 'up' | 'down';
     grobidUrl: string;
     dataDir: string;
-    mcp: { entry: string | null; url: string };
+    mcp: {
+      entry: string | null;
+      url: string;
+      configPath: string;
+      addCommand: string | null;
+      lastContactAt: number | null;
+    };
   }> {
     return {
       ok: true,
@@ -789,7 +830,22 @@ export class LogiXivApi {
       dataDir: this.config.dataDir,
       // 画面から Claude の設定をそのまま貼れるようにする。
       // 手順書にしか無い状態だと、翻訳の始め方が製品の中のどこにも書かれていない。
-      mcp: { entry: this.config.mcpEntry, url: this.config.publicUrl },
+      // 貼り先のファイルと、端末なら 1 行で済むコマンドも一緒に出す。
+      // JSON だけ渡して「MCP 設定に足す」と言うのは、道具の置き場所を
+      // 教えずに「工具箱に入れて」と言うのと同じだった。
+      mcp: {
+        entry: this.config.mcpEntry,
+        url: this.config.publicUrl,
+        configPath: this.config.claudeConfigPath,
+        addCommand: this.config.mcpEntry
+          ? `claude mcp add-json logixiv '${JSON.stringify({
+              command: 'node',
+              args: [this.config.mcpEntry],
+              env: { LOGIXIV_URL: this.config.publicUrl },
+            })}'`
+          : null,
+        lastContactAt: this.lastMcpContactAt,
+      },
     };
   }
 

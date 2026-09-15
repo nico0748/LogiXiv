@@ -141,29 +141,87 @@ function isSentenceEndingPeriod(text: string, index: number): boolean {
 }
 
 /**
+ * 連結後の 1 文字が、どの文字片のどの位置から来たかの記録。
+ * `offset` は文字片の本文内の位置。行の継ぎ目に入れる空白は元の文字片に無いので -1 を入れ、
+ * 幅の計算には使わない（無い文字の幅を数えると矩形が文字片の外へはみ出す）。
+ */
+interface CharOwner {
+  chunk: TextChunk;
+  line: number;
+  offset: number;
+}
+
+/** 文字片のうち、この文が実際に使った文字位置の範囲 [from, to)。 */
+interface ChunkSpan {
+  line: number;
+  from: number;
+  to: number;
+}
+
+/**
  * 矩形は行単位でまとめる。以前は `Math.round(y)` の一致で束ねていたため、
  * 同じ行でも y が丸め境界をまたぐと矩形が 2 つに割れてハイライトが二重になっていた。
+ *
+ * まとめる範囲は**その文が実際に占めた x 範囲だけ**にする。以前は行に触れた文字片の
+ * 外接矩形をそのまま使っていたので、文が行の途中で終わると、その行が前後どちらの文にも
+ * 行いっぱいの幅で入っていた。pdf.js は 1 行まるごとを 1 個の文字片で返すことが普通に
+ * あるため、2 文が同一の矩形を持ち、PDF を押しても隣の文が選ばれる（しかも後から
+ * 描かれた文に完全に覆われて、二度と選べない文まで出る）。
+ *
+ * 文字片の一部だけを使ったときは、**文字数の比**で x を按分する。等幅ではないので
+ * 境目は数文字ぶんずれるが、行の左半分と右半分が別の文に分かれるという肝心の性質は保たれる。
+ * 文字ごとの正確な x は pdf.js の TextItem には無い（取るには文字単位で組版し直すしかない）。
  */
-function mergeRects(owners: { chunk: TextChunk; line: number }[]): Rect[] {
-  const byLine = new Map<number, TextChunk[]>();
-  for (const { chunk, line } of owners) {
-    const list = byLine.get(line);
-    if (list) {
-      if (!list.includes(chunk)) list.push(chunk);
+function mergeRects(owners: CharOwner[]): Rect[] {
+  // 文字片ごとに、この文が覆った文字位置の範囲を集める。
+  const spans = new Map<TextChunk, ChunkSpan>();
+  for (const { chunk, line, offset } of owners) {
+    let span = spans.get(chunk);
+    if (!span) {
+      span = { line, from: Infinity, to: -Infinity };
+      spans.set(chunk, span);
+    }
+    if (offset < 0) continue; // 継ぎ目の空白。位置を持たないので範囲には数えない。
+    if (offset < span.from) span.from = offset;
+    if (offset + 1 > span.to) span.to = offset + 1;
+  }
+
+  interface Band {
+    page: number;
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+  }
+  const byLine = new Map<number, Band>();
+  for (const [chunk, span] of spans) {
+    // 継ぎ目の空白しか含まない文字片は、この文の本文をひと文字も持たない。
+    if (span.to <= span.from || chunk.text.length === 0) continue;
+    const length = chunk.text.length;
+    const x0 = chunk.x + (chunk.w * Math.min(span.from, length)) / length;
+    const x1 = chunk.x + (chunk.w * Math.min(span.to, length)) / length;
+    const band = byLine.get(span.line);
+    if (band) {
+      band.x0 = Math.min(band.x0, x0);
+      band.x1 = Math.max(band.x1, x1);
+      band.y0 = Math.min(band.y0, chunk.y);
+      band.y1 = Math.max(band.y1, chunk.y + chunk.h);
     } else {
-      byLine.set(line, [chunk]);
+      byLine.set(span.line, { page: chunk.page, x0, y0: chunk.y, x1, y1: chunk.y + chunk.h });
     }
   }
+
   const rects: Rect[] = [];
-  for (const list of byLine.values()) {
-    const page = list[0]!.page;
-    const x0 = Math.min(...list.map((c) => c.x));
-    const y0 = Math.min(...list.map((c) => c.y));
-    const x1 = Math.max(...list.map((c) => c.x + c.w));
-    const y1 = Math.max(...list.map((c) => c.y + c.h));
-    rects.push({ page, x: round(x0), y: round(y0), w: round(x1 - x0), h: round(y1 - y0) });
+  for (const band of byLine.values()) {
+    // 幅ではなく**両端**を丸める。幅を丸めると、隣り合う文の矩形が丸め誤差のぶんだけ
+    // 重なることがあり、「重ならない」という今回の修正の要点が境目で崩れる。
+    const x = round(band.x0);
+    const y = round(band.y0);
+    // 端の差を取ってから丸め直す。差は既に 0.01 の倍数なので、丸めても端は動かない
+    // （x + w は round(band.x1) のまま）。浮動小数の桁あふれを書き出さないためだけの処理。
+    rects.push({ page: band.page, x, y, w: round(round(band.x1) - x), h: round(round(band.y1) - y) });
   }
-  return rects.sort((a, b) => a.page - b.page || a.y - b.y);
+  return rects.sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
 }
 
 function round(n: number): number {
@@ -177,21 +235,132 @@ export interface FallbackResult {
 
 /**
  * 行末ハイフンを落として良いかの判断材料。
- * 同じ文書の**行の途中**に "block-sparse" のような形で現れるハイフン付き複合語を集めておき、
- * 行末で割れた語がそれに一致するならハイフンを残す。
- * 辞書を持たずに "state-of-the-art" を守り、"informa-" + "tion" は結合できる。
+ *
+ * `hyphenated` は、同じ文書の**行の途中**に "block-sparse" の形で現れるハイフン付き複合語。
+ * `compoundPrefixes` はその**ハイフンで切った前側**（"state-of-the-art" なら
+ * "state" と "state-of" と "state-of-the"）。複合語の途中で行が割れても照合できる。
+ * `words` は、同じ文書に**ハイフン無しの 1 語として**現れた語。
+ *
+ * 用例だけで決めていた頃は、文書内に 1 回しか出ない複合語が行末で割れると
+ * ハイフンごと落ちていた（実測: 2 段組の論文で `long-range` → `longrange`。
+ * 同じ論文の `straight-through` は、たまたま行中の用例があったので無事だった＝
+ * 論文ごとに当たり外れが変わる）。用例は依然として最も強い手掛かりなので捨てず、
+ * 語形の判定（`decideLineEndHyphen`）で足りないぶんを補う。
  */
-function collectInlineHyphenated(lines: ClassifiedLine[]): Set<string> {
-  const seen = new Set<string>();
+interface HyphenEvidence {
+  hyphenated: Set<string>;
+  compoundPrefixes: Set<string>;
+  words: Set<string>;
+}
+
+/** 語の切り出し。アポストロフィを含む形（don't）も 1 語として拾う。 */
+const WORD_TOKEN = /\p{L}+(?:['’]\p{L}+)*/gu;
+
+function collectHyphenEvidence(lines: ClassifiedLine[]): HyphenEvidence {
+  const hyphenated = new Set<string>();
+  const compoundPrefixes = new Set<string>();
+  const words = new Set<string>();
+  let previousBroke = false;
   for (const line of lines) {
+    const broken = /-\s*$/.test(line.text);
     // 行末のハイフンは「割れた語」なので用例として数えない。数えると
     // 「割れた語は必ず用例あり」になり、ハイフンが永久に残る。
     const text = line.text.replace(/-\s*$/, '');
     for (const match of text.matchAll(/\p{L}+(?:-\p{L}+)+/gu)) {
-      seen.add(match[0].toLowerCase());
+      const compound = match[0].toLowerCase();
+      hyphenated.add(compound);
+      const parts = compound.split('-');
+      for (let i = 1; i < parts.length; i++) compoundPrefixes.add(parts.slice(0, i).join('-'));
     }
+
+    // 単独語の語彙。割れた語の**断片**を混ぜてはいけない（"informa" や "tion" が
+    // 「文書に出る語」になると、語形の判定がそれを複合語の片割れと見てしまう）。
+    const tokens = [...text.matchAll(WORD_TOKEN)].map((m) => m[0]);
+    const from = previousBroke ? 1 : 0; // 直前の行が割れていれば、先頭の語はその続き
+    const to = broken ? tokens.length - 1 : tokens.length; // 行末で割れていれば、末尾の語は断片
+    for (let i = from; i < to; i++) words.add(tokens[i]!.toLowerCase());
+    previousBroke = broken;
   }
-  return seen;
+  return { hyphenated, compoundPrefixes, words };
+}
+
+/**
+ * 行末ハイフンの右側が接尾辞（それ単独では語にならない拘束形態素）か。
+ *
+ * "informa-" + "tion" のような**音節で割れた 1 語**を確実に繋ぐための門。
+ * 実在の複合語でここに当たるものは、まず無い（"-based" "-aware" "-level" は入れていない）。
+ */
+const BOUND_SUFFIX =
+  /^(?:s|es|ed|ing|ings|er|ers|est|ly|ion|ions|tion|tions|sion|sions|ment|ments|ness|ity|ities|ance|ence|ancy|ency|able|ible|ive|ives|ous|ful|less|ism|ist|ists|ize|ized|izes|izing|ization|al|ally|ic|ics|ical|ate|ated|ates|ating|ary|ory|ure|ures|age|ages|ant|ent|ship|hood|wise|ward|wards|ial|ual|ular|tive|sive|tial|cial|tory|tories|ian|ians)$/;
+
+/** 母音を含むか。含まない断片（"str" "ph"）は単語ではありえない。 */
+const HAS_VOWEL = /[aeiouy]/;
+
+/** 末尾が子音 2 つ以上か。 */
+const ENDS_IN_CLUSTER = /[^aeiouy]{2}$/;
+
+/**
+ * 行末ハイフンを残すか（true）、ハイフンごと落として繋ぐか（false）。
+ *
+ * 辞書は持てない（コアは無依存）ので、**文書内の統計**と**語形**だけで決める。
+ * 強い手掛かりから順に見て、決まらなければ「繋ぐ」に倒す — 論文の行末ハイフンは
+ * 大半が本物のハイフネーションなので、既定値を逆にすると "informa-tion" が量産される。
+ *
+ * 語形の決め手は「左側が子音 2 つ以上で終わるか」。欧文のハイフネーションは
+ * 音節の切れ目で起きるので、子音連続の**直後**では、まず割れない
+ * （"con-straint" とは割るが "cons-traint" とは割らない）。逆に複合語の前側は
+ * 独立した語なので子音で終わってよい（long, block, cross, self, short, straight…）。
+ *
+ * 実測（TeX の hyphenation pattern で割った 1240 点と、実在の複合語 120 点）:
+ *   - 語形だけ … 複合語を 27% 拾い、ハイフネーションを 2.6% 誤って残す。
+ *   - 連結形が文書内に 1 語として出る、を足す … 誤って残すのが 0%（2.6% → 0）。
+ *     誤りの中身は downstream / hardware / throughput / transformer のような
+ *     続けて綴る複合語で、論文なら別の場所に 1 語で出る。
+ *   - 両側が文書内に単独語として出る、を足す … 複合語を 78% 拾う（27% → 78%）。
+ */
+function decideLineEndHyphen(left: string, right: string, evidence: HyphenEvidence): boolean {
+  const joined = `${left}-${right}`.toLowerCase();
+  // 完全一致だけでなく、用例の**前側**とも照合する。"state-of-the-art" が行中にあるとき、
+  // "state-" で割れた行の joined は "state-of" にしかならず、完全一致では拾えない。
+  if (evidence.hyphenated.has(joined) || evidence.compoundPrefixes.has(joined)) return true;
+
+  // 数字・大文字が絡む形（"CNN-based" "Transformer-XL" "3-layer"）。
+  // 欧文のハイフネーションはこれらをまたがないので、無条件で残してよい。
+  if (/[\p{Lu}\p{N}]$/u.test(left) || /^[\p{Lu}\p{N}]/u.test(right)) return true;
+
+  // 左側に既にハイフンがある（"state-of-the-" + "art"）。
+  // TeX は明示のハイフンより後ろを音節で割らないので、こう見えたということは
+  // 明示のハイフンの位置で折り返したということ。用例が 1 つも無い
+  // "state-of-the-art" が "state-of-theart" になっていたのはこの経路。
+  if (left.includes('-')) return true;
+
+  // ここから先はハイフンを含まない語同士の判定（上でハイフン入りは片付いている）。
+  const head = left.toLowerCase();
+  const tail = right.toLowerCase();
+
+  // 連結形が文書内に 1 語として出るなら、割れていたのはその語。
+  // "with-" + "out" → without、"trans-" + "former" → transformer。
+  if (evidence.words.has(`${head}${tail}`)) return false;
+
+  // 右側が拘束形態素なら、複合語ではありえない。
+  if (BOUND_SUFFIX.test(tail)) return false;
+
+  // 左側が、文書内の別の複合語でも前側に立っているなら複合語の前側
+  // （"self-supervised" が行中にあれば "self-" + "attention" も複合語）。
+  if (evidence.compoundPrefixes.has(head)) return true;
+
+  // 両側とも、文書内に単独の語として出ている。
+  // 短い語は前置詞・接頭辞と区別できないので 4 文字以上に限る。
+  if (head.length >= 4 && tail.length >= 4 && evidence.words.has(head) && evidence.words.has(tail)) {
+    return true;
+  }
+
+  // 語形だけの判定。左側が子音連続で終わる（＝音節の切れ目ではない）。
+  if (head.length >= 3 && tail.length >= 3 && HAS_VOWEL.test(head) && HAS_VOWEL.test(tail)) {
+    if (ENDS_IN_CLUSTER.test(head)) return true;
+  }
+
+  return false;
 }
 
 /**
@@ -203,7 +372,7 @@ function collectInlineHyphenated(lines: ClassifiedLine[]): Set<string> {
  */
 export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[]): FallbackResult {
   const lines = classifyLines(buildLines(chunks), pages);
-  const inlineHyphenated = collectInlineHyphenated(lines);
+  const hyphenEvidence = collectHyphenEvidence(lines);
 
   const sections: Section[] = [];
   const sectionIds = new Set<string>();
@@ -229,15 +398,22 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
    */
   interface Segment {
     buffer: string;
-    owners: { chunk: TextChunk; line: number; section: string | null }[];
+    owners: (CharOwner & { section: string | null })[];
   }
   const segments: Segment[] = [{ buffer: '', owners: [] }];
   let currentSection: string | null = null;
 
-  const push = (text: string, chunk: TextChunk, line: number): void => {
+  /**
+   * 連結後の文字と、その出どころ（文字片・行・節）を対応づける。
+   * `offset` は文字片の本文内の位置。行の継ぎ目に入れる空白は元の文字片に無いので、
+   * `from` に -1 を渡して「位置を持たない文字」として記録する（mergeRects が幅から除く）。
+   */
+  const push = (text: string, chunk: TextChunk, line: number, from: number): void => {
     const segment = segments[segments.length - 1]!;
     segment.buffer += text;
-    for (let k = 0; k < text.length; k++) segment.owners.push({ chunk, line, section: currentSection });
+    for (let k = 0; k < text.length; k++) {
+      segment.owners.push({ chunk, line, offset: from < 0 ? -1 : from + k, section: currentSection });
+    }
   };
 
   const bodyLines = lines.filter((line) => line.role !== 'furniture');
@@ -260,15 +436,15 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
       const gap = previousRight === null ? Infinity : chunk.x - previousRight;
       if (previousRight !== null && gap > chunk.h * 0.22) {
         const segment = segments[segments.length - 1]!;
-        if (!segment.buffer.endsWith(' ')) push(' ', chunk, line.index);
+        if (!segment.buffer.endsWith(' ')) push(' ', chunk, line.index, -1);
       }
-      push(chunk.text, chunk, line.index);
+      push(chunk.text, chunk, line.index, 0);
       previousRight = chunk.x + chunk.w;
     }
     {
       const segment = segments[segments.length - 1]!;
       if (segment.buffer.length > 0 && !segment.buffer.endsWith(' ')) {
-        push(' ', line.chunks[line.chunks.length - 1]!, line.index);
+        push(' ', line.chunks[line.chunks.length - 1]!, line.index, -1);
       }
     }
 
@@ -285,8 +461,7 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
     const nextWord = /^(\p{L}+)/u.exec(next.text)?.[1];
     if (!nextWord) continue;
 
-    const joined = `${hyphen[1]!}-${nextWord}`.toLowerCase();
-    if (inlineHyphenated.has(joined)) {
+    if (decideLineEndHyphen(hyphen[1]!, nextWord, hyphenEvidence)) {
       // 本来ハイフンを含む複合語。ハイフンを残したまま行を直結する（空白だけ落とす）。
       segment.buffer = segment.buffer.slice(0, -1);
       segment.owners.length = segment.buffer.length;

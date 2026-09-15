@@ -647,6 +647,110 @@ textarea {
   color: var(--accent);
 }
 
+.card-note-author {
+  margin-left: 0.4rem;
+  opacity: 0.7;
+  font-size: 0.72rem;
+}
+
+.card-note-author::before {
+  content: '— ';
+}
+
+/* 解析方式は選ばせる。auto しか無いと、元の方式へ戻す操作が存在しなくなる。 */
+.reparse-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.4rem 0;
+  font-size: 0.85rem;
+}
+
+.reparse-choice {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+}
+
+.reparse-warn {
+  color: var(--warn);
+  font-size: 0.78rem;
+}
+
+.reparse-caution {
+  border-left: 3px solid var(--warn);
+  padding-left: 0.6rem;
+}
+
+/* 取り返しのつかない操作は、ダイアログではなくその場で訊く。 */
+.card-confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.35rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  font-size: 0.78rem;
+}
+
+.card-confirm span {
+  flex: 1 1 12rem;
+  color: var(--muted);
+}
+
+/* 同じ本文のくり返しは、訳が勝手に入ったように見える。理由をその場に置く。 */
+.card-repeat {
+  margin: 0.15rem 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* 貼り先のパスは設定 JSON と同じくらい大事なので、同じ段に並べる。 */
+.translate-path {
+  margin: 0.3rem 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.translate-path code {
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.translate-inline {
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+.translate-alt {
+  margin: 0.4rem 0 0;
+  font-size: 0.82rem;
+}
+
+.translate-alt summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+/* 接続できているかどうかは、この画面でいちばん知りたいこと。 */
+.translate-status {
+  margin: 0.3rem 0 0;
+  font-size: 0.82rem;
+}
+
+.translate-status.is-waiting {
+  color: var(--warn);
+}
+
+.translate-status.is-connected {
+  color: var(--good);
+}
+
 /* 失敗は色を変えて、次にどうすればいいかを本文で言う。 */
 .translate-copied.is-failed {
   color: var(--warn, #b3261e);
