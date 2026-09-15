@@ -22,6 +22,25 @@ export interface CreateDocumentInput {
 }
 
 /**
+ * 題名として画面と書き出しに出せる形に整える。
+ *
+ * 題名は 3 経路から来る: PDF のメタデータ、GROBID の TEI、本文の 1 文目、
+ * そして人が打ち直したもの。前の 3 つは外から来る文字列で、改行や制御文字、
+ * 双方向テキストの上書き記号（U+202E など）がそのまま入り得る。
+ * これが一覧・ツールバー・書き出した HTML の <h1> に流れると、
+ * 1 行のはずの場所が崩れ、並びが逆に見え、見えない文字が混ざる。
+ * 表示に使う値なので、入り口ではなく題名を作るところで落とす。
+ */
+export function sanitizeTitle(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    // 双方向の上書き・分離（文字が逆順に見える）と、幅ゼロの文字。
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * 表示に使う題名。
  *
  * ファイル名を題名にしていたので、一覧にも書き出しにも `paper` や `2401.01234v2`
@@ -29,14 +48,14 @@ export interface CreateDocumentInput {
  * たいてい表題そのものなので、そちらの方がまだ当たる。
  */
 export function documentTitle(structure: DocumentStructure, sourceFileName: string): string {
-  const fromStructure = structure.title?.trim();
-  if (fromStructure && fromStructure.length > 0) return fromStructure;
+  const fromStructure = sanitizeTitle(structure.title ?? '');
+  if (fromStructure.length > 0) return fromStructure;
 
-  const first = structure.sentences[0]?.text.trim() ?? '';
+  const first = sanitizeTitle(structure.sentences[0]?.text ?? '');
   // 長すぎるもの・文末が句点のもの（＝本文の 1 文）は題名として使わない。
   if (first.length >= 8 && first.length <= 160 && !/[.!?。]$/.test(first)) return first;
 
-  return sourceFileName.replace(/\.pdf$/i, '');
+  return sanitizeTitle(sourceFileName.replace(/\.pdf$/i, ''));
 }
 
 export function createDocument(input: CreateDocumentInput): PaperDocument {

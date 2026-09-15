@@ -13,6 +13,7 @@ import {
   progress,
   removeGlossaryEntry,
   replaceInTranslations,
+  sanitizeTitle,
   upsertGlossaryEntry,
   searchDocument,
   sentenceEditsOf,
@@ -186,7 +187,9 @@ export class LogiXivApi {
    * 推測を賢くするより、直せるようにする方が確実に効く。
    */
   async renameDocument(id: string, title: string): Promise<PaperDocument> {
-    const trimmed = title.trim();
+    // 制御文字・双方向の上書き記号を落としてから空かどうかを見る。
+    // 「\u202e だけ」の題名は trim では空にならないが、出せる文字は無い。
+    const trimmed = sanitizeTitle(title);
     if (trimmed.length === 0) throw new BadRequestError('題名が空です');
     const document = await this.mutate(id, (current) => ({
       ...current,

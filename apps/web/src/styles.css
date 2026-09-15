@@ -647,6 +647,12 @@ textarea {
   color: var(--accent);
 }
 
+/* 失敗は色を変えて、次にどうすればいいかを本文で言う。 */
+.translate-copied.is-failed {
+  color: var(--warn, #b3261e);
+  font-weight: 600;
+}
+
 /* 操作の存在を 1 行だけ知らせる。見つからない機能は無いのと同じ。 */
 .parser-keys {
   opacity: 0.75;

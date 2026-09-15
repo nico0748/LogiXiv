@@ -746,6 +746,28 @@ test('題名は直せる', async () => {
   assert.equal(empty.status, 400);
 });
 
+test('題名の改行・制御文字・双方向記号は表示に出る前に落とす', async () => {
+  // 題名は一覧・ツールバー・書き出した HTML の <h1> にそのまま出る。
+  // 1 行のはずの場所が崩れ、U+202E は後ろの文字を逆順に見せる。
+  const id = await ingest();
+  const messy = await fetch(`${baseUrl}/api/documents/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Block\u0000 Sparse\nAttention\u202e\u200b for Long\tDocuments' }),
+  });
+  assert.equal(messy.status, 200);
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as { title: string };
+  assert.equal(document.title, 'Block Sparse Attention for Long Documents');
+
+  // 見える文字が一つも残らない題名は、空と同じく拒む。
+  const invisible = await fetch(`${baseUrl}/api/documents/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: '\u202e\u200b\n' }),
+  });
+  assert.equal(invisible.status, 400);
+});
+
 test('訳語を変えたときの置き換えは、候補を全部見せてから 1 件ずつ適用する', async () => {
   // 日本語には語の切れ目が無いので、件数だけ見せて走らせてはいけない。
   const id = await ingest();

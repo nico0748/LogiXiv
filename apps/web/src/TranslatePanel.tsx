@@ -41,22 +41,36 @@ function configJson(entry: string | null, url: string): string {
 }
 
 export function TranslatePanel({ health, documentTitle, remaining, lastWriteAt, onClose }: Props): React.JSX.Element {
-  const [copied, setCopied] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const entry = health?.mcp?.entry ?? null;
   const url = health?.mcp?.url ?? 'http://127.0.0.1:4173';
   const sentence = `LogiXiv の「${documentTitle}」を翻訳して`;
 
   useEffect(() => {
-    if (copied === null) return;
-    const timer = setTimeout(() => setCopied(null), 1800);
+    if (notice === null) return;
+    // 失敗のときは読む時間が要る。成功はすぐ消えてよい。
+    const timer = setTimeout(() => setNotice(null), notice.ok ? 1800 : 6000);
     return () => clearTimeout(timer);
-  }, [copied]);
+  }, [notice]);
 
+  /**
+   * クリップボードは http://127.0.0.1 では使えることが多いが、保証はない。
+   * 権限が下りない環境も、そもそも API が無い環境もある。
+   * 黙って何も起きないのがいちばん困る（押したのに進めない）ので、
+   * 使えないときは「上の枠を選んで手でコピーしてください」と言い切る。
+   */
   const copy = (label: string, text: string): void => {
-    void navigator.clipboard
-      ?.writeText(text)
-      .then(() => setCopied(label))
-      .catch(() => setCopied(`${label}（コピーできませんでした。選んで手でコピーしてください）`));
+    const clipboard = navigator.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== 'function') {
+      setNotice({ ok: false, text: `${label}をコピーできませんでした。上の枠を選んで手でコピーしてください。` });
+      return;
+    }
+    void clipboard
+      .writeText(text)
+      .then(() => setNotice({ ok: true, text: `${label}をコピーしました` }))
+      .catch(() =>
+        setNotice({ ok: false, text: `${label}をコピーできませんでした。上の枠を選んで手でコピーしてください。` }),
+      );
   };
 
   const active = lastWriteAt !== null && Date.now() - lastWriteAt < 60_000;
@@ -104,9 +118,13 @@ export function TranslatePanel({ health, documentTitle, remaining, lastWriteAt, 
         </li>
       </ol>
 
-      {copied && (
-        <p className="translate-copied" role="status" aria-live="polite">
-          {copied}をコピーしました
+      {notice && (
+        <p
+          className={notice.ok ? 'translate-copied' : 'translate-copied is-failed'}
+          role="status"
+          aria-live="polite"
+        >
+          {notice.text}
         </p>
       )}
     </div>
