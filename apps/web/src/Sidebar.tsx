@@ -18,7 +18,7 @@ interface Props {
   selectedId: string | null;
   filter: string;
   visibleSentences: Sentence[];
-  onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar') => void;
+  onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar' | 'keyboard') => void;
   onSaveTranslation: (hash: string, text: string) => Promise<boolean>;
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;
@@ -131,7 +131,7 @@ interface CardProps {
   document: PaperDocument;
   notes: Note[];
   active: boolean;
-  onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar') => void;
+  onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar' | 'keyboard') => void;
   onSaveTranslation: (hash: string, text: string) => Promise<boolean>;
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;

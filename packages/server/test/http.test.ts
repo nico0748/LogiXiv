@@ -746,15 +746,17 @@ test('題名は直せる', async () => {
   assert.equal(empty.status, 400);
 });
 
-test('訳語を変えたら、既に書いた訳も追随できる', async () => {
+test('訳語を変えたときの置き換えは、候補を全部見せてから 1 件ずつ適用する', async () => {
+  // 日本語には語の切れ目が無いので、件数だけ見せて走らせてはいけない。
   const id = await ingest();
   const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
     structure: { sentences: { hash: string }[] };
   };
-  const [a, b] = document.structure.sentences;
+  const [a, b, c] = document.structure.sentences;
   for (const [hash, text] of [
-    [a!.hash, 'ベースラインを上回る。'],
-    [b!.hash, 'ベースラインは弱い。'],
+    [a!.hash, '機械学習の手法。'],
+    [b!.hash, '学習率を下げる。'],
+    [c!.hash, '学習が進む。'],
   ] as const) {
     await fetch(`${baseUrl}/api/documents/${id}/translations/${hash}`, {
       method: 'PUT',
@@ -763,69 +765,124 @@ test('訳語を変えたら、既に書いた訳も追随できる', async () =>
     });
   }
 
-  // まず数えるだけ（押す前に件数を出せること）。
-  const dry = (await (
-    await fetch(`${baseUrl}/api/documents/${id}/glossary/replace`, {
+  const preview = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/glossary/preview-replace`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'ベースライン', to: '基準手法', dryRun: true }),
+      body: JSON.stringify({ from: '学習', to: 'ラーニング' }),
     })
-  ).json()) as { applied: number; revisedByHuman: number };
-  assert.equal(dry.applied, 2);
-  assert.equal(dry.revisedByHuman, 2);
+  ).json()) as {
+    total: number;
+    revisedByHuman: number;
+    candidates: { sentenceHash: string; before: string; after: string }[];
+  };
+  // 3 件とも巻き込まれる。機械学習・学習率まで変わることが見えていないといけない。
+  assert.equal(preview.total, 3);
+  assert.equal(preview.revisedByHuman, 3);
+  assert.ok(preview.candidates.some((x) => x.after === '機械ラーニングの手法。'));
+  assert.ok(preview.candidates.some((x) => x.after === 'ラーニング率を下げる。'));
 
-  const after = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+  // 下見では 1 文字も書き換わらない。
+  const untouched = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
     annotations: { translations: Record<string, { text: string }> };
   };
-  assert.equal(after.annotations.translations[a!.hash]?.text, 'ベースラインを上回る。', 'dryRun で書き換わっている');
+  assert.equal(untouched.annotations.translations[a!.hash]?.text, '機械学習の手法。');
 
+  // 選んだ 1 件だけ適用する。
+  const wanted = preview.candidates.find((x) => x.sentenceHash === c!.hash)!;
   const applied = (await (
-    await fetch(`${baseUrl}/api/documents/${id}/glossary/replace`, {
+    await fetch(`${baseUrl}/api/documents/${id}/translations/apply-edits`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'ベースライン', to: '基準手法' }),
+      body: JSON.stringify({ edits: [wanted] }),
     })
-  ).json()) as { applied: number };
-  assert.equal(applied.applied, 2);
+  ).json()) as { applied: number; stale: string[] };
+  assert.equal(applied.applied, 1);
 
   const done = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
     annotations: { translations: Record<string, { text: string; revisedByHuman: boolean }> };
   };
-  assert.equal(done.annotations.translations[a!.hash]?.text, '基準手法を上回る。');
-  assert.equal(done.annotations.translations[b!.hash]?.text, '基準手法は弱い。');
-  // 人手修正済みの印は消さない（機械が書き換えたわけではない）。
-  assert.equal(done.annotations.translations[a!.hash]?.revisedByHuman, true);
+  assert.equal(done.annotations.translations[c!.hash]?.text, 'ラーニングが進む。');
+  assert.equal(done.annotations.translations[a!.hash]?.text, '機械学習の手法。', '選んでいない行が変わった');
+  assert.equal(done.annotations.translations[b!.hash]?.text, '学習率を下げる。', '選んでいない行が変わった');
+  // 人手修正済みの印は消さない（機械が訳し直したわけではない）。
+  assert.equal(done.annotations.translations[c!.hash]?.revisedByHuman, true);
 });
 
-test('人手修正済みを除いた一括置換もできる', async () => {
+test('確認している間に書き換わった行は、黙って上書きせず飛ばす', async () => {
   const id = await ingest();
   const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
     structure: { sentences: { hash: string }[] };
   };
-  const [a, b] = document.structure.sentences;
-  await fetch(`${baseUrl}/api/documents/${id}/translations/${a!.hash}`, {
+  const hash = document.structure.sentences[0]!.hash;
+  await fetch(`${baseUrl}/api/documents/${id}/translations/${hash}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: '注意機構を使う。', source: 'human' }),
   });
-  await fetch(`${baseUrl}/api/documents/${id}/translations/${b!.hash}`, {
+
+  // 画面が見たのはこの内容。その後で別の書き込みが入る。
+  const stale = { sentenceHash: hash, before: '注意機構を使う。', after: 'アテンションを使う。' };
+  await fetch(`${baseUrl}/api/documents/${id}/translations/${hash}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: '注意機構は速い。', source: 'claude' }),
+    body: JSON.stringify({ text: 'Claude が書き直した訳。', source: 'human' }),
   });
 
   const result = (await (
-    await fetch(`${baseUrl}/api/documents/${id}/glossary/replace`, {
+    await fetch(`${baseUrl}/api/documents/${id}/translations/apply-edits`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: '注意機構', to: 'アテンション', includeRevisedByHuman: false }),
+      body: JSON.stringify({ edits: [stale] }),
     })
-  ).json()) as { applied: number };
-  assert.equal(result.applied, 1);
+  ).json()) as { applied: number; stale: string[] };
+  assert.equal(result.applied, 0);
+  assert.deepEqual(result.stale, [hash]);
 
-  const done = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+  const after = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
     annotations: { translations: Record<string, { text: string }> };
   };
-  assert.equal(done.annotations.translations[a!.hash]?.text, '注意機構を使う。', '人手修正済みが書き換わっている');
-  assert.equal(done.annotations.translations[b!.hash]?.text, 'アテンションは速い。');
+  assert.equal(after.annotations.translations[hash]?.text, 'Claude が書き直した訳。');
+});
+
+test('用語集は 1 件ずつ触れる（開いている間に増えた語を消さない）', async () => {
+  const id = await ingest();
+  await fetch(`${baseUrl}/api/documents/${id}/glossary/entry`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ term: 'attention', translation: '注意機構' }),
+  });
+  // 画面がこの一覧を見たあとで、Claude が別の語を足す。
+  await fetch(`${baseUrl}/api/documents/${id}/glossary`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries: [{ term: 'baseline', translation: 'ベースライン' }] }),
+  });
+  // 画面は自分が触った 1 件だけを送る。
+  await fetch(`${baseUrl}/api/documents/${id}/glossary/entry`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ term: 'attention', translation: 'アテンション' }),
+  });
+
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    annotations: { glossary: { term: string; translation: string }[] };
+  };
+  assert.deepEqual(
+    document.annotations.glossary.map((g) => `${g.term}=${g.translation}`).sort(),
+    ['attention=アテンション', 'baseline=ベースライン'],
+  );
+
+  const removed = await fetch(
+    `${baseUrl}/api/documents/${id}/glossary/entry?term=${encodeURIComponent('attention')}`,
+    { method: 'DELETE' },
+  );
+  assert.equal(removed.status, 200);
+  const left = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    annotations: { glossary: { term: string }[] };
+  };
+  assert.deepEqual(
+    left.annotations.glossary.map((g) => g.term),
+    ['baseline'],
+  );
 });

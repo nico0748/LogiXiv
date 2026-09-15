@@ -9,8 +9,11 @@ import {
   LOGIXIV_VERSION,
   mergeAnnotations,
   parseExportHtml,
+  applyTranslationEdits,
   progress,
+  removeGlossaryEntry,
   replaceInTranslations,
+  upsertGlossaryEntry,
   searchDocument,
   sentenceEditsOf,
   sentencesByHash,
@@ -58,6 +61,9 @@ const MAX_EXPORT_PDF_BYTES = 60 * 1024 * 1024;
  * ワーカースレッドに逃がしたとはいえ、1 本あたり数百 MB 使うので無制限にはしない。
  */
 const MAX_CONCURRENT_PARSES = 2;
+
+/** 置き換え候補として画面に出す上限。全部見せるのが原則だが、青天井にはしない。 */
+const MAX_REPLACEMENT_CANDIDATES = 500;
 
 class Semaphore {
   private active = 0;
@@ -448,48 +454,73 @@ export class LogiXivApi {
    * 訳語の一括置換。既に書いた訳を、新しい訳語に追随させる。
    * dryRun のときは何も書かず、対象の件数と最初の数件だけ返す。
    */
-  async replaceTerm(
+  /**
+   * 訳語を変えたときに書き換わる候補を、**1 件残らず**返す。書き込みはしない。
+   *
+   * 件数だけを見せて走らせる設計にしてはいけない。日本語には語の切れ目が無いので、
+   * 「学習 → ラーニング」は機械学習も学習率も巻き込む。何がどう変わるかを
+   * 目で見て選べることが、この機能が壊れ物にならない最低条件。
+   */
+  async previewTermReplacement(
     id: string,
     from: string,
     to: string,
-    options: { dryRun?: boolean; includeRevisedByHuman?: boolean } = {},
   ): Promise<{
-    applied: number;
+    total: number;
     revisedByHuman: number;
-    preview: { sentenceHash: string; before: string; after: string }[];
+    candidates: { sentenceHash: string; before: string; after: string; revisedByHuman: boolean }[];
   }> {
     if (from.trim().length === 0) throw new BadRequestError('置き換える語が空です');
+    const document = await this.require(id);
+    const { replacements } = replaceInTranslations(document, from, to);
+    return {
+      total: replacements.length,
+      revisedByHuman: replacements.filter((r) => r.revisedByHuman).length,
+      candidates: replacements.slice(0, MAX_REPLACEMENT_CANDIDATES),
+    };
+  }
 
-    if (options.dryRun) {
-      const document = await this.require(id);
-      const { replacements } = replaceInTranslations(document, from, to, options);
-      return {
-        applied: replacements.length,
-        revisedByHuman: replacements.filter((r) => r.revisedByHuman).length,
-        preview: replacements.slice(0, 5).map(({ sentenceHash, before, after }) => ({
-          sentenceHash,
-          before,
-          after,
-        })),
-      };
-    }
-
+  /** 画面で選んだ行だけを、見せた内容と一致する場合に限って書き換える。 */
+  async applyTranslationEdits(
+    id: string,
+    edits: { sentenceHash: string; before: string; after: string }[],
+  ): Promise<{ applied: number; stale: string[] }> {
     let applied = 0;
-    let revisedByHuman = 0;
-    let preview: { sentenceHash: string; before: string; after: string }[] = [];
+    let stale: string[] = [];
     await this.mutate(id, (current) => {
-      const result = replaceInTranslations(current, from, to, options);
-      applied = result.replacements.length;
-      revisedByHuman = result.replacements.filter((r) => r.revisedByHuman).length;
-      preview = result.replacements.slice(0, 5).map(({ sentenceHash, before, after }) => ({
-        sentenceHash,
-        before,
-        after,
-      }));
+      const result = applyTranslationEdits(current, edits);
+      applied = result.applied;
+      stale = result.stale;
       return result.document;
     });
     if (applied > 0) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'glossary-replace' });
-    return { applied, revisedByHuman, preview };
+    return { applied, stale };
+  }
+
+  /** 用語集の 1 件だけを足す・直す（画面の古い一覧で全体を上書きしないため）。 */
+  async upsertGlossaryEntry(id: string, entry: GlossaryEntry): Promise<{ added: boolean; total: number }> {
+    if (entry.term.trim().length === 0) throw new BadRequestError('原語が空です');
+    if (entry.translation.trim().length === 0) throw new BadRequestError('訳語が空です');
+    let added = false;
+    const document = await this.mutate(id, (current) => {
+      const result = upsertGlossaryEntry(current, entry);
+      added = result.added;
+      return result.document;
+    });
+    this.bus.publish({ type: 'document.updated', documentId: id, reason: 'glossary' });
+    return { added, total: document.annotations.glossary.length };
+  }
+
+  /** 用語集の 1 件だけを消す。 */
+  async removeGlossaryEntry(id: string, term: string): Promise<{ removed: boolean; total: number }> {
+    let removed = false;
+    const document = await this.mutate(id, (current) => {
+      const result = removeGlossaryEntry(current, term);
+      removed = result.removed;
+      return result.document;
+    });
+    if (removed) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'glossary' });
+    return { removed, total: document.annotations.glossary.length };
   }
 
   /** 「これは訳す対象ではない」と記録する。未訳の集計から外れる。 */

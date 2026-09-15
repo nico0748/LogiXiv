@@ -29,7 +29,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 interface Props {
   document: PaperDocument;
   selectedId: string | null;
-  onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar') => void;
+  onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar' | 'keyboard') => void;
   /** サイドバーで絞り込み中に、対象外のマーカーを押せなくするため。 */
   visibleSentenceIds: ReadonlySet<string> | null;
   zoom: number;

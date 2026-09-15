@@ -128,35 +128,42 @@ export const api = {
 
   getDocument: (id: string) => request<PaperDocument>(`/api/documents/${id}`),
 
-  setGlossary: (id: string, entries: { term: string; translation: string; note: string | null }[]) =>
-    request<{ ok: true; total: number }>(`/api/documents/${id}/glossary`, {
+  /** 用語集は 1 件ずつ送る。一覧をまるごと送ると、その間に Claude が足した語が消える。 */
+  putGlossaryEntry: (id: string, entry: { term: string; translation: string; note: string | null }) =>
+    request<{ added: boolean; total: number }>(`/api/documents/${id}/glossary/entry`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ entries }),
+      body: JSON.stringify(entry),
     }),
 
-  addGlossary: (id: string, entries: { term: string; translation: string }[]) =>
-    request<{ added: number; total: number }>(`/api/documents/${id}/glossary`, {
+  deleteGlossaryEntry: (id: string, term: string) =>
+    request<{ removed: boolean; total: number }>(
+      `/api/documents/${id}/glossary/entry?term=${encodeURIComponent(term)}`,
+      { method: 'DELETE' },
+    ),
+
+  /** 訳語を変えたときに書き換わる候補を、1 件残らず見る（書き込みはしない）。 */
+  previewTermReplacement: (id: string, from: string, to: string) =>
+    request<{
+      total: number;
+      revisedByHuman: number;
+      candidates: { sentenceHash: string; before: string; after: string; revisedByHuman: boolean }[];
+    }>(`/api/documents/${id}/glossary/preview-replace`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ entries }),
+      body: JSON.stringify({ from, to }),
     }),
 
-  /** 訳語を変えたときに既訳を追随させる。dryRun なら件数だけ数える。 */
-  replaceTerm: (
+  /** 画面で見せた内容と一致する行だけを書き換える。 */
+  applyTranslationEdits: (
     id: string,
-    from: string,
-    to: string,
-    options: { dryRun?: boolean; includeRevisedByHuman?: boolean },
+    edits: { sentenceHash: string; before: string; after: string }[],
   ) =>
-    request<{ applied: number; revisedByHuman: number; preview: { before: string; after: string }[] }>(
-      `/api/documents/${id}/glossary/replace`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from, to, ...options }),
-      },
-    ),
+    request<{ applied: number; stale: string[] }>(`/api/documents/${id}/translations/apply-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ edits }),
+    }),
 
   renameDocument: (id: string, title: string) =>
     request<{ id: string; title: string }>(`/api/documents/${id}`, {

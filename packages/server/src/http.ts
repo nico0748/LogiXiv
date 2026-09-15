@@ -308,20 +308,52 @@ async function handle(
       sendJson(response, 200, await api.importHtml(html, target));
       return;
     }
-    if (rest === '/glossary/replace' && method === 'POST') {
-      const body = await readJson<{ from?: unknown; to?: unknown; dryRun?: unknown; includeRevisedByHuman?: unknown }>(
-        request,
-      );
+    // 書き換わる候補を「1 件残らず」返す。書き込みはしない。
+    if (rest === '/glossary/preview-replace' && method === 'POST') {
+      const body = await readJson<{ from?: unknown; to?: unknown }>(request);
       const from = requireString(body.from, 'from', 500);
       const to = optionalString(body.to, 'to', 500) ?? '';
+      sendJson(response, 200, await api.previewTermReplacement(id, from, to));
+      return;
+    }
+    // 画面で選んだ行だけを、見せた内容と一致する場合に限って書き換える。
+    if (rest === '/translations/apply-edits' && method === 'POST') {
+      const body = await readJson<{ edits?: unknown }>(request);
+      if (!Array.isArray(body.edits)) throw new BadRequestError('edits が配列ではありません');
+      if (body.edits.length > 1000) throw new BadRequestError('edits は 1000 件までです');
+      const edits = body.edits.map((raw, index) => {
+        if (typeof raw !== 'object' || raw === null) {
+          throw new BadRequestError(`edits[${index}] がオブジェクトではありません`);
+        }
+        const item = raw as Record<string, unknown>;
+        return {
+          sentenceHash: requireString(item['sentenceHash'], `edits[${index}].sentenceHash`, 64),
+          before: requireString(item['before'], `edits[${index}].before`, MAX_TEXT_FIELD),
+          after: requireString(item['after'], `edits[${index}].after`, MAX_TEXT_FIELD),
+        };
+      });
+      sendJson(response, 200, await api.applyTranslationEdits(id, edits));
+      return;
+    }
+    // 用語集は 1 件ずつ触れる経路も持つ。画面が持っている古い一覧で
+    // 全体を上書きすると、その間に Claude が足した語が消える。
+    if (rest === '/glossary/entry' && method === 'PUT') {
+      const body = await readJson<{ term?: unknown; translation?: unknown; note?: unknown }>(request);
       sendJson(
         response,
         200,
-        await api.replaceTerm(id, from, to, {
-          dryRun: body.dryRun === true,
-          includeRevisedByHuman: body.includeRevisedByHuman !== false,
+        await api.upsertGlossaryEntry(id, {
+          term: requireString(body.term, 'term', 500),
+          translation: requireString(body.translation, 'translation', 500),
+          note: optionalString(body.note, 'note', 2000),
         }),
       );
+      return;
+    }
+    if (rest === '/glossary/entry' && method === 'DELETE') {
+      const term = url.searchParams.get('term') ?? '';
+      if (term.length === 0) throw new BadRequestError('term がありません');
+      sendJson(response, 200, await api.removeGlossaryEntry(id, term));
       return;
     }
     if (rest === '/search' && method === 'GET') {

@@ -1,6 +1,7 @@
 import type {
   Annotations,
   DocumentStructure,
+  GlossaryEntry,
   Note,
   PaperDocument,
   Sentence,
@@ -499,6 +500,83 @@ export function replaceInTranslations(
   return {
     document: { ...document, updatedAt: now, annotations: { ...document.annotations, translations } },
     replacements,
+  };
+}
+
+/**
+ * 「この訳をこう書き換える」を 1 件ずつ指定して適用する。
+ *
+ * 一括置換を件数だけの確認で走らせてはいけない。日本語には語の切れ目が無いので、
+ * 「学習 → ラーニング」は機械学習を機械ラーニングに、学習率をラーニング率にする。
+ * しかも既定で人手修正済みの訳まで書き換わり、取り消す手段は無い。
+ * 訳語を変えたくなるのは論文を訳し込んだ後なので、いちばん積み上がった時点で
+ * いちばん戻せない壊れ方をする。
+ *
+ * そこで、画面が見せた before と現在の本文が一致するものだけを書き換える。
+ * 選んでいない行は触らず、確認している間に別の書き込みが入った行は stale として返す
+ * （黙って上書きすると、Claude が今書いた訳が消える）。
+ */
+export function applyTranslationEdits(
+  document: PaperDocument,
+  edits: readonly { sentenceHash: string; before: string; after: string }[],
+): { document: PaperDocument; applied: number; stale: string[] } {
+  const translations: Record<string, Translation> = { ...document.annotations.translations };
+  const stale: string[] = [];
+  const now = new Date().toISOString();
+  let applied = 0;
+
+  for (const edit of edits) {
+    const current = translations[edit.sentenceHash];
+    if (!current || current.text !== edit.before) {
+      stale.push(edit.sentenceHash);
+      continue;
+    }
+    if (edit.after === edit.before) continue;
+    translations[edit.sentenceHash] = { ...current, text: edit.after, updatedAt: now };
+    applied++;
+  }
+
+  if (applied === 0) return { document, applied, stale };
+  return {
+    document: { ...document, updatedAt: now, annotations: { ...document.annotations, translations } },
+    applied,
+    stale,
+  };
+}
+
+/** 用語集の 1 件だけを差し替える（画面が持っている古い一覧で全体を上書きしないため）。 */
+export function upsertGlossaryEntry(
+  document: PaperDocument,
+  entry: GlossaryEntry,
+): { document: PaperDocument; added: boolean } {
+  const glossary = [...document.annotations.glossary];
+  const at = glossary.findIndex((g) => g.term.toLowerCase() === entry.term.toLowerCase());
+  if (at === -1) glossary.push(entry);
+  else glossary[at] = entry;
+  return {
+    document: {
+      ...document,
+      updatedAt: new Date().toISOString(),
+      annotations: { ...document.annotations, glossary },
+    },
+    added: at === -1,
+  };
+}
+
+/** 用語集の 1 件だけを消す。 */
+export function removeGlossaryEntry(
+  document: PaperDocument,
+  term: string,
+): { document: PaperDocument; removed: boolean } {
+  const glossary = document.annotations.glossary.filter((g) => g.term.toLowerCase() !== term.toLowerCase());
+  if (glossary.length === document.annotations.glossary.length) return { document, removed: false };
+  return {
+    document: {
+      ...document,
+      updatedAt: new Date().toISOString(),
+      annotations: { ...document.annotations, glossary },
+    },
+    removed: true,
   };
 }
 

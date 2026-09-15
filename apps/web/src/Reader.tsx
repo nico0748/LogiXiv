@@ -65,12 +65,18 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   const [sidebarScrollTarget, setSidebarScrollTarget] = useState<{ id: string; token: number } | null>(null);
   const selectionToken = useRef(0);
 
-  const select = useCallback((id: string, origin: 'pdf' | 'sidebar') => {
+  /**
+   * 選んだ側はスクロールさせない（自分で押した場所が動くと目が迷う）。
+   * ただしキーボードで動かしたときは**どちらも**動かす。選んだのはカードではなく
+   * 「次の文」なので、押した側という概念が無い。ここを sidebar 扱いにしていたため、
+   * j を押しても訳の側だけが画面外へ流れていき、8 回で見えなくなっていた。
+   */
+  const select = useCallback((id: string, origin: 'pdf' | 'sidebar' | 'keyboard') => {
     setSelectedId(id);
     selectionToken.current += 1;
     const token = selectionToken.current;
-    if (origin === 'pdf') setSidebarScrollTarget({ id, token });
-    else setPdfScrollTarget({ id, token });
+    if (origin !== 'sidebar') setSidebarScrollTarget({ id, token });
+    if (origin !== 'pdf') setPdfScrollTarget({ id, token });
   }, []);
 
   const reload = useCallback(async () => {
@@ -160,7 +166,7 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
       } else {
         target = list[Math.min(Math.max(at + step, 0), list.length - 1)];
       }
-      if (target) select(target.id, 'sidebar');
+      if (target) select(target.id, 'keyboard');
     },
     [paper, visibleSentences, selectedId, select],
   );
