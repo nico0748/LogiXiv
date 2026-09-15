@@ -4,6 +4,7 @@ export * from './xml.ts';
 export * from './tei.ts';
 export * from './sentences.ts';
 export * from './layout.ts';
+export * from './edits.ts';
 export * from './document.ts';
 export * from './merge.ts';
 export * from './migrate.ts';

@@ -23,6 +23,8 @@ interface Props {
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;
   onToggleSkip: (hash: string, skip: boolean) => Promise<boolean>;
+  onMergeWithNext: (hashes: [string, string]) => Promise<boolean>;
+  onSplit: (hash: string, offsets: number[]) => Promise<boolean>;
   scrollTarget: { id: string; token: number } | null;
 }
 
@@ -44,6 +46,17 @@ export function Sidebar(props: Props): React.JSX.Element {
     () => new Map(paper.structure.sections.map((section) => [section.id, section.title])),
     [paper.structure.sections],
   );
+
+  /**
+   * 「次と結合」の相手。絞り込み後の並びではなく本文の並びで引く。
+   * 検索中に見えている次のカードと結合してしまうと、画面と結果が食い違う。
+   */
+  const nextHashById = useMemo(() => {
+    const map = new Map<string, string>();
+    const all = paper.structure.sentences;
+    for (let i = 0; i < all.length - 1; i++) map.set(all[i]!.id, all[i + 1]!.hash);
+    return map;
+  }, [paper.structure.sentences]);
 
   useEffect(() => {
     if (!scrollTarget) return;
@@ -73,6 +86,9 @@ export function Sidebar(props: Props): React.JSX.Element {
               onAddNote={props.onAddNote}
               onDeleteNote={props.onDeleteNote}
               onToggleSkip={props.onToggleSkip}
+              nextHash={nextHashById.get(sentence.id) ?? null}
+              onMergeWithNext={props.onMergeWithNext}
+              onSplit={props.onSplit}
             />
           </Fragment>
         );
@@ -91,6 +107,10 @@ interface CardProps {
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;
   onToggleSkip: (hash: string, skip: boolean) => Promise<boolean>;
+  /** 本文の並びで次に来る文の hash。最後の文では null。 */
+  nextHash: string | null;
+  onMergeWithNext: (hashes: [string, string]) => Promise<boolean>;
+  onSplit: (hash: string, offsets: number[]) => Promise<boolean>;
 }
 
 function SentenceCard(props: CardProps): React.JSX.Element {
@@ -102,6 +122,26 @@ function SentenceCard(props: CardProps): React.JSX.Element {
   const [noteDraft, setNoteDraft] = useState('');
   const [noteOpen, setNoteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const sourceRef = useRef<HTMLParagraphElement>(null);
+  const [splitAt, setSplitAt] = useState<number | null>(null);
+
+  /**
+   * 原文の上でクリック（またはドラッグ）した位置を、分割位置として拾う。
+   *
+   * 原文は 1 つのテキストノードとして描いているので、anchorOffset がそのまま
+   * 文字位置になる。範囲選択のときは手前側を使う（「ここから次の文」という
+   * 選び方が自然なので）。
+   */
+  const captureCaret = (): void => {
+    const node = sourceRef.current?.firstChild;
+    const selection = window.getSelection();
+    if (!node || !selection || selection.rangeCount === 0 || selection.anchorNode !== node) {
+      setSplitAt(null);
+      return;
+    }
+    const offset = Math.min(selection.anchorOffset, selection.focusOffset);
+    setSplitAt(offset > 0 && offset < sentence.text.length ? offset : null);
+  };
 
   useEffect(() => {
     // 編集中は SSE 由来の更新で下書きを潰さない。
@@ -172,7 +212,14 @@ function SentenceCard(props: CardProps): React.JSX.Element {
         </p>
       )}
 
-      <p className="card-source" lang="en">
+      <p
+        className="card-source"
+        lang="en"
+        ref={sourceRef}
+        onMouseUp={captureCaret}
+        onKeyUp={captureCaret}
+        title="切りたい位置をクリックすると「ここで分割」が出ます"
+      >
         {sentence.text}
       </p>
 
@@ -245,6 +292,37 @@ function SentenceCard(props: CardProps): React.JSX.Element {
         >
           {isSkipped ? '訳す対象に戻す' : '訳さない'}
         </button>
+        <button
+          type="button"
+          disabled={props.nextHash === null || busy}
+          title="1 文が 2 枚に割れているときに、次のカードと 1 つにします"
+          onClick={() => {
+            if (!props.nextHash) return;
+            setBusy(true);
+            void props.onMergeWithNext([sentence.hash, props.nextHash]).finally(() => setBusy(false));
+          }}
+        >
+          次と結合
+        </button>
+        {splitAt !== null && (
+          <button
+            type="button"
+            className="is-primary"
+            disabled={busy}
+            title={`${splitAt} 文字目で切ります`}
+            onClick={() => {
+              setBusy(true);
+              void props
+                .onSplit(sentence.hash, [splitAt])
+                .then((ok) => {
+                  if (ok) setSplitAt(null);
+                })
+                .finally(() => setBusy(false));
+            }}
+          >
+            ここで分割
+          </button>
+        )}
         <span className="card-page">p.{sentence.page}</span>
       </div>
     </article>

@@ -181,8 +181,34 @@ export class LogiXivClient {
     });
   }
 
+  editSentenceBoundary(id: string, input: { type: 'merge' | 'split'; hashes: string[]; offsets?: number[] }) {
+    return this.request<{ applied: boolean; occurrences: number; editId?: string; reason?: string }>(
+      `/api/documents/${encodeURIComponent(id)}/sentence-edits`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+    );
+  }
+
+  undoSentenceEdit(id: string, editId?: string) {
+    return this.request<{ applied: boolean; reason?: string }>(
+      `/api/documents/${encodeURIComponent(id)}/sentence-edits${
+        editId ? `?editId=${encodeURIComponent(editId)}` : ''
+      }`,
+      { method: 'DELETE' },
+    );
+  }
+
   reparse(id: string, parser: 'auto' | 'grobid' | 'fallback') {
-    return this.request<{ rebound: number; orphaned: number; warning: string | null }>(
+    return this.request<{
+      rebound: number;
+      orphaned: number;
+      editsReapplied: number;
+      editsDropped: number;
+      warning: string | null;
+    }>(
       `/api/documents/${encodeURIComponent(id)}/reparse`,
       {
         method: 'POST',

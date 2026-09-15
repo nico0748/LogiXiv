@@ -277,6 +277,53 @@ try {
   assert.ok(!afterPayload.untranslated.includes(skippedOrder), '訳さないと記録した文がまた未訳で返っている');
   step('MCP の skip_sentences で未訳から外れることを確認');
 
+  // 文の区切りを MCP から直せること。直すと hash が変わるので、返答がそれを伝えること。
+  const mergeA = String(afterPayload.window[0]![1]);
+  const mergeB = String(afterPayload.window[1]![1]);
+  send({
+    jsonrpc: '2.0',
+    id: 8,
+    method: 'tools/call',
+    params: {
+      name: 'fix_sentence_boundary',
+      arguments: { document_id: id, action: 'merge', sentence_hashes: [mergeA, mergeB] },
+    },
+  });
+  const fixResult = (await waitFor(8)) as { result: { content: { text: string }[] } };
+  const fixPayload = JSON.parse(fixResult.result.content[0]!.text) as {
+    applied: boolean;
+    editId: string;
+    hint: string;
+  };
+  assert.equal(fixPayload.applied, true, '文の結合が適用されていない');
+  assert.match(fixPayload.hint, /ハッシュが変わりました/, '結合後の注意書きが返っていない');
+
+  const mergedDocument = (await (await fetch(`${url}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string; text: string }[] };
+  };
+  assert.ok(
+    mergedDocument.structure.sentences.every((s) => s.hash !== mergeA && s.hash !== mergeB),
+    '結合前の文が残っている',
+  );
+  step('MCP の fix_sentence_boundary で 2 文を 1 文に結合');
+
+  send({
+    jsonrpc: '2.0',
+    id: 9,
+    method: 'tools/call',
+    params: { name: 'fix_sentence_boundary', arguments: { document_id: id, action: 'undo' } },
+  });
+  const undoResult = (await waitFor(9)) as { result: { content: { text: string }[] } };
+  assert.match(undoResult.result.content[0]!.text, /取り消しました/, '区切りの取り消しが効いていない');
+  const restoredDocument = (await (await fetch(`${url}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  assert.ok(
+    restoredDocument.structure.sentences.some((s) => s.hash === mergeA),
+    '取り消しで元の文が戻っていない',
+  );
+  step('MCP の fix_sentence_boundary で区切りを元に戻せることを確認');
+
   mcp.kill('SIGTERM');
   sseController.abort();
 } catch (error) {

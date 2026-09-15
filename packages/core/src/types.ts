@@ -96,6 +96,29 @@ export interface SkippedSentence {
   at: string;
 }
 
+/**
+ * 文の区切りを人が直した記録。
+ *
+ * 構造そのものではなく注釈として持つ。構造は再解析で作り直されるが、この記録は
+ * 残るので、同じ直しを二度やらなくてよい。対象は hash で指すので、本文が
+ * 変わらない限り追随する。適用できなくなった編集は読み出し時に黙って飛ばす。
+ */
+export interface SentenceEdit {
+  id: string;
+  /** merge = 連続する複数文を 1 文に、split = 1 文を複数に。 */
+  type: 'merge' | 'split';
+  /** merge のときは結合する文の hash を順に、split のときは対象 1 件。 */
+  hashes: string[];
+  /** split のときだけ使う、原文テキスト内の分割位置（昇順）。 */
+  offsets?: number[];
+  /**
+   * 取り消し用。merge なら「結合後の hash と元の境目」、split なら「分割後の hash 列」。
+   * これが無いと取り消しに再解析が要る（数十秒かかるので、実質「戻せない」になる）。
+   */
+  undo?: { hashes: string[]; offsets?: number[] };
+  createdAt: string;
+}
+
 export interface Annotations {
   /** キーは文の hash。 */
   translations: Record<string, Translation>;
@@ -108,6 +131,8 @@ export interface Annotations {
    * 翻訳の手順が永久に終わらない。古い保存データには無いので任意。
    */
   skipped?: Record<string, SkippedSentence>;
+  /** 文の分割・結合の記録。適用順に並ぶ。古い保存データには無いので任意。 */
+  sentenceEdits?: SentenceEdit[];
 }
 
 export interface PaperDocument {
@@ -143,5 +168,5 @@ export interface MergeReport {
 }
 
 export function emptyAnnotations(): Annotations {
-  return { translations: {}, notes: [], glossary: [], skipped: {} };
+  return { translations: {}, notes: [], glossary: [], skipped: {}, sentenceEdits: [] };
 }

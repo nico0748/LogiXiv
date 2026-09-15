@@ -234,7 +234,13 @@ test('壊れた document を取り込んでも型が保たれる', () => {
 
 test('annotations が null でも空注釈になる（一覧 API を落とさない）', () => {
   const { document } = sanitizeDocument({ structure: { sentences: [] }, annotations: null }, { id: 'doc_x' });
-  assert.deepEqual(document.annotations, { translations: {}, notes: [], glossary: [], skipped: {} });
+  assert.deepEqual(document.annotations, {
+    translations: {},
+    notes: [],
+    glossary: [],
+    skipped: {},
+    sentenceEdits: [],
+  });
 });
 
 test('文のハッシュは受け取った値ではなく原文から計算し直す', () => {

@@ -408,3 +408,115 @@ test('検索結果に訳文が入る', async () => {
   assert.equal(hits.hits[0]!.translation, '疎な注意機構を検討する');
   assert.equal(typeof hits.hits[0]!.order, 'number');
 });
+
+test('文の結合と分割ができ、再解析しても保たれる', async () => {
+  const id = await ingest();
+  const read = async () =>
+    (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+      structure: { sentences: { hash: string; text: string }[] };
+      annotations: { sentenceEdits?: { id: string }[] };
+    };
+
+  const before = await read();
+  const [first, second] = before.structure.sentences;
+  const expected = `${first!.text} ${second!.text}`.replace(/\s+/g, ' ').trim();
+
+  const merged = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'merge', hashes: [first!.hash, second!.hash] }),
+    })
+  ).json()) as { applied: boolean; occurrences: number; editId?: string };
+  assert.equal(merged.applied, true);
+  assert.ok(merged.occurrences >= 1);
+
+  const afterMerge = await read();
+  assert.equal(afterMerge.structure.sentences.length, before.structure.sentences.length - merged.occurrences);
+  assert.equal(afterMerge.structure.sentences[0]!.text, expected);
+  assert.equal(afterMerge.annotations.sentenceEdits?.length, 1);
+
+  // 結合した文に訳を付けてから再解析し、区切りごと残ることを確かめる。
+  const mergedHash = afterMerge.structure.sentences[0]!.hash;
+  const put = await fetch(`${baseUrl}/api/documents/${id}/translations/${mergedHash}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: '結合した文の訳', source: 'human' }),
+  });
+  assert.equal(put.status, 200);
+
+  const reparsed = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/reparse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parser: 'fallback' }),
+    })
+  ).json()) as { editsReapplied: number; editsDropped: number };
+  assert.equal(reparsed.editsReapplied, 1);
+  assert.equal(reparsed.editsDropped, 0);
+
+  const afterReparse = await read();
+  assert.equal(afterReparse.structure.sentences[0]!.text, expected);
+
+  // 取り消すと元の 2 文に戻り、記録も消える。
+  const undone = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, { method: 'DELETE' })
+  ).json()) as { applied: boolean };
+  assert.equal(undone.applied, true);
+
+  const restored = await read();
+  assert.equal(restored.structure.sentences[0]!.text, first!.text);
+  assert.equal(restored.structure.sentences[1]!.text, second!.text);
+  assert.equal(restored.annotations.sentenceEdits?.length, 0);
+});
+
+test('分割は文字位置で行われ、当てられない指定は 200 + applied:false で返る', async () => {
+  const id = await ingest();
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string; text: string }[] };
+  };
+  const target = document.structure.sentences.find((s) => s.text.length > 20)!;
+  const at = 10;
+
+  const split = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'split', hashes: [target.hash], offsets: [at] }),
+    })
+  ).json()) as { applied: boolean };
+  assert.equal(split.applied, true);
+
+  const after = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { text: string }[] };
+  };
+  assert.ok(after.structure.sentences.some((s) => s.text === target.text.slice(0, at).trim()));
+  assert.ok(after.structure.sentences.some((s) => s.text === target.text.slice(at).trim()));
+
+  const missing = await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'split', hashes: ['0123456789abcdef'], offsets: [3] }),
+  });
+  assert.equal(missing.status, 200);
+  const body = (await missing.json()) as { applied: boolean; reason?: string };
+  assert.equal(body.applied, false);
+  assert.match(body.reason ?? '', /見つかりません/);
+});
+
+test('区切り直しの入力検証（型・件数）', async () => {
+  const id = await ingest();
+  const post = (payload: unknown) =>
+    fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+  assert.equal((await post({ type: 'nope', hashes: ['a', 'b'] })).status, 400);
+  assert.equal((await post({ type: 'merge', hashes: ['a'] })).status, 400);
+  assert.equal((await post({ type: 'split', hashes: ['a', 'b'], offsets: [1] })).status, 400);
+  assert.equal((await post({ type: 'split', hashes: ['a'], offsets: [] })).status, 400);
+  assert.equal((await post({ type: 'split', hashes: ['a'], offsets: [-1] })).status, 400);
+  assert.equal((await post({ type: 'merge', hashes: [1, 2] })).status, 400);
+});

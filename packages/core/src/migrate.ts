@@ -76,11 +76,28 @@ export function migrateDocument(document: PaperDocument): MigrationResult {
     return { ...note, sentenceHash: newHash };
   });
 
+  // skipped も hash がキーなので付け替える。ここを忘れると「訳さない」と決めた文が
+  // 移行のたびに未訳へ戻り、しかも古いキーがゴミとして残り続ける。
+  const skipped: NonNullable<PaperDocument['annotations']['skipped']> = {};
+  for (const [oldHash, entry] of Object.entries(document.annotations.skipped ?? {})) {
+    const newHash = remap.get(oldHash) ?? oldHash;
+    skipped[newHash] = { ...entry, sentenceHash: newHash };
+  }
+
+  // 区切りの直しも hash で対象を指している。付け替えないと、再解析のたびに
+  // 「当てられなかった」として静かに捨てられる。
+  const mapHashes = (hashes: readonly string[]): string[] => hashes.map((hash) => remap.get(hash) ?? hash);
+  const sentenceEdits = (document.annotations.sentenceEdits ?? []).map((edit) => ({
+    ...edit,
+    hashes: mapHashes(edit.hashes),
+    ...(edit.undo ? { undo: { ...edit.undo, hashes: mapHashes(edit.undo.hashes) } } : {}),
+  }));
+
   return {
     document: {
       ...document,
       structure: { ...document.structure, version: STRUCTURE_VERSION, sentences },
-      annotations: { ...document.annotations, translations, notes },
+      annotations: { ...document.annotations, translations, notes, skipped, sentenceEdits },
     },
     migrated: true,
     from,

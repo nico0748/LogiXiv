@@ -44,6 +44,7 @@ MCP サーバーはファイルを直接触らず、本体へ HTTP で話しか�
 | `search_document` | 原文・訳文・メモを横断検索。ヒットに訳文とメモが入る |
 | `update_glossary` | 用語集を更新。既定は追記、`mode: "replace"` で全置換 |
 | `skip_sentences` | 「この文は訳す対象ではない」と記録する。未訳の集計から外れる |
+| `fix_sentence_boundary` | 文の区切りを直す（結合・分割・取り消し）。再解析しても保たれる |
 | `reparse_document` | 同じ PDF を解析し直す。訳とメモはハッシュで再結合される |
 
 ### 文の指定は必ず `sentenceHash`

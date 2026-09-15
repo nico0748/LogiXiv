@@ -4,11 +4,13 @@ import type {
   Note,
   PaperDocument,
   Sentence,
+  SentenceEdit,
   SkippedSentence,
   Translation,
 } from './types.ts';
 import { emptyAnnotations } from './types.ts';
 import { newId } from './hash.ts';
+import { applySentenceEdit, revertSentenceEdit, SentenceEditError } from './edits.ts';
 
 export interface CreateDocumentInput {
   structure: DocumentStructure;
@@ -197,6 +199,95 @@ export function unskipSentences(
       annotations: { ...document.annotations, skipped },
     },
     applied,
+  };
+}
+
+/** 記録済みの文分割・結合（古い保存データには無い）。 */
+export function sentenceEditsOf(document: PaperDocument): SentenceEdit[] {
+  return document.annotations.sentenceEdits ?? [];
+}
+
+export interface SentenceEditResult {
+  document: PaperDocument;
+  applied: boolean;
+  /** 何か所に適用されたか。同じ本文が複数回出る文書では 1 より大きくなる。 */
+  occurrences: number;
+  edit?: SentenceEdit;
+  reason?: string;
+}
+
+/**
+ * 文の区切りを直す。
+ *
+ * 直した結果は構造に焼き込みつつ、手順そのものも注釈に残す。
+ * 構造だけ直すと再解析で元に戻ってしまい、手順だけ持つと読み出しのたびに
+ * 再計算が要る。両方持てば、再解析のときだけ手順を流し直せばよい。
+ */
+export function editSentenceBoundary(
+  document: PaperDocument,
+  input: { type: 'merge' | 'split'; hashes: string[]; offsets?: number[] },
+): SentenceEditResult {
+  const now = new Date().toISOString();
+  const edit: SentenceEdit = {
+    id: newId('edit'),
+    type: input.type,
+    hashes: input.hashes,
+    ...(input.type === 'split' ? { offsets: input.offsets ?? [] } : {}),
+    createdAt: now,
+  };
+  let outcome;
+  try {
+    outcome = applySentenceEdit(document.structure, edit);
+  } catch (error) {
+    if (error instanceof SentenceEditError) {
+      return { document, applied: false, occurrences: 0, reason: error.message };
+    }
+    throw error;
+  }
+  const stored: SentenceEdit = { ...edit, undo: outcome.undo };
+  return {
+    document: {
+      ...document,
+      updatedAt: now,
+      structure: outcome.structure,
+      annotations: { ...document.annotations, sentenceEdits: [...sentenceEditsOf(document), stored] },
+    },
+    applied: true,
+    occurrences: outcome.occurrences,
+    edit: stored,
+  };
+}
+
+/**
+ * 直前の（または指定した）区切り直しを取り消す。
+ * 取り消しは逆向きの編集として適用し、記録からはその 1 件だけを消す。
+ */
+export function undoSentenceEdit(
+  document: PaperDocument,
+  editId?: string,
+): { document: PaperDocument; applied: boolean; reason?: string } {
+  const edits = sentenceEditsOf(document);
+  const index = editId ? edits.findIndex((edit) => edit.id === editId) : edits.length - 1;
+  if (index < 0) return { document, applied: false, reason: '取り消せる編集がありません' };
+  const edit = edits[index]!;
+  let structure: DocumentStructure;
+  try {
+    structure = revertSentenceEdit(document.structure, edit);
+  } catch (error) {
+    if (error instanceof SentenceEditError) return { document, applied: false, reason: error.message };
+    throw error;
+  }
+  return {
+    document: {
+      ...document,
+      updatedAt: new Date().toISOString(),
+      structure,
+      annotations: {
+        ...document.annotations,
+        sentenceEdits: [...edits.slice(0, index), ...edits.slice(index + 1)],
+      },
+    },
+    applied: true,
   };
 }
 

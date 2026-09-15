@@ -435,6 +435,8 @@ textarea {
   color: var(--muted);
   font-size: 0.82rem;
   line-height: 1.55;
+  /* 分割位置はここをクリックして決めるので、テキストとして扱えることを見せる。 */
+  cursor: text;
 }
 
 .card-note {
@@ -478,6 +480,9 @@ textarea {
   gap: 0.35rem;
   margin-top: 0.35rem;
   opacity: 0;
+  /* 見えていないボタンは押せてはいけない。文の結合のように戻す手順が要る操作が
+     並ぶようになったので、透明なだけのボタンを残しておくと誤操作の原因になる。 */
+  pointer-events: none;
   transition: opacity 0.12s ease;
 }
 
@@ -485,6 +490,7 @@ textarea {
 .card:focus-within .card-toolbar,
 .card.is-active .card-toolbar {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .card:focus-visible {
@@ -495,6 +501,12 @@ textarea {
 .card-toolbar button {
   padding: 0.1rem 0.4rem;
   font-size: 0.72rem;
+}
+
+/* 原文を選んだときだけ出る操作。出たことに気づけるよう色を付ける。 */
+.card-toolbar button.is-primary {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .card-page {

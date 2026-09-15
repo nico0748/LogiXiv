@@ -1,5 +1,14 @@
-import type { Annotations, MergeReport, Note, PaperDocument, DocumentStructure, Translation } from './types.ts';
+import type {
+  Annotations,
+  MergeReport,
+  Note,
+  PaperDocument,
+  DocumentStructure,
+  SentenceEdit,
+  Translation,
+} from './types.ts';
 import { newId, normalizeSentence } from './hash.ts';
+import { applySentenceEdits } from './edits.ts';
 
 /**
  * マージ規則は訳とメモで意図的に非対称にしてある。
@@ -108,18 +117,34 @@ export function mergeAnnotations(
     report.glossaryAdded++;
   }
 
-  return { annotations: { translations, notes, glossary }, report };
+  // skipped を落とさない。ここで取りこぼすと、取り込みのたびに「訳さない」判断が
+  // 静かに消え、未訳が増えて見える。
+  const skipped = { ...(base.skipped ?? {}), ...(incoming.skipped ?? {}) };
+
+  // 区切りの直しは取り込まず、こちら側のものだけ残す。
+  // 相手の手順は相手の構造の上でしか意味を持たない（hash がこちらの文に当たらない）。
+  // こちらの構造には既に自分の手順が反映済みなので、混ぜると記録と構造がずれる。
+  const sentenceEdits: SentenceEdit[] = [...(base.sentenceEdits ?? [])];
+
+  return { annotations: { translations, notes, glossary, skipped, sentenceEdits }, report };
 }
 
 /**
  * 再解析。構造だけ差し替え、注釈は文のハッシュで自動的に再結合される。
  * 対応する文が消えた注釈も捨てない（GROBID のバージョン差で一時的に消えることがあるため）。
+ *
+ * 人が直した文の区切りは、新しい構造の上で順に流し直す。これをやらないと、
+ * 再解析のたびに同じ結合・分割を手でやり直すことになり、再解析が事実上使えなくなる。
+ * 本文が変わって当てられなくなった手順は記録から外す（残すと毎回失敗し続ける）。
  */
 export function applyStructure(
   document: PaperDocument,
   structure: DocumentStructure,
-): { document: PaperDocument; rebound: number; orphaned: number } {
-  const hashes = new Set(structure.sentences.map((s) => s.hash));
+): { document: PaperDocument; rebound: number; orphaned: number; editsReapplied: number; editsDropped: number } {
+  const edits = document.annotations.sentenceEdits ?? [];
+  const replay = applySentenceEdits(structure, edits);
+
+  const hashes = new Set(replay.structure.sentences.map((s) => s.hash));
   let rebound = 0;
   let orphaned = 0;
   for (const hash of Object.keys(document.annotations.translations)) {
@@ -130,10 +155,16 @@ export function applyStructure(
     document: {
       ...document,
       title: structure.title ?? document.title,
-      structure,
+      structure: replay.structure,
       updatedAt: new Date().toISOString(),
+      annotations:
+        replay.stale.length === 0
+          ? document.annotations
+          : { ...document.annotations, sentenceEdits: replay.applied },
     },
     rebound,
     orphaned,
+    editsReapplied: replay.applied.length,
+    editsDropped: replay.stale.length,
   };
 }

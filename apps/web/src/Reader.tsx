@@ -204,6 +204,24 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           </button>
         </div>
 
+        {(paper.annotations.sentenceEdits?.length ?? 0) > 0 && (
+          <button
+            type="button"
+            disabled={busyAction !== null}
+            title="直前の結合・分割を取り消します"
+            onClick={() =>
+              void run('区切りの取り消し', async () => {
+                const result = await api.undoSentenceEdit(documentId);
+                await reload();
+                if (!result.applied) throw new Error(result.reason ?? '取り消せませんでした');
+                return '直前の区切りの変更を戻しました';
+              })
+            }
+          >
+            区切りを戻す（{paper.annotations.sentenceEdits?.length ?? 0}）
+          </button>
+        )}
+
         <a className="button-link" href={api.exportUrl(documentId)} download>
           書き出し
         </a>
@@ -228,7 +246,13 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
             void run('再解析', async () => {
               const result = await api.reparse(documentId);
               await reload();
-              return `再解析しました（訳の再結合 ${result.rebound} 件 / 対応なし ${result.orphaned} 件）${
+              const edits =
+                result.editsReapplied > 0 || result.editsDropped > 0
+                  ? ` / 区切りの直し ${result.editsReapplied} 件を再適用${
+                      result.editsDropped > 0 ? `・${result.editsDropped} 件は本文が変わったため解除` : ''
+                    }`
+                  : '';
+              return `再解析しました（訳の再結合 ${result.rebound} 件 / 対応なし ${result.orphaned} 件${edits}）${
                 result.warning ? ` — ${result.warning}` : ''
               }`;
             })
@@ -277,6 +301,27 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
               await api.deleteNote(documentId, noteId);
               await reload();
               return null;
+            })
+          }
+          onMergeWithNext={(hashes) =>
+            run('文の結合', async () => {
+              const result = await api.mergeSentences(documentId, hashes);
+              await reload();
+              if (!result.applied) throw new Error(result.reason ?? '結合できませんでした');
+              // 同じ本文が他にもあると、そちらも同時に変わる。黙って変わると驚くので伝える。
+              return result.occurrences > 1
+                ? `同じ本文の ${result.occurrences} か所をまとめて結合しました`
+                : null;
+            })
+          }
+          onSplit={(hash, offsets) =>
+            run('文の分割', async () => {
+              const result = await api.splitSentence(documentId, hash, offsets);
+              await reload();
+              if (!result.applied) throw new Error(result.reason ?? '分割できませんでした');
+              return result.occurrences > 1
+                ? `同じ本文の ${result.occurrences} か所をまとめて分割しました`
+                : null;
             })
           }
           onToggleSkip={(hash, skip) =>

@@ -8,6 +8,7 @@ import type {
   Rect,
   Section,
   Sentence,
+  SentenceEdit,
   SkippedSentence,
   Translation,
 } from './types.ts';
@@ -236,7 +237,51 @@ export function sanitizeAnnotations(value: unknown, report: SanitizeReport): Ann
     }
   }
 
-  return { translations, notes, glossary, skipped };
+  // 区切りの直しは「手順」なので、当てられるかどうかは適用時に分かればよい。
+  // ここでは形だけ見て、hash として有り得ない値や桁の壊れた位置を落とす。
+  const sentenceEdits: SentenceEdit[] = [];
+  if (Array.isArray(source['sentenceEdits'])) {
+    for (const raw of source['sentenceEdits']) {
+      if (!isRecord(raw)) continue;
+      const type = raw['type'];
+      if (type !== 'merge' && type !== 'split') continue;
+      const hashes = sanitizeHashList(raw['hashes']);
+      if (type === 'merge' ? hashes.length < 2 : hashes.length !== 1) continue;
+      const id = str(raw['id'], 64);
+      const edit: SentenceEdit = {
+        id: id && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : newId('edit'),
+        type,
+        hashes,
+        createdAt: isoDate(raw['createdAt'], EPOCH),
+      };
+      if (type === 'split') edit.offsets = sanitizeOffsets(raw['offsets']);
+      const undo = raw['undo'];
+      if (isRecord(undo)) {
+        const undoHashes = sanitizeHashList(undo['hashes']);
+        if (undoHashes.length > 0) edit.undo = { hashes: undoHashes, offsets: sanitizeOffsets(undo['offsets']) };
+      }
+      sentenceEdits.push(edit);
+    }
+  }
+
+  return { translations, notes, glossary, skipped, sentenceEdits };
+}
+
+function sanitizeHashList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === 'string' && /^[0-9a-f]{4,64}$/.test(item))
+    .slice(0, 64);
+}
+
+function sanitizeOffsets(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(finiteNumber)
+    .filter((n): n is number => n !== null && n > 0 && n < 20_000)
+    .map((n) => Math.floor(n))
+    .slice(0, 64)
+    .sort((a, b) => a - b);
 }
 
 /** 外から来た document を丸ごと安全な PaperDocument に落とす。id は呼び出し側が付け直す前提。 */

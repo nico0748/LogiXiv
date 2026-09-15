@@ -69,6 +69,8 @@ export interface PaperDocument {
     glossary: { term: string; translation: string; note: string | null }[];
     /** 訳さないと判断した文（キーは hash）。古い保存データには無い。 */
     skipped?: Record<string, { sentenceHash: string; reason: string; at: string }>;
+    /** 人が直した文の区切り。再解析のときに流し直される。 */
+    sentenceEdits?: { id: string; type: 'merge' | 'split'; hashes: string[]; offsets?: number[]; createdAt: string }[];
   };
 }
 
@@ -158,8 +160,42 @@ export const api = {
   deleteNote: (id: string, noteId: string) =>
     request<{ applied: boolean }>(`/api/documents/${id}/notes/${noteId}`, { method: 'DELETE' }),
 
+  /** 連続する文を 1 文に結合する。同じ本文が複数箇所にあれば、そのすべてに効く。 */
+  mergeSentences: (id: string, hashes: string[]) =>
+    request<{ applied: boolean; occurrences: number; editId?: string; reason?: string }>(
+      `/api/documents/${id}/sentence-edits`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'merge', hashes }),
+      },
+    ),
+
+  /** 1 文を文字位置で割る。 */
+  splitSentence: (id: string, hash: string, offsets: number[]) =>
+    request<{ applied: boolean; occurrences: number; editId?: string; reason?: string }>(
+      `/api/documents/${id}/sentence-edits`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'split', hashes: [hash], offsets }),
+      },
+    ),
+
+  undoSentenceEdit: (id: string, editId?: string) =>
+    request<{ applied: boolean; reason?: string }>(
+      `/api/documents/${id}/sentence-edits${editId ? `?editId=${encodeURIComponent(editId)}` : ''}`,
+      { method: 'DELETE' },
+    ),
+
   reparse: (id: string) =>
-    request<{ rebound: number; orphaned: number; warning: string | null }>(`/api/documents/${id}/reparse`, {
+    request<{
+      rebound: number;
+      orphaned: number;
+      editsReapplied: number;
+      editsDropped: number;
+      warning: string | null;
+    }>(`/api/documents/${id}/reparse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ parser: 'auto' }),

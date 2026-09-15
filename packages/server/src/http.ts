@@ -393,6 +393,51 @@ async function handle(
       return;
     }
 
+    // 文の区切り直し。結合は連続する 2 文以上、分割は 1 文と文字位置。
+    if (rest === '/sentence-edits' && method === 'GET') {
+      sendJson(response, 200, { edits: await api.listSentenceEdits(id) });
+      return;
+    }
+    if (rest === '/sentence-edits' && method === 'POST') {
+      const body = await readJson<{ type?: unknown; hashes?: unknown; offsets?: unknown }>(request);
+      const type = requireString(body.type, 'type', 16);
+      if (type !== 'merge' && type !== 'split') throw new BadRequestError('type は merge か split です');
+      if (!Array.isArray(body.hashes)) throw new BadRequestError('hashes が配列ではありません');
+      if (body.hashes.length > 64) throw new BadRequestError('一度に扱えるのは 64 文までです');
+      const hashes = body.hashes.map((raw, index) => requireString(raw, `hashes[${index}]`, 64));
+      if (type === 'merge' && hashes.length < 2) throw new BadRequestError('結合には 2 文以上が要ります');
+      if (type === 'split' && hashes.length !== 1) throw new BadRequestError('分割の対象は 1 文です');
+
+      let offsets: number[] | undefined;
+      if (type === 'split') {
+        if (!Array.isArray(body.offsets)) throw new BadRequestError('offsets が配列ではありません');
+        if (body.offsets.length === 0 || body.offsets.length > 64) {
+          throw new BadRequestError('offsets は 1〜64 件です');
+        }
+        offsets = body.offsets.map((raw, index) => {
+          if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+            throw new BadRequestError(`offsets[${index}] が正の数ではありません`);
+          }
+          return Math.floor(raw);
+        });
+      }
+
+      // 断られた場合も 200 で返し、applied と reason で伝える。
+      // setTranslation と同じ約束にしておかないと、呼び出し側が二通りの失敗を扱う羽目になる。
+      const result = await api.editSentenceBoundary(id, { type, hashes, offsets });
+      sendJson(response, 200, result);
+      return;
+    }
+    if (rest === '/sentence-edits' && method === 'DELETE') {
+      const editId = url.searchParams.get('editId');
+      if (editId !== null && !/^[A-Za-z0-9_-]{1,64}$/.test(editId)) {
+        throw new BadRequestError('editId の形式が不正です');
+      }
+      const result = await api.undoSentenceEdit(id, editId ?? undefined);
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (rest === '/sentences' && method === 'POST') {
       const body = await readJson<{ hashes?: unknown }>(request);
       if (!Array.isArray(body.hashes)) throw new BadRequestError('hashes が配列ではありません');

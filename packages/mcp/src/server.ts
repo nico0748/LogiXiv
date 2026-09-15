@@ -455,6 +455,72 @@ export function createMcpServer(baseUrl: string): McpServer {
   );
 
   server.registerTool(
+    'fix_sentence_boundary',
+    {
+      title: '文の区切りを直す',
+      description:
+        '文の切れ目がおかしいときに直す。merge は連続する 2 文以上を 1 文にまとめ、split は 1 文を文字位置で割る。' +
+        '訳が「前半だけ」「2 文ぶん」になってしまう原因はほぼここなので、訳す前に直す方が手戻りが少ない。' +
+        '同じ本文が複数箇所にあるときは、そのすべてに同じ区切りが適用される（訳は本文のハッシュに付くため）。' +
+        '直した内容は記録され、再解析しても流し直される。undo_edit_id か undo=true で取り消せる。',
+      inputSchema: {
+        document_id: z.string(),
+        action: z.enum(['merge', 'split', 'undo']),
+        sentence_hashes: z
+          .array(z.string())
+          .max(64)
+          .default([])
+          .describe('merge では結合する文のハッシュを本文の順に 2 件以上、split では対象 1 件'),
+        offsets: z
+          .array(z.number().int().positive())
+          .max(64)
+          .default([])
+          .describe('split のときの分割位置。原文テキストの先頭からの文字数で、切りたい文字の直前を指す'),
+        undo_edit_id: z.string().optional().describe('undo のとき、特定の編集だけ取り消したい場合に指定'),
+      },
+    },
+    async ({ document_id, action, sentence_hashes, offsets, undo_edit_id }) => {
+      try {
+        if (action === 'undo') {
+          const result = await client.undoSentenceEdit(document_id, undo_edit_id);
+          return result.applied
+            ? textResult('区切りの変更を取り消しました。')
+            : textResult(`取り消せませんでした: ${result.reason ?? '理由不明'}`);
+        }
+        if (action === 'merge' && sentence_hashes.length < 2) {
+          return textResult('merge には本文の順に並んだ 2 件以上の sentence_hashes が要ります。');
+        }
+        if (action === 'split' && (sentence_hashes.length !== 1 || offsets.length === 0)) {
+          return textResult('split には sentence_hashes を 1 件と、offsets を 1 件以上指定してください。');
+        }
+
+        const result = await client.editSentenceBoundary(document_id, {
+          type: action,
+          hashes: sentence_hashes,
+          ...(action === 'split' ? { offsets } : {}),
+        });
+        if (!result.applied) {
+          return textResult(
+            `直せませんでした: ${result.reason ?? '理由不明'}\n` +
+              'get_sentences で今の区切りとハッシュを取り直してからやり直してください。',
+          );
+        }
+        // 直すと文のハッシュが変わる。古いハッシュのまま訳を書くと素通りするので必ず伝える。
+        return jsonResult({
+          applied: true,
+          editId: result.editId,
+          occurrences: result.occurrences,
+          hint:
+            '区切りを変えた文はハッシュが変わりました。訳を書く前に get_translation_batch か get_sentences で取り直してください。' +
+            (result.occurrences > 1 ? ` 同じ本文の ${result.occurrences} か所に適用されています。` : ''),
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
     'reparse_document',
     {
       title: '再解析',
@@ -472,6 +538,14 @@ export function createMcpServer(baseUrl: string): McpServer {
         const lines = [
           `再解析しました。訳の再結合 ${result.rebound} 件、対応が見つからなかった注釈 ${result.orphaned} 件。`,
         ];
+        if (result.editsReapplied > 0 || result.editsDropped > 0) {
+          lines.push(
+            `文の区切りの直しは ${result.editsReapplied} 件を再適用しました` +
+              (result.editsDropped > 0
+                ? `（${result.editsDropped} 件は本文が変わって当てられなくなったため解除しました）。`
+                : '。'),
+          );
+        }
         if (result.warning) lines.push(result.warning);
         if (result.orphaned > 0) {
           lines.push(
@@ -515,9 +589,14 @@ export function createMcpServer(baseUrl: string): McpServer {
               '   訳し終わった後も最後まで空振りし続ける。',
               '5. 訳す対象でないと判断した文は skip_sentences に渡してから進む。',
               '   飛ばすだけでは未訳として残り続け、手順が終わらない。',
+              '6. 1 文が途中で切れている・2 文が 1 枚に入っている、と気づいたら',
+              '   fix_sentence_boundary で直してから訳す。直すとハッシュが変わるので、',
+              '   その窓は取り直すこと。',
               '',
               '訳し方の方針:',
               '- 1 文は 1 文として訳す。読みやすさのために 2 文に割ったり、隣の文と混ぜたりしない（画面上で原文と 1 対 1 に並ぶため）。',
+              '- 原文の側が間違って切れているときは、訳で辻褄を合わせずに fix_sentence_boundary で区切りを直す。',
+              '  「前半だけの訳」「2 文ぶんの訳」は、後から見て原因が分からなくなる。',
               '- 専門用語は用語集に従う。用語集に無い重要語を決めたら update_glossary に足してから続ける（既定は追記なので既存の判断は消えない）。',
               '- 数式・記号・変数名・引用番号は原文のまま残す。',
               '- 原文が曖昧で複数に読める箇所は、片方を選んで訳し切ったうえで add_note に「なぜそちらを選んだか」を書く。',
@@ -547,5 +626,6 @@ export const TOOL_NAMES = [
   'search_document',
   'update_glossary',
   'skip_sentences',
+  'fix_sentence_boundary',
   'reparse_document',
 ] as const;

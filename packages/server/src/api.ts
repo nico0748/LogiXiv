@@ -4,17 +4,20 @@ import {
   createDocument,
   deleteNote,
   describeSanitizeReport,
+  editSentenceBoundary,
   LOGIXIV_VERSION,
   mergeAnnotations,
   parseExportHtml,
   progress,
   searchDocument,
+  sentenceEditsOf,
   sentencesByHash,
   setTranslation,
   skipSentences,
   skippedOf,
   unskipSentences,
   structureSummary,
+  undoSentenceEdit,
   untranslatedSentences,
   updateNote,
   type GlossaryEntry,
@@ -210,22 +213,33 @@ export class LogiXivApi {
   async reparse(
     id: string,
     preference: ParserPreference = 'auto',
-  ): Promise<{ document: PaperDocument; rebound: number; orphaned: number; warning: string | null }> {
+  ): Promise<{
+    document: PaperDocument;
+    rebound: number;
+    orphaned: number;
+    editsReapplied: number;
+    editsDropped: number;
+    warning: string | null;
+  }> {
     const existing = await this.require(id);
     const pdf = await this.store.readPdf(id);
     const { structure, warning } = await this.parseStructure(pdf, existing.sourceFileName, preference);
 
     let rebound = 0;
     let orphaned = 0;
+    let editsReapplied = 0;
+    let editsDropped = 0;
     const document = await this.mutate(id, (current) => {
       const result = applyStructure(current, structure);
       rebound = result.rebound;
       orphaned = result.orphaned;
+      editsReapplied = result.editsReapplied;
+      editsDropped = result.editsDropped;
       return result.document;
     });
 
     this.bus.publish({ type: 'document.updated', documentId: id, reason: 'reparse' });
-    return { document, rebound, orphaned, warning };
+    return { document, rebound, orphaned, editsReapplied, editsDropped, warning };
   }
 
   async setTranslation(
@@ -407,6 +421,60 @@ export class LogiXivApi {
     });
     if (applied > 0) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'skip' });
     return { applied, remaining };
+  }
+
+  /**
+   * 文の区切りを直す（結合・分割）。
+   *
+   * 直した結果は構造に反映し、手順も残す。再解析のときに流し直されるので、
+   * GROBID の誤分割を毎回手で直し続ける必要がなくなる。
+   */
+  async editSentenceBoundary(
+    id: string,
+    input: { type: 'merge' | 'split'; hashes: string[]; offsets?: number[] },
+  ): Promise<{ applied: boolean; occurrences: number; editId?: string; hashes: string[]; reason?: string }> {
+    let outcome: { applied: boolean; occurrences: number; editId?: string; hashes: string[]; reason?: string } = {
+      applied: false,
+      occurrences: 0,
+      hashes: [],
+    };
+    await this.mutate(id, (current) => {
+      const result = editSentenceBoundary(current, input);
+      outcome = result.applied
+        ? {
+            applied: true,
+            occurrences: result.occurrences,
+            editId: result.edit!.id,
+            hashes: result.edit!.undo?.hashes ?? [],
+          }
+        : { applied: false, occurrences: 0, hashes: [], reason: result.reason };
+      return result.document;
+    });
+    if (outcome.applied) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'sentence-edit' });
+    return outcome;
+  }
+
+  /** 直前の（または指定した）区切り直しを取り消す。再解析は要らない。 */
+  async undoSentenceEdit(id: string, editId?: string): Promise<{ applied: boolean; reason?: string }> {
+    let outcome: { applied: boolean; reason?: string } = { applied: false };
+    await this.mutate(id, (current) => {
+      const result = undoSentenceEdit(current, editId);
+      outcome = { applied: result.applied, reason: result.reason };
+      return result.document;
+    });
+    if (outcome.applied) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'sentence-edit' });
+    return outcome;
+  }
+
+  async listSentenceEdits(id: string) {
+    const document = await this.require(id);
+    return sentenceEditsOf(document).map((edit) => ({
+      id: edit.id,
+      type: edit.type,
+      hashes: edit.hashes,
+      offsets: edit.offsets ?? [],
+      createdAt: edit.createdAt,
+    }));
   }
 
   /** 訳す必要がある最初の文の通し番号。再開の起点に使う。 */
