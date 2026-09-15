@@ -238,7 +238,7 @@ export class LogiXivClient {
     });
   }
 
-  editSentenceBoundary(id: string, input: { type: 'merge' | 'split'; hashes: string[]; offsets?: number[] }) {
+  editSentenceBoundary(id: string, input: { type: 'merge' | 'split' | 'drop'; hashes: string[]; offsets?: number[] }) {
     return this.request<{
       applied: boolean;
       occurrences: number;

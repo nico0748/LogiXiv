@@ -650,6 +650,8 @@ function findNumberBands(numeric: TextChunk[], rest: TextChunk[]): TextChunk[] {
 const RUBY_HEIGHT_RATIO = 0.65;
 /** ルビと認める、1 ページあたりの最小個数。 */
 const MIN_RUBY = 2;
+/** ルビと認める、本文の行の外へのはみ出しの上限（本文の文字高に対する比）。 */
+const RUBY_MAX_OVERHANG = 1.2;
 /** ルビの字。読み仮名は仮名でしか組まない。 */
 const KANA_ONLY = /^[\p{Script=Hiragana}\p{Script=Katakana}ー]{1,8}$/u;
 
@@ -676,18 +678,40 @@ function findRubyChunks(byPage: ReadonlyMap<number, TextChunk[]>): Set<TextChunk
     );
     if (candidates.length < MIN_RUBY) continue;
 
-    const body = pageChunks.filter((chunk) => chunk.h >= bodyHeight * 0.9);
+    /**
+     * 本文の**行**（同じ y に並ぶ本文の大きさの文字片）の左右の端。
+     *
+     * 1 つの文字片と比べてはいけない。ルビは基底文字の中央に組まれるので、
+     * 読みが基底より広いとき（`塊` → `かたまり`）左右にはみ出し、基底の文字片には
+     * 半分しか重ならない。行頭・段落頭では基底が行の左端に来るので、
+     * 「基底を丸ごと含む」でも「基底と半分以上重なる」でも取り逃がし、
+     * 読み仮名がそのまま本文に入っていた（実測:
+     * `かたまり塊の大きさと到達可能な処理速度の間に…` / `そ疎な行列の積は、…`）。
+     */
+    const rows: { y: number; left: number; right: number }[] = [];
+    for (const chunk of pageChunks) {
+      if (chunk.h < bodyHeight * 0.9) continue;
+      const row = rows.find((other) => Math.abs(other.y - chunk.y) <= bodyHeight * 0.3);
+      if (row === undefined) rows.push({ y: chunk.y, left: chunk.x, right: chunk.x + chunk.w });
+      else {
+        row.left = Math.min(row.left, chunk.x);
+        row.right = Math.max(row.right, chunk.x + chunk.w);
+      }
+    }
+
     const onPage: TextChunk[] = [];
     for (const chunk of candidates) {
       const bottom = chunk.y + chunk.h;
-      const carrier = body.find(
-        (other) =>
+      const carrier = rows.find(
+        (row) =>
           // すぐ下にある（重ならず、1 行ぶんの送りには足りない距離）。
-          other.y >= bottom - 0.5 &&
-          other.y <= bottom + bodyHeight * 0.7 &&
-          // 自分の x 範囲を丸ごと含む（本文の字の上に載っている）。
-          other.x <= chunk.x + 0.5 &&
-          other.x + other.w >= chunk.x + chunk.w - 0.5,
+          row.y >= bottom - 0.5 &&
+          row.y <= bottom + bodyHeight * 0.7 &&
+          // その行に重なっていて、行の外へ 1 文字ぶん以上はみ出していない。
+          chunk.x < row.right &&
+          chunk.x + chunk.w > row.left &&
+          chunk.x >= row.left - bodyHeight * RUBY_MAX_OVERHANG &&
+          chunk.x + chunk.w <= row.right + bodyHeight * RUBY_MAX_OVERHANG,
       );
       if (carrier !== undefined) onPage.push(chunk);
     }
@@ -1032,8 +1056,26 @@ const FILL_MAX_LINES = 3;
 
 /** 逐語ブロックと認める最小の行数。 */
 const MIN_VERBATIM_LINES = 4;
-/** 逐語ブロックと認める、本文の文字高との開き（比）。 */
-const VERBATIM_HEIGHT_GAP = 0.05;
+/**
+ * コードの地の文になる記号。括弧・等号・コロン・下線・スラッシュなど。
+ *
+ * 箇条書き・用語定義・引用・表のセルはこれを 1 つも持たない。
+ * 句点・読点・ハイフンは本文にも普通に出るので入れない。
+ */
+const CODE_SYMBOLS = /[(){}[\];:=@#$%&*_/\\|<>"']/g;
+/** 1 行が「記号を含む」と認める個数。 */
+const MIN_CODE_SYMBOLS = 2;
+/** 逐語ブロックと認める、記号を含む行の割合。 */
+const MIN_CODE_LINE_RATIO = 0.6;
+/**
+ * 逐語ブロックと認める、数式として読める行の割合の上限。
+ *
+ * 別行立ての数式の塊を「逐語」と呼ばないための門。ただし**コードの行も
+ * 半分近くは数式として読める**（`scores = q @ k.transpose(-1, -2)` は英字比率 0.47）。
+ * 0.5 にしていたときは、本文がタイトルだけでコードが主体の PDF で
+ * 先頭の 3 行だけ塊から外れ、タイトルがコードの 1 行目と 1 文になっていた。
+ */
+const MAX_FORMULA_LINE_RATIO = 0.7;
 
 /** 行末の式番号 "(3)" / "(3a)" / "[12]"。幅と数式らしさの評価から外す。 */
 const EQUATION_NUMBER = /\s*[([]\d+[a-z]?[)\]]\s*$/;
@@ -1644,23 +1686,32 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
   /**
    * 逐語ブロック（`lstlisting` / `verbatim` / `minted`）の行。
    *
-   * `algorithmic` は行番号 `1:` の形で塊として落とせるが、`listings` は行番号が
-   * 別の小さい書体で左に置かれる（しかも字形が取り出せず**空文字列**になることがある）ので、
-   * その手掛かりが無い。すると行ごとに独立して判定することになり、
-   * `looksLikeFormula` の「英字比率 0.6 未満」という条件を**一行おきに**跨いで、
-   * コードが `body` と `formula` に割れる。実測（`listings` の Python 18 行）:
+   * `algorithmic` は行番号 `1:` の形で塊として落とせるが、`listings` と `verbatim` には
+   * その手掛かりが無い。行ごとに独立して判定すると `looksLikeFormula` の
+   * 「英字比率 0.6 未満」という条件を**一行おきに**跨いでコードが `body` と `formula` に
+   * 割れ、**直後の本文段落までコード断片と 1 文になる**。実測（`verbatim` の Python 13 行）:
    *
-   *   `def sparse_attention (q , k , v , pattern ): mask = build_mask ( pattern , scores .`
-   *   `softmax ( scores , dim = -1) weights = apply_dropout ( weights , p =0.1) We measured
-   *    the runtime of this implementation on a single accelerator and …`
+   *   `def sparse_attention(q, k, v, pattern): scores = scores / math.sqrt(...) … return out
+   *    We measured the runtime of this implementation on a single accelerator and …`
    *
-   * 直後の本文段落までコード断片と 1 文になり、**原文に無い文**を訳させることになる。
-   * 申告は `coverage: 1` / `readingOrderRisk: low` で何も出ない。
+   * 申告は 3 つとも low なので、読む側には「原文がそう書いてある」としか見えない。
    *
-   * 塊として見る手掛かりは版面だけで足りる:
-   *   - **本文と違う字の大きさ**が続く（コードは `\ttfamily\small` で組むのがふつう）
-   *   - どの行も**文章として読めない**（この歯止めが本文を守る）
-   *   - それが 4 行以上続く
+   * **字の大きさで見分けてはいけない。** `listings` は `\ttfamily\small` で組むのが
+   * ふつうだが、LaTeX 標準の `verbatim` は**本文と同じ大きさ**の `\ttfamily` なので
+   * 高さの差がゼロ。逆に、字を小さくしただけの箇条書き・用語定義・引用
+   * （`{\small \begin{itemize}` の貢献一覧など）は高さの差で通ってしまい、
+   * **読者がいちばん訳を欲しがる本文**が「訳しません」として消えた
+   * （実測: `t/bullets.pdf` の 5 項目、`t/deflist2.pdf` の用語定義 5 件、
+   * `t/quote2.pdf` の引用 5 行。しかも逐語ブロックは定義上「文章として読めない行」
+   * だけで出来ているので、採録率は原理的に 1 のままで申告も出ない）。
+   *
+   * 見るのは**塊としての形**:
+   *   - 文章として読めない行が 4 行以上続く
+   *   - 文末記号で閉じる行が 1 つも無い（句点を打つ箇条書きはここで外れる）
+   *   - 右端がばらけている（両端揃えの要旨・引用はここで外れる）
+   *   - **記号を含む行が 6 割以上**（`()[]{}=:;_@/` など。コードの地の文。
+   *     箇条書き・用語定義・引用・表のセルはこれを 1 つも持たない）
+   *   - 数式として読める行が半分以下（別行立ての数式の塊を逐語と呼ばないため）
    * 空行（行番号だけの行、字形の取れなかった行）は塊を切らない — 切ると
    * 1 行ずつの断片に割れて、この判定そのものが働かない。
    */
@@ -1677,17 +1728,14 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       const sorted = [...columnLines].sort((a, b) => a.y - b.y);
       /** 空行は塊を切らない（行番号だけの行・字形の取れなかった行）。 */
       const blank = (line: Line): boolean => line.text.trim().length === 0;
-      /** 本文と違う字の大きさで、文章として読めない行。 */
-      const coded = (line: Line): boolean =>
-        !blank(line) &&
-        Math.abs(line.height - proseHeight) > proseHeight * VERBATIM_HEIGHT_GAP &&
-        !readsAsProse(line);
+      /** 文章として読めない行。この歯止めが本文を守る。 */
+      const coded = (line: Line): boolean => !blank(line) && !readsAsProse(line);
 
       /**
-       * 右端がばらけているか。**両端揃えの塊（要旨・引用・箇条書き）を外すための門。**
+       * 右端がばらけているか。**両端揃えの塊（要旨・引用）を外すための門。**
        * 組版が折り返した段落はどの行も同じ右端で終わるが、コードは 1 行ごとに
-       * 長さが違う。`\small` の要旨は行の高さも文章らしさも本文と違って見えるので、
-       * この条件が無いと要旨が丸ごと落ちる（実測: onecolumn の Abstract 3 行）。
+       * 長さが違う。この条件が無いと `\small` の要旨が丸ごと落ちる
+       * （実測: onecolumn の Abstract 3 行）。
        */
       const scattered = (run: readonly Line[]): boolean => {
         const counts = new Map<number, number>();
@@ -1698,6 +1746,29 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         let most = 0;
         for (const count of counts.values()) if (count > most) most = count;
         return most < run.length * 0.5;
+      };
+
+      /**
+       * 記号を含む行の割合。**箇条書き・用語定義・引用を外すための門。**
+       *
+       * コードは括弧・等号・コロン・下線・スラッシュが地の文になる。
+       * 貢献一覧（`• A block sparse attention kernel`）も用語定義
+       * （`Block a contiguous span of keys`）も引用（`attention is all you need`）も
+       * これを**1 つも持たない**。字の大きさや機能語の有無より確実に分かれる
+       * （`• A block sparse attention kernel` には機能語が 1 つも無い）。
+       */
+      const codeLike = (run: readonly Line[]): boolean => {
+        let withSymbols = 0;
+        let formulaic = 0;
+        for (const line of run) {
+          const text = line.text.trim();
+          if ((text.match(CODE_SYMBOLS) ?? []).length >= MIN_CODE_SYMBOLS) withSymbols++;
+          if (looksLikeFormula(text)) formulaic++;
+        }
+        return (
+          withSymbols >= run.length * MIN_CODE_LINE_RATIO &&
+          formulaic <= run.length * MAX_FORMULA_LINE_RATIO
+        );
       };
 
       let i = 0;
@@ -1720,7 +1791,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         }
         // 文末記号で閉じる行が 1 つでもあれば文章の塊。コードの行はそう終わらない。
         const closes = run.some((line) => SENTENCE_END.test(line.text.trim()));
-        if (run.length >= MIN_VERBATIM_LINES && !closes && scattered(run)) {
+        if (run.length >= MIN_VERBATIM_LINES && !closes && scattered(run) && codeLike(run)) {
           for (let k = i; k <= end; k++) verbatim.add(sorted[k]!.index);
           i = end + 1;
         } else {

@@ -115,6 +115,26 @@ export function GlossaryPanel({ document: paper, onChanged, onClose, onMessage }
       return null;
     });
 
+  /**
+   * 置き換えを見送る。
+   *
+   * ここを黙って閉じると、**用語集だけが新しい訳語になり、本文は古いまま**になる。
+   * 画面のどこにもその食い違いは出ないので、次に開いた人（や Claude）は
+   * 用語集を信じて訳し、前半と後半で訳語が違う論文が出来上がる。
+   * この機能はまさにそれを防ぐために在るので、見送ったことだけは必ず言う。
+   */
+  const dismissPending = (): Promise<void> =>
+    run('置き換えの見送り', async () => {
+      if (!pending) return null;
+      const count = pending.total;
+      setPending(null);
+      return (
+        `「${pending.term}」の訳語は「${pending.to}」にしました。` +
+        `既訳 ${count} 件は古い訳語（${pending.from}）のままです` +
+        '——用語集の訳語を押せば、いつでもここからやり直せます。'
+      );
+    });
+
   const applyPending = (): Promise<void> =>
     run('既訳の置き換え', async () => {
       if (!pending) return null;
@@ -139,7 +159,12 @@ export function GlossaryPanel({ document: paper, onChanged, onClose, onMessage }
           <strong>
             「{pending.from}」→「{pending.to}」に置き換える訳を選ぶ
           </strong>
-          <button type="button" className="flash-close" aria-label="閉じる" onClick={() => setPending(null)}>
+          <button
+            type="button"
+            className="flash-close"
+            aria-label="閉じる"
+            onClick={() => void dismissPending()}
+          >
             ×
           </button>
         </div>
@@ -203,7 +228,7 @@ export function GlossaryPanel({ document: paper, onChanged, onClose, onMessage }
           >
             全部選ぶ
           </button>
-          <button type="button" onClick={() => setPending(null)}>
+          <button type="button" onClick={() => void dismissPending()}>
             やめる
           </button>
         </div>

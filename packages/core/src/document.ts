@@ -326,7 +326,7 @@ function countDetached(
  */
 export function editSentenceBoundary(
   document: PaperDocument,
-  input: { type: 'merge' | 'split'; hashes: string[]; offsets?: number[] },
+  input: { type: 'merge' | 'split' | 'drop'; hashes: string[]; offsets?: number[] },
 ): SentenceEditResult {
   const now = new Date().toISOString();
   const edit: SentenceEdit = {

@@ -273,9 +273,23 @@ export interface SkippedSentence {
  */
 export interface SentenceEdit {
   id: string;
-  /** merge = 連続する複数文を 1 文に、split = 1 文を複数に。 */
-  type: 'merge' | 'split';
-  /** merge のときは結合する文の hash を順に、split のときは対象 1 件。 */
+  /**
+   * merge = 連続する複数文を 1 文に、split = 1 文を複数に、drop = 本文から取り除く。
+   *
+   * drop が要る理由。本文 1 文の**真ん中**に図の枠内文字や表の行が割り込むことがある
+   * （実測: `The expert count is E = 64 and (schematic of the two-branch layer) Model
+   * Active In-domain … k = 2 unless stated otherwise, and …`）。merge と split には
+   * 「中身を取り除く」操作が無いので、はじめて使った研究者は
+   * 「3 つに split → 真ん中を skip → 前後を merge」を試して
+   * `指定された文が連続して見つかりません` で行き止まりになった（skip しても
+   * 文の列からは消えないため）。区切りを直せと勧めている当の操作が、
+   * いちばん直したい形で詰んでいた。
+   *
+   * drop は split・merge と直交する 3 つ目の操作にしてある。割り込みを取り除けば
+   * 前後が隣り合うので、既存の merge がそのまま使える（merge 側に例外は要らない）。
+   */
+  type: 'merge' | 'split' | 'drop';
+  /** merge のときは結合する文の hash を順に、split・drop のときは対象 1 件。 */
   hashes: string[];
   /** split のときだけ使う、原文テキスト内の分割位置（昇順）。 */
   offsets?: number[];
@@ -304,6 +318,11 @@ export interface SentenceEdit {
     joiners?: string[];
     occurrences?: number;
     at?: number[];
+    /**
+     * drop で `nonBody` に移した件の id。取り消すときに**その件だけ**を戻すために要る。
+     * hash だけで探すと、もともと同じ本文の付物があったときにそちらを本文へ混ぜてしまう。
+     */
+    nonBodyIds?: string[];
   };
   /**
    * いまの構造には当たらない（外れている）区切り直し。記録としては残す。

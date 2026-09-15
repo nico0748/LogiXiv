@@ -556,3 +556,167 @@ test('題名はファイル名ではなく本文から取る', () => {
   body.title = null;
   assert.equal(documentTitle(body, '2401.01234v2.pdf'), '2401.01234v2');
 });
+
+// --- 割り込んだ断片の取り除き（drop） -------------------------------------
+
+/**
+ * はじめて使った研究者が詰まった形。本文 1 文の**真ん中**に、図の枠内文字と表の行が
+ * 割り込んでいる。merge と split には「中身を取り除く」操作が無いので、
+ * 「3 つに split → 真ん中を skip → 前後を merge」を試して
+ * `指定された文が連続して見つかりません` で行き止まりになった（skip しても
+ * 文の列からは消えないため）。英語 1 文が日本語では半端な 2 文のまま確定した。
+ */
+const INTRUDED_HEAD = 'The expert count is E = 64 and';
+const INTRUDED_JUNK =
+  '(schematic of the two-branch layer) Model Active In-domain Shifted Dense 1.3B 100% 61.2 54.8 GRR (ours) 18% 59.7 51.6';
+const INTRUDED_TAIL = 'k = 2 unless stated otherwise, and the residual fraction is rho = 0.25.';
+const INTRUDED = `${INTRUDED_HEAD} ${INTRUDED_JUNK} ${INTRUDED_TAIL}`;
+
+/** 割り込みを 3 つに割ったところまで進めた文書を作る。 */
+function intrudedDocument() {
+  const document = createDocument({
+    fileName: 'x.pdf',
+    structure: { ...structureOf(['Before.', INTRUDED, 'After.']), nonBody: [] },
+  });
+  const split = editSentenceBoundary(document, {
+    type: 'split',
+    hashes: [sentenceHash(INTRUDED)],
+    offsets: [INTRUDED.indexOf(INTRUDED_JUNK), INTRUDED.indexOf(INTRUDED_TAIL)],
+  });
+  assert.equal(split.applied, true, split.reason);
+  return split.document;
+}
+
+test('割り込んだ断片を取り除くと、前後が隣り合って 1 文に戻せる', () => {
+  let document = intrudedDocument();
+  assert.equal(document.structure.sentences.length, 5);
+
+  // 取り除く。ここが無かったせいで、この先の merge が
+  // 「指定された文が連続して見つかりません」で拒否されていた。
+  const dropped = editSentenceBoundary(document, {
+    type: 'drop',
+    hashes: [document.structure.sentences[2]!.hash],
+  });
+  assert.equal(dropped.applied, true, dropped.reason);
+  document = dropped.document;
+  assert.equal(document.structure.sentences.length, 4);
+
+  // 前後が隣り合ったので、既存の merge がそのまま通る。
+  const merged = editSentenceBoundary(document, {
+    type: 'merge',
+    hashes: [document.structure.sentences[1]!.hash, document.structure.sentences[2]!.hash],
+  });
+  assert.equal(merged.applied, true, merged.reason);
+  document = merged.document;
+
+  assert.equal(document.structure.sentences.length, 3);
+  assert.equal(document.structure.sentences[1]!.text, `${INTRUDED_HEAD} ${INTRUDED_TAIL}`);
+  assert.deepEqual(sentenceEditsOf(document).map((edit) => edit.type), ['split', 'drop', 'merge']);
+});
+
+test('取り除いた断片は消えず、訳さないものとして本文の間に残る', () => {
+  // この道具の一貫した方針は「PDF には見えているのに右に無い」を作らないこと。
+  let document = intrudedDocument();
+  const junkHash = document.structure.sentences[2]!.hash;
+  document = editSentenceBoundary(document, { type: 'drop', hashes: [junkHash] }).document;
+
+  const nonBody = document.structure.nonBody ?? [];
+  assert.equal(nonBody.length, 1, '取り除いた断片が残っていない');
+  assert.equal(nonBody[0]!.text, INTRUDED_JUNK);
+  assert.equal(nonBody[0]!.hash, junkHash);
+  // 画面が本文の間の正しい位置に差し込めること。afterHash は直前に残った本文の文。
+  assert.equal(nonBody[0]!.afterHash, document.structure.sentences[1]!.hash);
+  assert.equal(nonBody[0]!.afterOrder, 1);
+  // 訳す対象からは外れる（進捗の分母が狂わない）。
+  assert.ok(!document.structure.sentences.some((s) => s.hash === junkHash));
+});
+
+test('取り除きを取り消すと、本文の元の位置へ戻る', () => {
+  let document = intrudedDocument();
+  const before = document.structure.sentences.map((s) => s.text);
+  const junkHash = document.structure.sentences[2]!.hash;
+  document = editSentenceBoundary(document, { type: 'drop', hashes: [junkHash] }).document;
+
+  const undone = undoSentenceEdit(document);
+  assert.equal(undone.applied, true, undone.reason);
+  document = undone.document;
+
+  assert.deepEqual(document.structure.sentences.map((s) => s.text), before, '元の並びに戻っていない');
+  assert.equal((document.structure.nonBody ?? []).length, 0, '訳さないものの側に残骸がある');
+  assert.equal(sentenceEditsOf(document).length, 1, '記録が残ったまま');
+});
+
+test('split → drop → merge の 3 手順は、取り消すと 1 文ずつ元に戻る', () => {
+  let document = intrudedDocument();
+  document = editSentenceBoundary(document, { type: 'drop', hashes: [document.structure.sentences[2]!.hash] }).document;
+  document = editSentenceBoundary(document, {
+    type: 'merge',
+    hashes: [document.structure.sentences[1]!.hash, document.structure.sentences[2]!.hash],
+  }).document;
+
+  for (let i = 0; i < 3; i++) {
+    const undone = undoSentenceEdit(document);
+    assert.equal(undone.applied, true, `${i + 1} 回目の取り消しが効かない: ${undone.reason}`);
+    document = undone.document;
+  }
+  assert.deepEqual(
+    document.structure.sentences.map((s) => s.text),
+    ['Before.', INTRUDED, 'After.'],
+    '取り消し切っても元の文に戻らない',
+  );
+  assert.equal((document.structure.nonBody ?? []).length, 0);
+});
+
+test('取り除きは再解析をまたいで保たれる', () => {
+  let document = intrudedDocument();
+  document = editSentenceBoundary(document, { type: 'drop', hashes: [document.structure.sentences[2]!.hash] }).document;
+  document = editSentenceBoundary(document, {
+    type: 'merge',
+    hashes: [document.structure.sentences[1]!.hash, document.structure.sentences[2]!.hash],
+  }).document;
+  document = setTranslation(document, document.structure.sentences[1]!.hash, {
+    text: '専門家の数は E = 64 であり…',
+    engine: 'test',
+    model: 'test',
+  }).document;
+
+  // 解析し直しても、同じ形の構造が返ってくる（人の直しは記録から流し直される）。
+  const again = applyStructure(document, { ...structureOf(['Before.', INTRUDED, 'After.']), nonBody: [] });
+  assert.equal(again.editsReapplied, 3);
+  assert.equal(again.editsDropped, 0);
+  assert.equal(again.document.structure.sentences[1]!.text, `${INTRUDED_HEAD} ${INTRUDED_TAIL}`);
+  assert.equal((again.document.structure.nonBody ?? [])[0]!.text, INTRUDED_JUNK, '断片が再解析で消えた');
+  assert.equal(again.rebound, 1, '結合した文の訳が外れた');
+});
+
+test('取り除きは同じ本文のすべての箇所に効く', () => {
+  // merge / split と揃える（訳は本文のハッシュに付くので、片方だけ違うと説明がつかない）。
+  const document = createDocument({
+    fileName: 'x.pdf',
+    structure: { ...structureOf(['Body one.', 'Model Active In-domain.', 'Body two.', 'Model Active In-domain.']), nonBody: [] },
+  });
+  const result = editSentenceBoundary(document, {
+    type: 'drop',
+    hashes: [sentenceHash('Model Active In-domain.')],
+  });
+  assert.equal(result.applied, true, result.reason);
+  assert.equal(result.occurrences, 2);
+  assert.deepEqual(result.document.structure.sentences.map((s) => s.text), ['Body one.', 'Body two.']);
+  assert.equal((result.document.structure.nonBody ?? []).length, 2);
+
+  const undone = undoSentenceEdit(result.document);
+  assert.equal(undone.applied, true, undone.reason);
+  assert.deepEqual(undone.document.structure.sentences.map((s) => s.text), [
+    'Body one.',
+    'Model Active In-domain.',
+    'Body two.',
+    'Model Active In-domain.',
+  ]);
+});
+
+test('本文が 1 文も残らない取り除きは断る', () => {
+  const document = createDocument({ fileName: 'x.pdf', structure: { ...structureOf(['Only one.']), nonBody: [] } });
+  const result = editSentenceBoundary(document, { type: 'drop', hashes: [sentenceHash('Only one.')] });
+  assert.equal(result.applied, false);
+  assert.match(result.reason ?? '', /すべて無くなる/);
+});

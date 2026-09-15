@@ -204,7 +204,15 @@ export function createMcpServer(baseUrl: string): McpServer {
         return jsonResult({
           documents,
           grobid: health?.grobid ?? 'unknown',
-          hint: health?.grobid === 'down' ? 'GROBID 未接続。簡易解析の文書は節が取れません。' : undefined,
+          // 「節が取れません」と決め打ちしていたが、簡易解析でも節はたいてい取れる
+          // （15 節取れている文書に「取れません」と返していた）。同じ文書の
+          // get_document_outline が正反対のことを言うので、呼び出し側が
+          // 使える手掛かりを使わなくなる。
+          hint:
+            health?.grobid === 'down'
+              ? 'GROBID 未接続。簡易解析で取り込んだ文書は、節・図表・数式の切り分けが崩れることがあります。' +
+                '文書ごとの詳しい但し書きは get_document_outline の caveat に入ります。'
+              : undefined,
         });
       } catch (error) {
         return errorResult(error);
@@ -762,17 +770,20 @@ export function createMcpServer(baseUrl: string): McpServer {
       title: '文の区切りを直す',
       description:
         '文の切れ目がおかしいときに直す。merge は連続する 2 文以上を 1 文にまとめ、split は 1 文を文字位置で割る。' +
+        'drop は 1 文を本文から取り除いて「訳さないもの」へ移す（消さずに残るので、画面には理由つきで並ぶ）。' +
+        '本文 1 文の**真ん中**に図の枠内文字や表の行が割り込んでいるときは、' +
+        'split で 3 つに割り、割り込みを drop し、残った前後を merge すると 1 文に戻せる。' +
         '訳が「前半だけ」「2 文ぶん」になってしまう原因はほぼここなので、訳す前に直す方が手戻りが少ない。' +
         '同じ本文が複数箇所にあるときは、そのすべてに同じ区切りが適用される（訳は本文のハッシュに付くため）。' +
         '直した内容は記録され、再解析しても流し直される。action=\'undo\' で取り消せる（特定の編集だけなら undo_edit_id も指定する）。',
       inputSchema: {
         document_id: z.string(),
-        action: z.enum(['merge', 'split', 'undo']),
+        action: z.enum(['merge', 'split', 'drop', 'undo']),
         sentence_hashes: z
           .array(z.string())
           .max(64)
           .default([])
-          .describe('merge では結合する文のハッシュを本文の順に 2 件以上、split では対象 1 件'),
+          .describe('merge では結合する文のハッシュを本文の順に 2 件以上、split と drop では対象 1 件'),
         offsets: z
           .array(z.number().int().positive())
           .max(64)
@@ -799,6 +810,9 @@ export function createMcpServer(baseUrl: string): McpServer {
             hint: 'split には sentence_hashes を 1 件と、offsets を 1 件以上指定してください。',
           });
         }
+        if (action === 'drop' && sentence_hashes.length !== 1) {
+          return jsonResult({ applied: false, hint: 'drop には取り除く文の sentence_hashes を 1 件だけ指定してください。' });
+        }
 
         const result = await client.editSentenceBoundary(document_id, {
           type: action,
@@ -824,7 +838,10 @@ export function createMcpServer(baseUrl: string): McpServer {
           resultHashes: result.resultHashes,
           detached,
           hint:
-            '区切りを変えた文はハッシュが変わりました。resultHashes が新しい文のハッシュです。' +
+            (action === 'drop'
+              ? '本文から取り除いて「訳さないもの」へ移しました（消えてはいません）。' +
+                '取り除いた前後の文が隣り合ったので、1 文に戻すならこのまま merge できます。'
+              : '区切りを変えた文はハッシュが変わりました。resultHashes が新しい文のハッシュです。') +
             (result.occurrences > 1 ? ` 同じ本文の ${result.occurrences} か所に適用されています。` : '') +
             (lost > 0
               ? ` 元の文に付いていた訳 ${detached.translations} 件・メモ ${detached.notes} 件は、どの文にも結び付かなくなりました（消えてはおらず、action=undo で戻ります）。`

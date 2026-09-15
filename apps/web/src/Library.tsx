@@ -152,14 +152,23 @@ export function Library({ onOpen }: Props): React.JSX.Element {
             <button type="button" className="document-row" onClick={() => onOpen(document.id)}>
               <span className="document-title">{document.title}</span>
               <span className="document-meta">
-                {document.translated} / {document.total} 文 ·{' '}
+                {document.translated} / {document.total} 文
+                {(document.skipped ?? 0) > 0 && `（訳さない ${document.skipped}）`} ·{' '}
                 {document.parser === 'grobid' ? 'GROBID' : '簡易解析'} ·{' '}
                 {new Date(document.updatedAt).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' })}
               </span>
               <span className="document-bar">
                 <span
                   className="document-bar-fill"
-                  style={{ width: `${document.total === 0 ? 0 : (document.translated / document.total) * 100}%` }}
+                  // 「訳さない」も片付いた文なので、バーは満ちる。
+                  // 満ちないと、終わっている文書がいつまでも途中に見える。
+                  style={{
+                    width: `${
+                      document.total === 0
+                        ? 0
+                        : ((document.translated + (document.skipped ?? 0)) / document.total) * 100
+                    }%`,
+                  }}
                 />
               </span>
             </button>

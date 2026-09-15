@@ -1,4 +1,4 @@
-import type { DocumentStructure, Rect, Sentence, SentenceEdit } from './types.ts';
+import type { DocumentStructure, NonBodySentence, Rect, Sentence, SentenceEdit } from './types.ts';
 import { sentenceHash, sentenceId } from './hash.ts';
 
 /**
@@ -167,11 +167,17 @@ function boundariesIn(texts: readonly string[], joiners: readonly string[] | und
  * 正規化規則を変えたときの移行は、これを呼び直すだけで済む。
  */
 export function deriveEdit(
-  type: 'merge' | 'split',
+  type: 'merge' | 'split' | 'drop',
   sourceTexts: readonly string[],
   offsets: readonly number[] = [],
   joiners: readonly string[] | undefined = undefined,
 ): { hashes: string[]; offsets: number[]; undo: NonNullable<SentenceEdit['undo']> } {
+  if (type === 'drop') {
+    // 取り除きは本文を書き換えないので、導けるのは対象の hash だけ。
+    // 戻す先の位置（at）と付物の id は編集したときにしか分からないので、呼び出し側が持つ。
+    const hash = sentenceHash(sourceTexts[0] ?? '');
+    return { hashes: [hash], offsets: [], undo: { hashes: [hash] } };
+  }
   if (type === 'merge') {
     const text = joinPieces(sourceTexts, joiners);
     return {
@@ -428,6 +434,178 @@ export function splitSentence(
   };
 }
 
+export interface DropOptions {
+  /** 先頭から数えて何か所までに適用するか。 */
+  limit?: number;
+  /** ここに挙げた通し番号の文だけを対象にする（merge / split の at と同じ理由）。 */
+  at?: readonly number[];
+}
+
+/** 付物の id を作る。本文の文の id とぶつからないよう接頭辞を分ける（sentences.ts と同じ規則）。 */
+function nonBodyId(hash: string, used: ReadonlySet<string>): string {
+  let occurrence = 0;
+  let id = `nb_${hash}`;
+  while (used.has(id)) {
+    occurrence++;
+    id = `nb_${hash}_${occurrence}`;
+  }
+  return id;
+}
+
+/**
+ * 文を本文から取り除き、`nonBody`（訳さないもの）へ移す。
+ *
+ * **なぜこの操作が要るか。** 本文 1 文の真ん中に図の枠内文字や表の行が割り込むことがある。
+ * merge と split だけでは取り除けず、「3 つに split → 真ん中を skip → 前後を merge」は
+ * `指定された文が連続して見つかりません` で拒否される（skip は「訳さない」印であって、
+ * 文の列からは消えないため）。実際にそこで詰まって、英語 1 文が日本語では
+ * 半端な 2 文のまま確定した。
+ *
+ * **取り除いたものは消さない。** `nonBody` に移すので、画面は
+ * 「（訳さない：…）」として本文の間の正しい位置に出せる。この道具の一貫した方針は
+ * 「PDF には見えているのに右に無い」を作らないこと。訳す対象からは外れるので、
+ * 進捗の分母も正しくなる。
+ *
+ * 適用の単位は merge / split と揃える — hash で指して一致する箇所すべてに効き、
+ * `at` で位置を絞れる。
+ */
+export function dropSentence(
+  structure: DocumentStructure,
+  hash: string,
+  options: DropOptions = {},
+): EditOutcome {
+  const limit = options.limit ?? Infinity;
+  const wanted = options.at ? new Set(options.at) : null;
+
+  const kept: Sentence[] = [];
+  const removed: Sentence[] = [];
+  /** 取り除いた後の並びでの位置。取り消すときは、ここへ挿し戻せば元に戻る。 */
+  const at: number[] = [];
+  /** 取り除く前の通し番号。付物の列のどこに挟むかを決めるのに使う。 */
+  const originalOrders: number[] = [];
+  let occurrences = 0;
+
+  for (const sentence of structure.sentences) {
+    const matches =
+      sentence.hash === hash &&
+      occurrences < limit &&
+      (wanted === null || wanted.has(sentence.order));
+    if (!matches) {
+      kept.push(sentence);
+      continue;
+    }
+    at.push(kept.length);
+    originalOrders.push(sentence.order);
+    removed.push(sentence);
+    occurrences++;
+  }
+
+  if (occurrences === 0) {
+    throw new SentenceEditError('指定された文が見つかりません（再解析で区切りが変わった可能性があります）');
+  }
+  if (kept.length === 0) {
+    // 本文が 1 文も残らない取り除き方は、事故としか考えられない。
+    throw new SentenceEditError('本文の文がすべて無くなるため取り除けません');
+  }
+
+  const nonBody = [...(structure.nonBody ?? [])];
+  const used = new Set(nonBody.map((entry) => entry.id));
+  const nonBodyIds: string[] = [];
+
+  removed.forEach((sentence, index) => {
+    // 直前に残った本文の文。取り除いた後の並びで見るので、`at` の 1 つ手前。
+    const previous = at[index]! > 0 ? kept[at[index]! - 1] : undefined;
+    const id = nonBodyId(sentence.hash, used);
+    used.add(id);
+    nonBodyIds.push(id);
+    const entry: NonBodySentence = {
+      id,
+      hash: sentence.hash,
+      order: 0, // 下で振り直す
+      page: sentence.page,
+      text: sentence.text,
+      rects: sentence.rects,
+      sectionId: sentence.sectionId,
+      // 版面の規則で落としたものではなく、人が「本文ではない」と判断したもの。
+      // 種類としてはどれにも当てはまらないので other。
+      kind: 'other',
+      afterOrder: previous ? at[index]! - 1 : -1,
+      afterHash: previous?.hash ?? null,
+    };
+    // 付物の列の中で、紙面の順に近い位置へ挟む。並べ替えはしない
+    // （既存の件の afterOrder は編集前の番号なので、取り除く前の番号で比べる）。
+    const insertAt = nonBody.findIndex((existing) => existing.afterOrder > originalOrders[index]!);
+    if (insertAt < 0) nonBody.push(entry);
+    else nonBody.splice(insertAt, 0, entry);
+  });
+
+  return {
+    structure: {
+      ...structure,
+      sentences: rebuildOrder(kept),
+      nonBody: nonBody.map((entry, order) => ({ ...entry, order })),
+    },
+    sourceTexts: [removed[0]!.text],
+    joiners: [],
+    undo: { hashes: [hash], occurrences, at, nonBodyIds },
+    occurrences,
+    offsets: [],
+  };
+}
+
+/**
+ * 取り除いた文を本文へ挿し戻す（drop の取り消し）。
+ *
+ * 戻す相手は `undo.nonBodyIds` で名指しする。hash だけで探すと、もともと同じ本文の
+ * 付物があったときにそちらを本文へ混ぜてしまう。
+ */
+export function restoreDroppedSentence(structure: DocumentStructure, edit: SentenceEdit): DocumentStructure {
+  const undo = edit.undo;
+  const ids = undo?.nonBodyIds ?? [];
+  const positions = undo?.at ?? [];
+  if (ids.length === 0 || positions.length !== ids.length) {
+    throw new SentenceEditError('この編集には取り消しの情報がありません');
+  }
+
+  const nonBody = structure.nonBody ?? [];
+  const byId = new Map(nonBody.map((entry) => [entry.id, entry]));
+  let restored = ids.map((id) => byId.get(id));
+  if (restored.some((entry) => entry === undefined)) {
+    // id で引けないのは、正規化規則を変えた移行を通った記録（id は作り直される）。
+    // そのときだけ hash で探す。同じ本文の付物がもともとあると取り違えうるので、
+    // **人が取り除いたもの（kind = other）**に限り、後ろから必要な数だけ取る。
+    const fallback = nonBody.filter((entry) => entry.hash === edit.hashes[0] && entry.kind === 'other');
+    if (fallback.length < ids.length) {
+      throw new SentenceEditError('取り除いた文が見つかりません（すでに戻されている可能性があります）');
+    }
+    restored = fallback.slice(fallback.length - ids.length);
+  }
+  const restoredIds = new Set(restored.map((entry) => entry!.id));
+
+  const sentences = [...structure.sentences];
+  // 後ろから挿し戻す。前から入れると、後ろの位置がそのぶんずれる。
+  for (let i = ids.length - 1; i >= 0; i--) {
+    const entry = restored[i]!;
+    const place = Math.min(Math.max(positions[i]!, 0), sentences.length);
+    sentences.splice(place, 0, {
+      id: entry.id,
+      hash: entry.hash,
+      order: place,
+      page: entry.page,
+      text: entry.text,
+      rects: entry.rects,
+      sectionId: entry.sectionId,
+    });
+  }
+
+  const remaining = nonBody.filter((entry) => !restoredIds.has(entry.id));
+  return {
+    ...structure,
+    sentences: rebuildOrder(sentences),
+    nonBody: remaining.map((entry, order) => ({ ...entry, order })),
+  };
+}
+
 export interface ApplyEditsResult {
   structure: DocumentStructure;
   /** 適用できた編集。取り消し情報は今の本文に合わせて作り直してある。 */
@@ -437,9 +615,9 @@ export interface ApplyEditsResult {
 }
 
 export function applySentenceEdit(structure: DocumentStructure, edit: SentenceEdit): EditOutcome {
-  return edit.type === 'merge'
-    ? mergeSentences(structure, edit.hashes, { joiners: edit.joiners })
-    : splitSentence(structure, edit.hashes[0] ?? '', edit.offsets ?? [], { pieceHashes: edit.undo?.hashes });
+  if (edit.type === 'merge') return mergeSentences(structure, edit.hashes, { joiners: edit.joiners });
+  if (edit.type === 'drop') return dropSentence(structure, edit.hashes[0] ?? '');
+  return splitSentence(structure, edit.hashes[0] ?? '', edit.offsets ?? [], { pieceHashes: edit.undo?.hashes });
 }
 
 /** 記録された編集を打ち消す。結合は分割で、分割は結合で戻す。 */
@@ -453,6 +631,8 @@ export function revertSentenceEdit(structure: DocumentStructure, edit: SentenceE
   // 位置が分からない古い記録では 1 か所に留める（戻しすぎる方が壊れ方が重い）。
   const limit = undo.occurrences ?? 1;
   const at = undo.at;
+  // 取り除きの逆は「挿し戻し」。結合⇄分割のような対ではないので、専用の処理を持つ。
+  if (edit.type === 'drop') return restoreDroppedSentence(structure, edit);
   return edit.type === 'merge'
     ? splitSentence(structure, undo.hashes[0]!, undo.offsets ?? [], {
         limit,

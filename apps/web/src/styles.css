@@ -401,9 +401,13 @@ textarea {
   background: var(--panel);
 }
 
+/* sticky の見出しは、後ろに並ぶカードより手前に置く。
+   z-index が無いと、同じ重なり文脈では**後ろの兄弟が上に描かれる**ので、
+   スクロール中に直前の文が見出しに潰される（1 行が確実に読めなくなる）。 */
 .sidebar-section {
   position: sticky;
   top: 0;
+  z-index: 1;
   margin: 1.2rem 0 0.5rem;
   padding: 0.35rem 0;
   background: var(--panel);

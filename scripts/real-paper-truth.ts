@@ -258,15 +258,24 @@ export function extractTruth(source: string): PaperTruth {
   const expectedSentences: string[] = [];
   const expectedSeams: string[] = [];
   for (const line of stripped.split('\n')) {
-    const seam = line.indexOf('\\sq{');
-    const at = seam === -1 ? line.indexOf('\\s{') : seam;
-    if (at === -1) continue;
-    const body = braced(line, at + (seam === -1 ? 2 : 3));
+    // `\sn{...}` は「本文 1 文だが、版面はすぐ下に別に書く」印（組版はしない）。
+    // 箇条書き・用語定義・引用のように、地の文を `\s{...}` で囲めない形で使う。
+    const marks: { open: string; seam: boolean }[] = [
+      { open: '\\sq{', seam: true },
+      { open: '\\sn{', seam: false },
+      { open: '\\s{', seam: false },
+    ];
+    const found = marks
+      .map((mark) => ({ ...mark, at: line.indexOf(mark.open) }))
+      .filter((mark) => mark.at !== -1)
+      .sort((a, b) => a.at - b.at)[0];
+    if (found === undefined) continue;
+    const body = braced(line, found.at + found.open.length - 1);
     if (body === null) throw new Error(`\\s{...} が 1 行で閉じていません: ${line}`);
     const text = toPlainText(body.body, cite);
     if (text.length === 0) continue;
     expectedSentences.push(text);
-    if (seam !== -1) expectedSeams.push(text);
+    if (found.seam) expectedSeams.push(text);
   }
 
   // --- 本文でないもの -----------------------------------------------------

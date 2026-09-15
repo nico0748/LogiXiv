@@ -1452,3 +1452,94 @@ test('図表に挟まれた節見出しを塊に巻き込まない', () => {
   assert.ok(head !== undefined, '見出しが見つからない');
   assert.notEqual(head.role, 'furniture', `節見出しを ${head.kind} として落とした`);
 });
+
+// --- 字を小さくした箇条書き・引用 ----------------------------------------
+
+test('字を小さくした箇条書きを逐語ブロックとして落とさない', () => {
+  // 逐語ブロックを字の大きさで見分けていた頃、**句点を打たない短い箇条書き**が
+  // 「本文と違う字高 × 文章として読めない × 4 行以上 × 文末記号なし × 右端がばらける」を
+  // 全部満たして丸ごと付物に落ちた。貢献一覧は読者がいちばん訳を欲しがる本文。
+  // しかも逐語ブロックは定義上「文章として読めない行」だけで出来ているので、
+  // 採録率は原理的に 1 のままで申告も出ない。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) {
+    chunks.push({ page: 1, text: `Sparse attention reduces the quadratic cost in run ${i} here.`, x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  // 本文より小さい字の箇条書き。句点なし、右端はばらける、記号は 1 つも無い。
+  const items = [
+    '• A block sparse attention kernel',
+    '• An analysis of the memory traffic',
+    '• A scheduler for mixed block sizes',
+    '• Experiments on six public corpora',
+    '• An open source reference implementation',
+  ];
+  // 右端は項目ごとにばらける（そろえてしまうと、旧コードでも「両端揃え」の門で
+  // はじかれてこのテストが素通りする）。
+  const widths = [120, 148, 172, 196, 224];
+  items.forEach((text, i) => {
+    chunks.push({ page: 1, text, x: 70, y: 185 + i * 12, w: widths[i]!, h: 9 });
+  });
+  for (let i = 0; i < 6; i++) {
+    chunks.push({ page: 1, text: `We measured the runtime of this implementation in run ${i}.`, x: 50, y: 255 + i * 13, w: 250, h: 10 });
+  }
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const dropped = lines.filter((l) => l.role === 'furniture' && l.text.startsWith('•'));
+  assert.equal(dropped.length, 0, `箇条書きが ${dropped[0]?.kind} として落ちた: ${JSON.stringify(dropped.map((l) => l.text))}`);
+});
+
+// --- 本文と同じ大きさの逐語ブロック --------------------------------------
+
+test('本文と同じ大きさの verbatim も塊として落とす', () => {
+  // LaTeX 標準の `verbatim` は本文と同じ大きさの `\ttfamily` で組まれるので、
+  // 字高の差で塊を探していると見つからず、コードが body と formula に一行おきに
+  // 割れて**直後の本文段落と 1 文になる**。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) {
+    chunks.push({ page: 1, text: `The kernel is implemented in about thirty lines in run ${i}.`, x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  const code = [
+    'def sparse_attention(q, k, v, pattern):',
+    'scores = q @ k.transpose(-1, -2)',
+    'mask = build_mask(pattern, scores.shape)',
+    'weights = torch.softmax(scores, dim=-1)',
+    'out = out_proj(out)',
+    'return out',
+  ];
+  // 本文とまったく同じ文字高で組む。
+  code.forEach((text, i) => {
+    chunks.push({ page: 1, text, x: i === 0 ? 55 : 70, y: 185 + i * 12, w: text.length * 5, h: 10 });
+  });
+  for (let i = 0; i < 6; i++) {
+    chunks.push({ page: 1, text: `We measured the runtime of this implementation in run ${i}.`, x: 50, y: 265 + i * 13, w: 250, h: 10 });
+  }
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    !sentences.some((s) => /sparse_attention|out_proj|build_mask/.test(s.text)),
+    `コードが本文に漏れた: ${JSON.stringify(sentences.filter((s) => /_/.test(s.text)).map((s) => s.text))}`,
+  );
+  assert.ok(
+    sentences.some((s) => s.text === 'We measured the runtime of this implementation in run 0.'),
+    `直後の本文段落がコードと 1 文になった: ${JSON.stringify(sentences.map((s) => s.text).slice(-3))}`,
+  );
+});
+
+// --- 段落の先頭のルビ ----------------------------------------------------
+
+test('段落の先頭に置いたルビを本文に混ぜない', () => {
+  // ルビは基底文字の中央に組まれるので、読みが基底より広いとき（`塊` → `かたまり`）
+  // 左へはみ出す。行頭・段落頭では本文の文字片がその行の左端から始まるため、
+  // 「基底を丸ごと含む」という条件では取り逃がし、読み仮名が文の頭に付いていた。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 8; i++) chunks.push(cjkBody(1, 50, 100 + i * 17, i));
+  // 行の左端にある基底（x=50、幅 10）の上に、左へはみ出したルビ（x=39、幅 22）。
+  chunks.push({ page: 1, text: 'かたまり', x: 39, y: 100 - 7, w: 22, h: 5.5 });
+  chunks.push({ page: 1, text: 'かく', x: 44.5, y: 117 - 7, w: 11, h: 5.5 });
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    !sentences.some((s) => /^(?:かたまり|かく)/.test(s.text)),
+    `行頭のルビが本文に混ざった: ${JSON.stringify(sentences.map((s) => s.text).slice(0, 2))}`,
+  );
+});

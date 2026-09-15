@@ -60,8 +60,30 @@ MCP サーバーはファイルを直接触らず、本体へ HTTP で話しか�
 | `search_document` | 原文・訳文・メモを横断検索。ヒットに訳文とメモが入る |
 | `update_glossary` | 用語集を更新。既定は追記、`mode: "replace"` で全置換 |
 | `skip_sentences` | 「この文は訳す対象ではない」と記録する。未訳の集計から外れる |
-| `fix_sentence_boundary` | 文の区切りを直す（結合・分割・取り消し）。再解析しても保たれる |
+| `fix_sentence_boundary` | 文の区切りを直す（結合・分割・**取り除き**・取り消し）。再解析しても保たれる |
 | `reparse_document` | 同じ PDF を解析し直す。訳とメモはハッシュで再結合される |
+
+### 割り込んだ断片は `drop` で取り除く
+
+簡易解析では、図の枠内文字や表の行が**本文 1 文の真ん中に割り込む**ことがある。
+
+```
+The expert count is E = 64 and (schematic of the two-branch layer) Model Active
+In-domain Shifted Dense 1.3B 100% 61.2 54.8 GRR (ours) 18% 59.7 51.6 k = 2 unless
+stated otherwise, and the residual fraction is ρ = 0.25.
+```
+
+`merge` と `split` だけだとここで行き止まりになる（3 つに割って真ん中を
+`skip_sentences` に回しても、文の列からは消えないので前後を `merge` できない）。
+`drop` を使う。
+
+1. `split` で 3 つに割る
+2. 割り込みを `drop`（`sentence_hashes` は 1 件だけ）
+3. 残った前後を `merge`
+
+取り除いた断片は**消えない**。`structure.nonBody` に移って画面には
+「訳しません」として元の位置に出る。`undo` で本文の元の位置へ戻せる。
+再解析をまたいでも保たれる（当たらなくなったら `detached` の印が付く）。
 
 ### 文の指定は必ず `sentenceHash`
 
@@ -141,7 +163,7 @@ MCP サーバーはファイルを直接触らず、本体へ HTTP で話しか�
 | `update_glossary` | `{ "term": "原語", "translation": "訳語", "note": "なぜその訳か（任意）" }` |
 | `add_note` | `{ "document_id": "…", "sentence_hash": "…", "body": "メモ本文" }` |
 | `skip_sentences` | `{ "document_id": "…", "sentence_hashes": ["…"], "reason": "…" }` |
-| `fix_sentence_boundary` | `{ "document_id": "…", "action": "merge"｜"split"｜"undo", "sentence_hashes": ["…"], "offsets": [12] }` |
+| `fix_sentence_boundary` | `{ "document_id": "…", "action": "merge"｜"split"｜"drop"｜"undo", "sentence_hashes": ["…"], "offsets": [12] }` |
 
 `skip_sentences` の `reason` は自由文字列ではなく、次のどれか:
 `reference` / `figure` / `table` / `equation` / `header` / `footer` / `unreadable` / `other`。

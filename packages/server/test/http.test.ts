@@ -448,6 +448,78 @@ test('検索結果に訳文が入る', async () => {
   assert.equal(typeof hits.hits[0]!.order, 'number');
 });
 
+test('割り込んだ断片を取り除いて前後を 1 文に戻せ、取り消しも再解析も効く', async () => {
+  // 本文 1 文の真ん中に図の枠内文字や表の行が割り込む形は、merge と split だけでは
+  // 直せない（「3 つに split → 真ん中を skip → 前後を merge」は skip しても文が
+  // 列に残るので拒否される）。drop はそのための 3 つ目の操作。
+  const id = await ingest();
+  const read = async () =>
+    (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+      structure: { sentences: { hash: string; text: string }[]; nonBody?: { text: string; kind: string }[] };
+    };
+
+  const before = await read();
+  const victim = before.structure.sentences[1]!;
+  const nonBodyBefore = before.structure.nonBody?.length ?? 0;
+
+  const dropped = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'drop', hashes: [victim.hash] }),
+    })
+  ).json()) as { applied: boolean; occurrences: number; resultHashes: string[]; editId?: string };
+  assert.equal(dropped.applied, true);
+  assert.ok(dropped.occurrences >= 1);
+  // 取り除きは新しい文を作らないので、結果のハッシュは空。
+  assert.deepEqual(dropped.resultHashes, []);
+
+  const afterDrop = await read();
+  assert.ok(
+    !afterDrop.structure.sentences.some((sentence) => sentence.hash === victim.hash),
+    '取り除いた文が本文に残っている',
+  );
+  // 消さずに「訳さないもの」へ移すこと（PDF には見えているのに右に無い、を作らない）。
+  const moved = (afterDrop.structure.nonBody ?? []).filter((entry) => entry.text === victim.text);
+  assert.equal(moved.length, dropped.occurrences, '取り除いた断片が残っていない');
+  assert.equal((afterDrop.structure.nonBody ?? []).length, nonBodyBefore + dropped.occurrences);
+
+  // 再解析しても流し直される。
+  const reparsed = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/reparse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parser: 'fallback' }),
+    })
+  ).json()) as { editsReapplied: number; editsDropped: number };
+  assert.equal(reparsed.editsReapplied, 1);
+  assert.equal(reparsed.editsDropped, 0);
+  const afterReparse = await read();
+  assert.ok(!afterReparse.structure.sentences.some((sentence) => sentence.hash === victim.hash));
+
+  // 取り消すと本文へ戻り、訳さないものの側からは消える。
+  const undone = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, { method: 'DELETE' })
+  ).json()) as { applied: boolean };
+  assert.equal(undone.applied, true);
+  const afterUndo = await read();
+  assert.ok(
+    afterUndo.structure.sentences.some((sentence) => sentence.hash === victim.hash),
+    '取り消しても本文に戻っていない',
+  );
+  assert.equal((afterUndo.structure.nonBody ?? []).length, nonBodyBefore);
+});
+
+test('取り除きの対象は 1 文に限る', async () => {
+  const id = await ingest();
+  const response = await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'drop', hashes: [] }),
+  });
+  assert.equal(response.status, 400);
+});
+
 test('文の結合と分割ができ、再解析しても保たれる', async () => {
   const id = await ingest();
   const read = async () =>

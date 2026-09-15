@@ -73,6 +73,14 @@ export interface DocumentRow {
   parser: string;
   total: number;
   translated: number;
+  /**
+   * 「訳さない」と決めた文の数。
+   *
+   * これが無いと、82 訳 + 2「訳さない」で片付いた文書が一覧では「82 / 84 文」
+   * としか出ず、進捗バーも最後まで埋まらない。読み手には「2 文残っている」
+   * としか読めない。
+   */
+  skipped: number;
   remaining: number;
   unreadable: boolean;
   /** 読めなかった理由（英語の例外メッセージを含む）。読めた行では null。 */
@@ -223,6 +231,7 @@ export class LogiXivApi {
           parser: document.structure.parser,
           total: stats.uniqueSentences,
           translated: stats.translated,
+          skipped: stats.skipped,
           remaining: stats.remaining,
           unreadable: false,
           unreadableReason: null,
@@ -236,6 +245,7 @@ export class LogiXivApi {
           parser: 'unknown',
           total: 0,
           translated: 0,
+          skipped: 0,
           remaining: 0,
           unreadable: true,
           unreadableReason: error instanceof Error ? error.message : String(error),
@@ -254,6 +264,7 @@ export class LogiXivApi {
         parser: 'unknown',
         total: 0,
         translated: 0,
+        skipped: 0,
         remaining: 0,
         unreadable: true,
         unreadableReason: reason,
@@ -814,7 +825,7 @@ export class LogiXivApi {
    */
   async editSentenceBoundary(
     id: string,
-    input: { type: 'merge' | 'split'; hashes: string[]; offsets?: number[] },
+    input: { type: 'merge' | 'split' | 'drop'; hashes: string[]; offsets?: number[] },
   ): Promise<SentenceEditOutcome> {
     let outcome: SentenceEditOutcome = {
       applied: false,
@@ -830,7 +841,9 @@ export class LogiXivApi {
             occurrences: result.occurrences,
             editId: result.edit!.id,
             // 結合なら結合後の文、分割なら分割後の断片。画面が選択を追うのに使う。
-            resultHashes: result.edit!.undo?.hashes ?? [],
+            // 取り除きは新しい文を作らないので空。undo.hashes は取り除いた文そのものなので、
+            // そのまま返すと「これが結果です」と読めてしまう。
+            resultHashes: result.edit!.type === 'drop' ? [] : (result.edit!.undo?.hashes ?? []),
             detached: result.detached,
           }
         : {

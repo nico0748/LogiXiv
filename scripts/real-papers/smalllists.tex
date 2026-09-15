@@ -1,0 +1,87 @@
+% 字を小さくした箇条書き・用語定義・引用。**本文の誤削除**を測る標本。
+%
+% 逐語ブロック（lstlisting / verbatim）の判定を「本文と違う字の大きさ × 文章として
+% 読めない × 4 行以上 × どの行も文末記号で終わらない × 右端がばらける」で決めていた頃、
+% **句点を打たない短い箇条書きがこれを全部満たして**丸ごと「本文以外（訳しません）」に
+% 落ちていた。貢献一覧・用語定義・引用は、読者が訳をいちばん欲しがる本文。
+%
+% 直す前の実測: `{\small itemize}` の 5 項目、`\footnotesize description` の用語定義
+% 5 件、`{\small quote}` の 5 行が、それぞれまとめて付物になった。しかも逐語ブロックは
+% 定義上「文章として読めない行」だけで出来ているので、**採録率は原理的に 1 のまま**で
+% 申告も出ない（`coverage: 1` / `readingOrderRisk: low` / 継ぎ目の印なし）。
+%
+% 見分けるのは字の大きさではなく**記号の有無**。コードは括弧・等号・コロン・下線が
+% 地の文になるが、箇条書きも用語定義も引用もそれを 1 つも持たない（layout.ts の
+% CODE_SYMBOLS を参照）。
+%
+% 句読点が無いので、塊の中の行は 1 文につながる。そこが正解（`\sn{...}`）。
+% `\sn{...}` は「本文 1 文だが、版面はすぐ下に別に書く」印で、組版はしない。
+% 中身は、下の塊の行を版面の順に空白でつないだもの。
+% 塊の直後に節見出しを置いてあるのは、塊が次の段落と 1 文になると
+% 「本文として残ったか」だけを測れなくなるため。
+\documentclass[10pt]{article}
+
+\usepackage{mathptmx}
+\usepackage[margin=2cm]{geometry}
+
+\newcommand{\s}[1]{#1}
+\newcommand{\sn}[1]{}
+
+\title{Notes on Block Selection}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+\s{Sparse attention reduces the quadratic cost of long context models to a manageable level.}
+\s{Our contributions are summarised in the following list.}
+
+\sn{• A block sparse attention kernel • An analysis of the memory traffic • A scheduler for mixed block sizes • Experiments on six public corpora • An open source reference implementation}
+{\small
+\begin{itemize}
+\item A block sparse attention kernel
+\item An analysis of the memory traffic
+\item A scheduler for mixed block sizes
+\item Experiments on six public corpora
+\item An open source reference implementation
+\end{itemize}
+}
+
+\section{Notation}
+
+\s{We use the following notation throughout the paper.}
+
+\sn{Block a contiguous span of keys Pattern the set of blocks that a query attends to Budget the number of blocks per query Router the module that selects blocks Kernel the fused implementation on the accelerator}
+{\footnotesize
+\begin{description}
+\item[Block] a contiguous span of keys
+\item[Pattern] the set of blocks that a query attends to
+\item[Budget] the number of blocks per query
+\item[Router] the module that selects blocks
+\item[Kernel] the fused implementation on the accelerator
+\end{description}
+}
+
+\section{Related work}
+
+\s{The original proposal is stated in the following terms, which we quote in full.}
+
+\sn{attention is all you need and memory is all you have so spend it where the mass is and nowhere else at all that is the whole of the method}
+{\small
+\begin{quote}
+attention is all you need\\
+and memory is all you have\\
+so spend it where the mass is\\
+and nowhere else at all\\
+that is the whole of the method
+\end{quote}
+}
+
+\section{Results}
+
+\s{The sparse kernel reaches the same accuracy as the dense baseline on every task that we tried.}
+
+\end{document}

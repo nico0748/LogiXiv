@@ -82,22 +82,45 @@ function normalizeAngle(angle: number): number {
  * 件数で数えると本文 3 行の付録ページで軸ラベルが勝ってしまう。
  * 90 度刻みに丸めるのは、組版が本文を半端な角度で組むことはないため。
  */
-function dominantAngle(items: readonly PlacedItem[]): number {
+function dominantAngle(items: readonly PlacedItem[], pageRotate: number): number {
+  // ページ自身が回転を宣言している（pdflscape の /Rotate）なら、viewport が
+  // すでにそれを打ち消しているので、本文はまっすぐ＝0 のはず。迷う必要がない。
+  if (pageRotate % 360 !== 0) return 0;
+
   const weight = new Map<number, number>();
+  let total = 0;
   for (const item of items) {
     const quarter = Math.round(normalizeAngle(item.angle) / (Math.PI / 2)) * (Math.PI / 2);
     weight.set(quarter, (weight.get(quarter) ?? 0) + item.text.length);
+    total += item.text.length;
   }
+  if (total === 0) return 0;
+
+  const upright = weight.get(0) ?? 0;
   let best = 0;
-  let bestWeight = -1;
+  let bestWeight = upright;
   for (const [angle, value] of weight) {
-    // 同点なら横書き（0）を選ぶ。回っていないページを回っていると読まないため。
-    if (value > bestWeight || (value === bestWeight && angle === 0)) {
+    if (angle !== 0 && value > bestWeight) {
       best = angle;
       bestWeight = value;
     }
   }
-  return best;
+  if (best === 0) return 0;
+
+  // 回った側が勝っても、**まっすぐな文字がそれなりにある**ページでは 0 のままにする。
+  //
+  // 横倒しの大きな表や図は本文より字数が多くなることがあり、単純な多数決だと
+  // 「まっすぐな本文の方が付物」に落ちる（ページ 1 枚ぶんの本文が訳す対象から消え、
+  // しかも『訳しません』という嘘の理由が付く）。実測では、柱とノンブルだけで
+  // 回った本文に競り勝つ版面もあった。
+  //
+  // 逆に lscape のように**ページごと回っている**版面では、まっすぐな文字は
+  // ほとんど無い（あっても柱くらい）。だから「まっすぐが 2 割未満」を条件にすると、
+  // 回ったページは拾いつつ、混在ページでは本文を守れる。
+  // まっすぐな文字が「柱とノンブルだけ」しかないページでは、割合で見ると
+  // 回った本文に競り勝ってしまう（実測: 柱＋ノンブル 74 字 対 回った本文 63 字）。
+  // 1 ページぶんの本文になり得ない量（200 字未満）なら、割合に関わらず回った側を取る。
+  return upright / total < 0.2 || upright < 200 ? best : 0;
 }
 
 /** 原点まわりに回す。ページごと回っている版面を、横書きの座標系へ読み直すために使う。 */
@@ -201,7 +224,36 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
       // 「本文以外」に落ちて読む手段が無くなる（pdflscape と見た目は同じなのに結果が真逆になる）。
       // だから「そのページの多数派の向き」を本文の向きとみなし、そこから外れたものだけを
       // 付物へ回す。
-      const dominant = dominantAngle(pageItems);
+      const dominant = dominantAngle(pageItems, page.rotate ?? 0);
+
+      // ページごと回っている版面は、座標も**用紙の中へ戻す**。
+      //
+      // 原点まわりに回すだけだと版面が用紙の外へ出る（実測で x が −725〜−300、
+      // 用紙は 0〜595）。文字は拾えても、以後「ページのどこにあるか」を見る規則
+      // ——柱とノンブルの帯、余白、段の検出——と、画面のマーカー描画が全部ずれる。
+      // マーカーが出ないと「サイドバーの文と PDF が双方向に連動する」という
+      // この道具の中心機能が、そのページだけ黙って死ぬ。
+      let offsetX = 0;
+      let offsetY = 0;
+      if (dominant !== 0) {
+        const corners: [number, number][] = [
+          [0, 0],
+          [viewport.width, 0],
+          [0, viewport.height],
+          [viewport.width, viewport.height],
+        ];
+        const rotated = corners.map(([cx, cy]) => rotatePoint(cx, cy, -dominant));
+        offsetX = -Math.min(...rotated.map(([cx]) => cx));
+        offsetY = -Math.min(...rotated.map(([, cy]) => cy));
+        // 用紙の向きも入れ替わる。段の検出も余白も、この寸法を基準にする。
+        const size = pageSizes[pageSizes.length - 1];
+        if (size) {
+          const width = Math.max(...rotated.map(([cx]) => cx)) + offsetX;
+          const height = Math.max(...rotated.map(([, cy]) => cy)) + offsetY;
+          size.width = width;
+          size.height = height;
+        }
+      }
       for (const entry of pageItems) {
         if (chunks.length >= input.maxChunks) {
           truncatedChunks = true;
@@ -214,8 +266,8 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
           chunks.push({
             page: pageNumber,
             text: entry.text,
-            x,
-            y,
+            x: x + offsetX,
+            y: y + offsetY,
             w: entry.width,
             h: entry.height,
           });

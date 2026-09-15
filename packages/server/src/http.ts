@@ -645,7 +645,8 @@ async function handle(
       return;
     }
 
-    // 文の区切り直し。結合は連続する 2 文以上、分割は 1 文と文字位置。
+    // 文の区切り直し。結合は連続する 2 文以上、分割は 1 文と文字位置、
+    // 取り除きは 1 文（本文から外して「訳さないもの」へ move する）。
     if (rest === '/sentence-edits' && method === 'GET') {
       sendJson(response, 200, { edits: await api.listSentenceEdits(id) });
       return;
@@ -653,12 +654,15 @@ async function handle(
     if (rest === '/sentence-edits' && method === 'POST') {
       const body = await readJson<{ type?: unknown; hashes?: unknown; offsets?: unknown }>(request);
       const type = requireString(body.type, 'type', 16);
-      if (type !== 'merge' && type !== 'split') throw new BadRequestError('type は merge か split です');
+      if (type !== 'merge' && type !== 'split' && type !== 'drop') {
+        throw new BadRequestError('type は merge か split か drop です');
+      }
       if (!Array.isArray(body.hashes)) throw new BadRequestError('hashes が配列ではありません');
       if (body.hashes.length > 64) throw new BadRequestError('一度に扱えるのは 64 文までです');
       const hashes = body.hashes.map((raw, index) => requireString(raw, `hashes[${index}]`, 64));
       if (type === 'merge' && hashes.length < 2) throw new BadRequestError('結合には 2 文以上が要ります');
       if (type === 'split' && hashes.length !== 1) throw new BadRequestError('分割の対象は 1 文です');
+      if (type === 'drop' && hashes.length !== 1) throw new BadRequestError('取り除く対象は 1 文です');
 
       let offsets: number[] | undefined;
       if (type === 'split') {

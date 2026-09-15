@@ -151,6 +151,8 @@ export interface DocumentSummary {
   parser: string;
   total: number;
   translated: number;
+  /** 「訳さない」と決めた文の数。片付いた文書を「残っている」と読ませないため。 */
+  skipped?: number;
 }
 
 export interface Health {
