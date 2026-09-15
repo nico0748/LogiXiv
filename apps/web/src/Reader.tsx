@@ -22,6 +22,67 @@ interface Props {
 const RELOAD_DEBOUNCE_MS = 300;
 
 /**
+ * SSE が切れてから「届いていません」と言い出すまでの猶予。
+ *
+ * 本体を起動し直すのは普通に起きることで、EventSource は数秒で勝手に張り直す。
+ * 切れた瞬間に警告を出すと、直るころには読んだ人の信用だけが減っている。
+ * 逆に黙ったままだと、古い内容を最新だと思って読み続けることになる。
+ */
+const CONNECTION_GRACE_MS = 5000;
+
+/** 書き出した Blob URL を手放すまでの猶予。押した直後に消すと保存が始まらない。 */
+const OBJECT_URL_TTL_MS = 60_000;
+
+/** 「この文書はもう無い」と言い切れる失敗か。 */
+function isMissingDocument(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.status === 404 && /文書が見つかりません/.test(cause.message);
+}
+
+/**
+ * 本体が「この文書は書き出せない」と教えてくれていたら、その理由を拾う。
+ *
+ * 書き出せるかどうかは取り込んだ時点で分かる（PDF の大きさで決まる）ので、
+ * 本体は GET /api/documents/:id に情報を添えてくる。いまの形は
+ * `exportability: { exportable: boolean, reason: string | null, ... }` だが、
+ * この画面はそれを型として当てにしない — 本体側は別の作業で動いている最中で、
+ * 名前が変わっても画面が黙って壊れてはいけない。unknown として読み、
+ * 想定した形でなければ「何も言われていない」として扱う。**来ていなくても
+ * 壊れない**ことを優先する — 分からなければ、従来どおり押して確かめられる。
+ */
+function readExportBlock(paper: PaperDocument): string | null {
+  const record = paper as unknown as Record<string, unknown>;
+  // 見る範囲は、文書の直下と「名前に export を含む入れ物」の中まで。
+  const scopes: Record<string, unknown>[] = [record];
+  for (const [key, value] of Object.entries(record)) {
+    if (!/export/i.test(key)) continue;
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      scopes.push(value as Record<string, unknown>);
+    }
+  }
+  for (const scope of scopes) {
+    const isRoot = scope === record;
+    let blocked = false;
+    for (const [key, value] of Object.entries(scope)) {
+      if (typeof value !== 'boolean') continue;
+      // 直下では export を名前に含む鍵しか見ない（ok や applied を巻き込まないため）。
+      if (isRoot && !/export/i.test(key)) continue;
+      const negative = /(toolarge|too_large|blocked|disabled|refused|oversize)/i.test(key);
+      const positive = /export(able|ok)?$|^(ok|allowed|available)$/i.test(key);
+      if (negative && value) blocked = true;
+      else if (positive && !negative && value === false) blocked = true;
+    }
+    if (!blocked) continue;
+    for (const [key, value] of Object.entries(scope)) {
+      if (typeof value === 'string' && value.trim().length > 0 && /reason|message|note|error|detail|why/i.test(key)) {
+        return value.slice(0, 300);
+      }
+    }
+    return 'この文書は 1 ファイルに書き出せません（PDF が大きすぎます）。';
+  }
+  return null;
+}
+
+/**
  * 区切りを直した結果を、画面から見て分かる言葉にする。
  *
  * 黙って終わらせてはいけない。訳やメモが付いた文を結合すると、その注釈は
@@ -45,6 +106,37 @@ function describeEdit(
   return parts.length === 0 ? null : `${label}しました。${parts.join('。')}`;
 }
 
+function describeImport(result: {
+  report: unknown;
+  note: string;
+  warning: string | null;
+}): string {
+  const report = result.report as Record<string, unknown> | null;
+  const n = (key: string): number => (typeof report?.[key] === 'number' ? (report[key] as number) : 0);
+  const base = report
+    ? `取り込み完了: 訳 +${n('translationsAdded')} / 更新 ${n('translationsUpdated')} / メモ +${n('notesAdded')} / 対応なし ${n('orphaned')}${
+        n('sentenceEditsAdopted') ? ` / 区切りの直し ${n('sentenceEditsAdopted')} 件を反映` : ''
+      }${
+        // 用語集は「これから訳すときの方針」なので、混ざると以後の訳が黙って従う。
+        // 件数だけでは何が入ったか分からず取り消せないので、語そのものを出す。
+        Array.isArray(report['glossaryAddedTerms']) && report['glossaryAddedTerms'].length > 0
+          ? ` / 用語集 +${(report['glossaryAddedTerms'] as string[]).length}（${(report['glossaryAddedTerms'] as string[])
+              .slice(0, 5)
+              .join('・')}${(report['glossaryAddedTerms'] as string[]).length > 5 ? ' ほか' : ''}）`
+          : ''
+      }${
+        // 相手の「訳さない」は、自分の残件をその数だけ減らす。黙って減らすと
+        // 「訳していない文を抱えたまま翻訳完了」が成立する。
+        n('skippedAdded') > 0 ? ` / 訳さない +${n('skippedAdded')}（残件がその数だけ減ります）` : ''
+      }${
+        n('detachedTranslations') + n('detachedNotes') > 0
+          ? `（区切りが変わったため、こちらの訳 ${n('detachedTranslations')} 件・メモ ${n('detachedNotes')} 件が元の文から外れました）`
+          : ''
+      }`
+    : result.note;
+  return result.warning ? `${base}（${result.warning}）` : base;
+}
+
 export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   const [paper, setPaper] = useState<PaperDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -63,6 +155,21 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   /** 直近に訳が届いた時刻。「いま Claude が書いている」を画面に出すため。 */
   const [lastWriteAt, setLastWriteAt] = useState<number | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
+  /**
+   * この文書がもう無いと分かったときの理由。
+   *
+   * 別の窓や MCP から消された文書を、開きっぱなしのリーダーはそのまま表示し続け、
+   * 訳の編集まで開けていた。保存して初めて「文書が見つかりません」と出るので、
+   * 打ち直した訳はその時点で行き場が無い。無いと分かった時点で書ける状態をやめる。
+   */
+  const [gone, setGone] = useState<string | null>(null);
+  /**
+   * SSE が切れているか。切れている間の更新は画面に届かない。
+   * 一瞬の切断では立てない（CONNECTION_GRACE_MS を参照）。
+   */
+  const [disconnected, setDisconnected] = useState(false);
+  /** 書き出しで作った Blob URL。解放し損ねないよう手元で持つ。 */
+  const objectUrls = useRef<string[]>([]);
 
   /** どちら側から選んだか。選んだ側はスクロールさせない。 */
   const [pdfScrollTarget, setPdfScrollTarget] = useState<{ id: string; token: number } | null>(null);
@@ -87,7 +194,11 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     try {
       setPaper(await api.getDocument(documentId));
       setError(null);
+      setGone(null);
     } catch (cause) {
+      // 一度読めた文書があると、以後の失敗は画面のどこにも出ていなかった
+      // （`error && !paper` でしか出していなかった）。404 だけは握り潰さない。
+      if (isMissingDocument(cause)) setGone(cause instanceof Error ? cause.message : String(cause));
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [documentId]);
@@ -96,6 +207,15 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     void reload();
     void api.health().then(setHealth).catch(() => setHealth(null));
   }, [reload]);
+
+  // 書き出しの Blob URL は、猶予で消し損ねたぶんも画面を出るときに必ず手放す。
+  useEffect(() => {
+    const urls = objectUrls.current;
+    return () => {
+      for (const url of urls) URL.revokeObjectURL(url);
+      urls.length = 0;
+    };
+  }, []);
 
   // 「訳す」を開いている間だけ health を取り直す。この画面は
   // 「Claude とつながったか」を待つ画面なので、待っている値が
@@ -111,18 +231,48 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   }, [translateOpen]);
 
   // MCP 経由で Claude が書いた訳を、リロードせずに反映する。
+  // あわせて「この文書が消えた」「更新が届かなくなった」も、ここで受け取る。
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const unsubscribe = subscribe((event) => {
-      if (event.documentId !== documentId) return;
-      if (event.type === 'translation.updated' || event.type === 'document.updated') {
-        setLastWriteAt(Date.now());
-      }
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => void reload(), RELOAD_DEBOUNCE_MS);
-    });
+    let grace: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = subscribe(
+      (event) => {
+        if (event.documentId !== documentId) return;
+        // 削除は取りこぼさない。受け取っておきながら何もしていなかったので、
+        // 消えた文書に訳を書き続けられる状態がそのまま残っていた。
+        if (event.type === 'document.deleted') {
+          if (timer) clearTimeout(timer);
+          setGone(`文書が見つかりません: ${documentId}`);
+          return;
+        }
+        if (event.type === 'translation.updated' || event.type === 'document.updated') {
+          setLastWriteAt(Date.now());
+        }
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => void reload(), RELOAD_DEBOUNCE_MS);
+      },
+      undefined,
+      (status) => {
+        if (status === 'open') {
+          // 戻ったら黙って回復する。切れている間の更新は届いていないので、
+          // 取り直してから警告を下ろす（古い内容のまま「正常」に見せない）。
+          if (grace) clearTimeout(grace);
+          grace = null;
+          setDisconnected(false);
+          void reload();
+          return;
+        }
+        // 切れた瞬間には出さない。本体の再起動は普通に起きて、数秒で戻る。
+        if (grace) return;
+        grace = setTimeout(() => {
+          grace = null;
+          setDisconnected(true);
+        }, CONNECTION_GRACE_MS);
+      },
+    );
     return () => {
       if (timer) clearTimeout(timer);
+      if (grace) clearTimeout(grace);
       unsubscribe();
     };
   }, [documentId, reload]);
@@ -230,6 +380,208 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     };
   }, [paper]);
 
+  /**
+   * 失敗を黙って捨てないための共通ラッパ。以前は保存に失敗しても画面が無反応だった。
+   *
+   * ここだけは描画のたびに作り直さない（useCallback）。サイドバーのカードは
+   * props を値で比べて再描画を省くので、渡す関数が毎回別物だと比較が必ず外れ、
+   * 1 打ごとに全カードが作り直されてしまう。
+   */
+  const run = useCallback(
+    async (label: string, task: () => Promise<string | null>): Promise<boolean> => {
+      // 前の操作の知らせを消してから始める。残しておくと、次の操作の結果として読まれる。
+      setMessage(null);
+      setBusyAction(label);
+      try {
+        const note = await task();
+        if (note) setMessage(note);
+        return true;
+      } catch (cause) {
+        // 相手の文書が消えているなら、そう言う。失敗の文言だけ出しても、
+        // 次の操作でまた同じところまで書かせて同じように失敗する。
+        if (isMissingDocument(cause)) setGone(cause instanceof Error ? cause.message : String(cause));
+        setMessage(`${label}に失敗しました: ${cause instanceof Error ? cause.message : String(cause)}`);
+        return false;
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [],
+  );
+
+  const saveTranslation = useCallback(
+    (hash: string, text: string): Promise<boolean> =>
+      run('訳の保存', async () => {
+        const result = await api.setTranslation(documentId, hash, text);
+        await reload();
+        if (!result.applied) throw new Error(result.reason ?? '保存されませんでした');
+        return null;
+      }),
+    [run, documentId, reload],
+  );
+
+  /**
+   * 区切りを直したあとの後始末。
+   *
+   * 読み直したうえで、できた文を選び直す。区切りを変えると文の ID が変わるので、
+   * 何もしないと今いじっていた場所の選択が外れ、長い論文では読んでいた位置を見失う。
+   */
+  const applyEdit = useCallback(
+    async (result: { applied: boolean; resultHashes?: string[] }): Promise<void> => {
+      const updated = await api.getDocument(documentId).catch(() => null);
+      if (updated) {
+        setPaper(updated);
+        setError(null);
+        const wanted = result.resultHashes?.[0];
+        const landed = wanted ? updated.structure.sentences.find((s) => s.hash === wanted) : undefined;
+        if (landed) select(landed.id, 'sidebar');
+      } else {
+        await reload();
+      }
+    },
+    [documentId, reload, select],
+  );
+
+  const runImport = useCallback(
+    (file: File, force = false): Promise<boolean> =>
+      run('取り込み', async () => {
+        const html = await file.text();
+        try {
+          const result = await api.importHtml(documentId, html, force);
+          await reload();
+          return describeImport(result);
+        } catch (cause) {
+          // 一致率が低くて断られたときは、やり直す道を出す。素のエラーにすると
+          // 「取り込めません」で終わってしまい、同じ論文の版違いも通せなくなる。
+          if (cause instanceof ApiError && cause.status === 400 && /一致率/.test(cause.message)) {
+            setImportConfirm({ file, message: cause.message });
+            return null;
+          }
+          throw cause;
+        }
+      }),
+    [run, documentId, reload],
+  );
+
+  /**
+   * 書き出し。リンク（<a download>）ではなく、取得してからファイルにする。
+   *
+   * 本体は上限を超える PDF に 413 と日本語の理由を返しているのに、リンクでは
+   * その本文がどこにも出ない。ブラウザは export.json（＝エラー JSON）を
+   * 落としかけて黙って取り消すだけで、押した人からはボタンが効いていないのと
+   * 見分けが付かなかった。取得にしておけば、失敗はいつもの flash に出せる。
+   *
+   * 数十 MB を組み立てるので数秒〜十数秒かかる。その間 busyAction が立つので、
+   * ボタンは「書き出し中…」になり、押したことが画面に残る。
+   */
+  const runExport = useCallback(
+    (): Promise<boolean> =>
+      run('書き出し', async () => {
+        const { blob, fileName } = await api.exportDocument(documentId);
+        const url = URL.createObjectURL(blob);
+        objectUrls.current.push(url);
+        const link = window.document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        link.click();
+        // 押した直後に解放すると保存が始まらないことがあるので、猶予を置いてから捨てる。
+        // 捨てないと、書き出したファイルぶんのメモリを画面が掴んだままになる。
+        setTimeout(() => {
+          URL.revokeObjectURL(url);
+          // 配列そのものは作り直さない（画面を出るときの後始末が、古い配列を見てしまう）。
+          const at = objectUrls.current.indexOf(url);
+          if (at >= 0) objectUrls.current.splice(at, 1);
+        }, OBJECT_URL_TTL_MS);
+        return `${fileName}（${(blob.size / 1024 / 1024).toFixed(1)}MB）を書き出しました。`;
+      }),
+    [run, documentId],
+  );
+
+  const addNote = useCallback(
+    (hash: string, body: string): Promise<boolean> =>
+      run('メモの追加', async () => {
+        await api.addNote(documentId, hash, body);
+        await reload();
+        return null;
+      }),
+    [run, documentId, reload],
+  );
+
+  const deleteNote = useCallback(
+    (noteId: string): Promise<boolean> =>
+      run('メモの削除', async () => {
+        await api.deleteNote(documentId, noteId);
+        await reload();
+        return null;
+      }),
+    [run, documentId, reload],
+  );
+
+  const mergeWithNext = useCallback(
+    (hashes: [string, string]): Promise<boolean> =>
+      run('文の結合', async () => {
+        const result = await api.mergeSentences(documentId, hashes);
+        await applyEdit(result);
+        if (!result.applied) throw new Error(result.reason ?? '結合できませんでした');
+        return describeEdit('結合', result);
+      }),
+    [run, documentId, applyEdit],
+  );
+
+  const splitSentence = useCallback(
+    (hash: string, offsets: number[]): Promise<boolean> =>
+      run('文の分割', async () => {
+        const result = await api.splitSentence(documentId, hash, offsets);
+        await applyEdit(result);
+        if (!result.applied) throw new Error(result.reason ?? '分割できませんでした');
+        return describeEdit('分割', result);
+      }),
+    [run, documentId, applyEdit],
+  );
+
+  const toggleSkip = useCallback(
+    (hash: string, skip: boolean): Promise<boolean> =>
+      run(skip ? '訳さない設定' : '訳す対象への復帰', async () => {
+        if (skip) await api.skipSentence(documentId, hash);
+        else await api.unskipSentence(documentId, hash);
+        await reload();
+        return null;
+      }),
+    [run, documentId, reload],
+  );
+
+  const deleteTranslation = useCallback(
+    (hash: string, alsoSkip: boolean): Promise<boolean> =>
+      run('訳の削除', async () => {
+        const result = await api.deleteTranslation(documentId, hash, alsoSkip);
+        await reload();
+        if (!result.deleted) return '訳はもうありませんでした。';
+        return result.skipped ? '訳を消して、訳す対象から外しました。' : '訳を消しました。';
+      }),
+    [run, documentId, reload],
+  );
+
+  /**
+   * もう無い文書に書き続けられる状態を作らない。
+   *
+   * ここを出さずにいたので、別の窓（や MCP）で消された文書を開いたままの
+   * リーダーは何事も無かったように表示し、訳の編集まで開けた。打ち直した訳は
+   * 保存を押した瞬間に行き場を失う。読むだけなら害が無い、とは言えない。
+   */
+  if (gone) {
+    return (
+      <div className="pane-message" role="alert">
+        <p>
+          <strong>この文書はもうありません。</strong>
+          別の窓か Claude（MCP）から削除されたようです。ここで編集しても保存できません。
+        </p>
+        <p className="hint">{gone}</p>
+        <button type="button" onClick={onBack}>
+          一覧へ戻る
+        </button>
+      </div>
+    );
+  }
   if (error && !paper) {
     return (
       <div className="pane-message">
@@ -244,98 +596,9 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
 
   const remaining = stats.total - stats.translated - stats.skipped;
 
-  /** 失敗を黙って捨てないための共通ラッパ。以前は保存に失敗しても画面が無反応だった。 */
-  const run = async (label: string, task: () => Promise<string | null>): Promise<boolean> => {
-    // 前の操作の知らせを消してから始める。残しておくと、次の操作の結果として読まれる。
-    setMessage(null);
-    setBusyAction(label);
-    try {
-      const note = await task();
-      if (note) setMessage(note);
-      return true;
-    } catch (cause) {
-      setMessage(`${label}に失敗しました: ${cause instanceof Error ? cause.message : String(cause)}`);
-      return false;
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const saveTranslation = (hash: string, text: string): Promise<boolean> =>
-    run('訳の保存', async () => {
-      const result = await api.setTranslation(documentId, hash, text);
-      await reload();
-      if (!result.applied) throw new Error(result.reason ?? '保存されませんでした');
-      return null;
-    });
-
-  /**
-   * 区切りを直したあとの後始末。
-   *
-   * 読み直したうえで、できた文を選び直す。区切りを変えると文の ID が変わるので、
-   * 何もしないと今いじっていた場所の選択が外れ、長い論文では読んでいた位置を見失う。
-   */
-  const applyEdit = async (result: { applied: boolean; resultHashes?: string[] }): Promise<void> => {
-    const updated = await api.getDocument(documentId).catch(() => null);
-    if (updated) {
-      setPaper(updated);
-      setError(null);
-      const wanted = result.resultHashes?.[0];
-      const landed = wanted ? updated.structure.sentences.find((s) => s.hash === wanted) : undefined;
-      if (landed) select(landed.id, 'sidebar');
-    } else {
-      await reload();
-    }
-  };
-
-  const describeImport = (result: {
-    report: unknown;
-    note: string;
-    warning: string | null;
-  }): string => {
-    const report = result.report as Record<string, unknown> | null;
-    const n = (key: string): number => (typeof report?.[key] === 'number' ? (report[key] as number) : 0);
-    const base = report
-      ? `取り込み完了: 訳 +${n('translationsAdded')} / 更新 ${n('translationsUpdated')} / メモ +${n('notesAdded')} / 対応なし ${n('orphaned')}${
-          n('sentenceEditsAdopted') ? ` / 区切りの直し ${n('sentenceEditsAdopted')} 件を反映` : ''
-        }${
-          // 用語集は「これから訳すときの方針」なので、混ざると以後の訳が黙って従う。
-          // 件数だけでは何が入ったか分からず取り消せないので、語そのものを出す。
-          Array.isArray(report['glossaryAddedTerms']) && report['glossaryAddedTerms'].length > 0
-            ? ` / 用語集 +${(report['glossaryAddedTerms'] as string[]).length}（${(report['glossaryAddedTerms'] as string[])
-                .slice(0, 5)
-                .join('・')}${(report['glossaryAddedTerms'] as string[]).length > 5 ? ' ほか' : ''}）`
-            : ''
-        }${
-          // 相手の「訳さない」は、自分の残件をその数だけ減らす。黙って減らすと
-          // 「訳していない文を抱えたまま翻訳完了」が成立する。
-          n('skippedAdded') > 0 ? ` / 訳さない +${n('skippedAdded')}（残件がその数だけ減ります）` : ''
-        }${
-          n('detachedTranslations') + n('detachedNotes') > 0
-            ? `（区切りが変わったため、こちらの訳 ${n('detachedTranslations')} 件・メモ ${n('detachedNotes')} 件が元の文から外れました）`
-            : ''
-        }`
-      : result.note;
-    return result.warning ? `${base}（${result.warning}）` : base;
-  };
-
-  const runImport = (file: File, force = false): Promise<boolean> =>
-    run('取り込み', async () => {
-      const html = await file.text();
-      try {
-        const result = await api.importHtml(documentId, html, force);
-        await reload();
-        return describeImport(result);
-      } catch (cause) {
-        // 一致率が低くて断られたときは、やり直す道を出す。素のエラーにすると
-        // 「取り込めません」で終わってしまい、同じ論文の版違いも通せなくなる。
-        if (cause instanceof ApiError && cause.status === 400 && /一致率/.test(cause.message)) {
-          setImportConfirm({ file, message: cause.message });
-          return null;
-        }
-        throw cause;
-      }
-    });
+  // 本体が教えてくれていれば、押す前に「書き出せない」と分かる。
+  // 教えてくれていなければ null なので、これまでどおり押して確かめることになる。
+  const exportBlock = readExportBlock(paper);
 
   return (
     <div className="reader">
@@ -453,9 +716,20 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           用語集{paper.annotations.glossary.length > 0 ? `（${paper.annotations.glossary.length}）` : ''}
         </button>
 
-        <a className="button-link" href={api.exportUrl(documentId)} download>
-          書き出し
-        </a>
+        {/* 書き出せないと本体が言っているときは、押す前に見えるようにする。 */}
+        {exportBlock !== null && (
+          <span className="badge is-warn" title={exportBlock}>
+            書き出せません
+          </span>
+        )}
+        <button
+          type="button"
+          disabled={busyAction !== null}
+          title={exportBlock ?? '対訳・メモ・用語集と PDF を 1 つの HTML にまとめます'}
+          onClick={() => void runExport()}
+        >
+          {busyAction === '書き出し' ? '書き出し中…' : '書き出し'}
+        </button>
         <button type="button" disabled={busyAction !== null} onClick={() => importInput.current?.click()}>
           取り込み
         </button>
@@ -575,6 +849,12 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
         {paper.structure.parserNote}
         <span className="parser-keys"> ／ j・k（↓↑）で文を移動、n で次の未訳へ</span>
       </p>
+      {disconnected && (
+        <p className="flash is-warn" role="status" aria-live="polite">
+          本体とのつながりが切れています。ここから先の更新はこの画面に届きません（保存もできません）。
+          つなぎ直しは続けているので、本体が戻れば黙って最新に追いつきます。
+        </p>
+      )}
       {message && (
         <p className="flash" role="status" aria-live="polite">
           {message}
@@ -601,52 +881,12 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           onSelect={select}
           scrollTarget={sidebarScrollTarget}
           onSaveTranslation={saveTranslation}
-          onAddNote={(hash, body) =>
-            run('メモの追加', async () => {
-              await api.addNote(documentId, hash, body);
-              await reload();
-              return null;
-            })
-          }
-          onDeleteNote={(noteId) =>
-            run('メモの削除', async () => {
-              await api.deleteNote(documentId, noteId);
-              await reload();
-              return null;
-            })
-          }
-          onMergeWithNext={(hashes) =>
-            run('文の結合', async () => {
-              const result = await api.mergeSentences(documentId, hashes);
-              await applyEdit(result);
-              if (!result.applied) throw new Error(result.reason ?? '結合できませんでした');
-              return describeEdit('結合', result);
-            })
-          }
-          onSplit={(hash, offsets) =>
-            run('文の分割', async () => {
-              const result = await api.splitSentence(documentId, hash, offsets);
-              await applyEdit(result);
-              if (!result.applied) throw new Error(result.reason ?? '分割できませんでした');
-              return describeEdit('分割', result);
-            })
-          }
-          onToggleSkip={(hash, skip) =>
-            run(skip ? '訳さない設定' : '訳す対象への復帰', async () => {
-              if (skip) await api.skipSentence(documentId, hash);
-              else await api.unskipSentence(documentId, hash);
-              await reload();
-              return null;
-            })
-          }
-          onDeleteTranslation={(hash, alsoSkip) =>
-            run('訳の削除', async () => {
-              const result = await api.deleteTranslation(documentId, hash, alsoSkip);
-              await reload();
-              if (!result.deleted) return '訳はもうありませんでした。';
-              return result.skipped ? '訳を消して、訳す対象から外しました。' : '訳を消しました。';
-            })
-          }
+          onAddNote={addNote}
+          onDeleteNote={deleteNote}
+          onMergeWithNext={mergeWithNext}
+          onSplit={splitSentence}
+          onToggleSkip={toggleSkip}
+          onDeleteTranslation={deleteTranslation}
         />
       </div>
     </div>

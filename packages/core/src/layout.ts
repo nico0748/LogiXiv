@@ -1,4 +1,4 @@
-import type { PageSize } from './types.ts';
+import type { NonBodyKind, PageSize } from './types.ts';
 import type { TextChunk } from './sentences.ts';
 
 /**
@@ -35,6 +35,22 @@ export type LineRole = 'body' | 'heading' | 'furniture';
 
 export interface ClassifiedLine extends Line {
   role: LineRole;
+  /**
+   * `role === 'furniture'` のとき、なぜ本文として扱わなかったか。
+   *
+   * 落とした行は捨てずに画面へ出す（PDF に見えているのに右に無い、という
+   * 説明のつかない状態を作らない）。そのとき「（訳さない：参考文献）」のように
+   * 理由を言えるよう、判定した場所でそのまま種類を持たせる。
+   */
+  kind?: NonBodyKind;
+  /**
+   * その行が付物の**かたまりの先頭**か（キャプションの 1 行目、参考文献の 1 エントリ目）。
+   *
+   * 続きの行と区別が付かないと、参考文献 3 件が 1 件に束ねられて画面に出る。
+   * 先頭かどうかは、ここで使っている正規表現（`isCaption` / `REFERENCE_ENTRY`）を
+   * 知っている側でしか決められないので、判定した場所で持たせる。
+   */
+  startsBlock?: boolean;
 }
 
 const BIN_WIDTH = 2;
@@ -671,12 +687,15 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
    * 続きかどうかは、さらに同じページ・同じ段・行送り・文字の大きさでも絞る。
    */
   const continuation = new Set<number>();
+  /** 続きの行が、どの塊（キャプション / 参考文献）の続きなのか。 */
+  const continuationKind = new Map<number, NonBodyKind>();
   {
     const ordered = [...lines].sort((a, b) => a.index - b.index);
     /** 塊がまだ続いているか。 */
     let open = false;
     /** 塊の先頭行の文字高。見出しや本文に化けた行で塊が伸びるのを止めるために持つ。 */
     let blockHeight = 0;
+    let blockKind: NonBodyKind = 'caption';
     let previous: Line | undefined;
     const stillOpen = (line: Line): boolean => reachesRight(line) || !/[.!?]$/.test(line.text);
     for (const line of ordered) {
@@ -691,9 +710,11 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         Math.abs(line.height - blockHeight) <= Math.max(0.5, blockHeight * 0.08);
       if (starts) {
         blockHeight = line.height;
+        blockKind = startsCaption(line) ? 'caption' : 'reference';
         open = stillOpen(line);
       } else if (open && adjacent) {
         continuation.add(line.index);
+        continuationKind.set(line.index, blockKind);
         open = stillOpen(line);
       } else {
         open = false;
@@ -788,6 +809,22 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     }
   }
 
+  /**
+   * 前付（表題・著者・所属）の終わり。1 ページ目で最初に節見出しらしい行が来るところ。
+   *
+   * 著者行は「段の中で中央へ寄っていて、機能語も文末記号も無い」ので、
+   * 版面の規則では表のセルと見分けが付かない。位置を見れば前付だと分かるので、
+   * ここだけは種類を読み手の見え方に合わせる。
+   */
+  let frontMatterUntil = 0;
+  for (const line of [...lines].sort((a, b) => a.index - b.index)) {
+    if (line.page !== 1) break;
+    if (KNOWN_HEADINGS.has(bareHeading(line.text)) || headingNumber(line.text) !== null) {
+      frontMatterUntil = line.index;
+      break;
+    }
+  }
+
   return lines.map((line) => {
     const pageStats = stats.get(line.page)!;
     const span = Math.max(1, pageStats.bottom - pageStats.top);
@@ -796,18 +833,37 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     const key = line.text.replace(/\d+/g, '#');
     const seenOn = repeated.get(key)?.size ?? 0;
 
-    if (line.index > tailFrom) return { ...line, role: 'furniture' as const };
-    if (footnote.has(line.index)) return { ...line, role: 'furniture' as const };
-    if (continuation.has(line.index)) return { ...line, role: 'furniture' as const };
-    if (startsCaption(line)) return { ...line, role: 'furniture' as const };
-    if (startsReference(line)) return { ...line, role: 'furniture' as const };
+    /** 付物として落とす。種類は画面が「なぜ右に無いか」を言うために持たせる。 */
+    const drop = (kind: NonBodyKind): ClassifiedLine => ({
+      ...line,
+      role: 'furniture' as const,
+      // 参考文献の各エントリと各キャプションは、続きの行と束ねずに 1 件ずつ出す。
+      startsBlock: isCaption(line.text) || REFERENCE_ENTRY.test(line.text),
+      // 版面の規則でしか落ちなかった行（表・数式・その他）が前付の位置にあるなら、
+      // それは著者行や所属。柱・ノンブル・キャプション・参考文献は、
+      // 1 ページ目にあっても種類がはっきりしているのでそのままにする。
+      kind:
+        line.index < frontMatterUntil && (kind === 'table' || kind === 'formula' || kind === 'other')
+          ? 'frontMatter'
+          : kind,
+    });
+
+    // ノンブルは、参考文献の後ろにあっても柱として繰り返されていても、読み手には
+    // ノンブル。位置と形で先に決めてしまう（種類が版面の都合で入れ替わらないように）。
+    const isPageNumber = nearEdge && /^\d{1,4}$/.test(line.text);
+
+    if (line.index > tailFrom) return drop(isPageNumber ? 'pageNumber' : 'reference');
+    if (footnote.has(line.index)) return drop('footnote');
+    if (continuation.has(line.index)) return drop(continuationKind.get(line.index) ?? 'caption');
+    if (startsCaption(line)) return drop('caption');
+    if (startsReference(line)) return drop('reference');
     // 複数ページで同じ柱が出ていれば付物。1 ページだけの文書では判定できない。
     if (nearEdge && edgeCandidate.has(line.index) && pageCount >= 2 && seenOn >= 2) {
-      return { ...line, role: 'furniture' as const };
+      return drop(isPageNumber ? 'pageNumber' : 'runningHead');
     }
     // 端に出る数字だけの行はノンブル。1 ページでも落としてよい。
-    if (nearEdge && /^\d{1,4}$/.test(line.text)) {
-      return { ...line, role: 'furniture' as const };
+    if (isPageNumber) {
+      return drop('pageNumber');
     }
 
     const width = columnWidth.get(`${line.page}:${line.column}`) ?? line.right - line.left;
@@ -825,12 +881,14 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     // looksLikeFormula 自体が「機能語なし・終端記号なし・演算子あり・
     // 英字比率 0.6 未満」の 4 条件なので、これ単体で十分に厳しい。
     if (looksLikeFormula(line.text)) {
-      return { ...line, role: 'furniture' as const };
+      return drop('formula');
     }
 
     // 別行立ての表・数式（版面で判定したもの）。
+    // 演算子があれば数式、無ければ表のセルとして扱う。ここは見た目だけでは
+    // 決められないので、外れることがある前提の弱い区別。
     if (displayBlock.has(line.index)) {
-      return { ...line, role: 'furniture' as const };
+      return drop(/[=+\-*/^_<>|∑∏∫√≈≤≥±×·≠∈∀∃]/u.test(stripped) ? 'formula' : 'table');
     }
 
     // 見出しは弱い手掛かりの合算で決める。単独の規則には必ず反例がある

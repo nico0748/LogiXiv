@@ -207,6 +207,18 @@
   font-size: 0.82rem;
 }
 
+/* 本文として扱わなかった行。在ることだけ示す。訳の対象と見分けが付く見た目にする。 */
+.lxv-card.lxv-nonbody {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.lxv-nonbody-kind {
+  margin: 0 0 0.1rem;
+  font-size: 0.72rem;
+  opacity: 0.8;
+}
+
 /* 「訳さない」は判断であって訳し忘れではない。（未訳）と見分けが付く形にする。 */
 .lxv-skipped {
   margin: 0 0 0.2rem;

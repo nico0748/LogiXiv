@@ -22,7 +22,15 @@ export function App(): React.JSX.Element {
 
   if (documentId) {
     return (
+      /**
+       * key を付けて、文書を変えたら作り直す。
+       *
+       * 一覧を経由せずに URL だけで別の文書へ移ると、Reader は同じ位置に居座り、
+       * 前の文書の知らせ・選択・絞り込み・「この文書はもうありません」まで
+       * そのまま持ち越す。消えた文書の告知が、生きている別の文書に出るのは嘘になる。
+       */
       <Reader
+        key={documentId}
         documentId={documentId}
         onBack={() => {
           window.location.hash = '';

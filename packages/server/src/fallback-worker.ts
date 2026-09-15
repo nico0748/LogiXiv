@@ -126,6 +126,16 @@ if (parentPort) {
   const port = parentPort;
   run(workerData as FallbackWorkerInput).then(
     (result) => port.postMessage({ ok: true, result }),
-    (error: unknown) => port.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+    // メッセージだけでなくクラス名も返す。pdf.js は「暗号化されている」と
+    // 「壊れている」を例外クラスでしか区別しないので、文字列にしてしまうと
+    // 呼び出し側は英語の本文を正規表現で読むしかなくなる（＝将来必ずずれる）。
+    (error: unknown) =>
+      port.postMessage({
+        ok: false,
+        error: {
+          name: error instanceof Error ? error.name : null,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      }),
   );
 }

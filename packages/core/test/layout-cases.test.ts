@@ -564,3 +564,137 @@ test('段落の切れ目から始まる本物の図表キャプションは今�
   assert.ok(!texts.some((t) => t.includes('Darker cells are retained')), 'キャプションの 2 行目が本文に混ざった');
   assert.ok(texts.includes('The paragraph ends here.'), '段落の最終行が落ちた');
 });
+
+// --- 落とした行を捨てずに残す -------------------------------------------
+
+/**
+ * `furniture` と判定した行は本文の文には入れないが、捨てもしない。
+ *
+ * 落とすこと自体は正しくても、落としたことが誰にも見えないと
+ * 「まだ訳が来ていないのか、自分が見落としたのか」を区別できない。
+ * PDF に見えているものが右に無いなら、無い理由がその場に要る。
+ */
+test('本文として落とした行を、種類つきで残す', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 230, 'Information retrieval benefits from'));
+  chunks.push(chunk(1, 120, 243, 'Model     Acc     F1'));
+  chunks.push(chunk(1, 120, 256, 'Dense     81.2    79.4'));
+  chunks.push(chunk(1, 50, 269, 'the same sparsity pattern at every depth.'));
+  chunks.push(chunk(1, 50, 282, 'Figure 1: Overview of the proposed pipeline.'.padEnd(49, ' ')));
+  chunks.push(chunk(1, 50, 295, 'Darker cells are retained across every head.'));
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i + 20, 308 + i * 13));
+  chunks.push(chunk(1, 290, 800, '7', 9));
+
+  const { sentences, nonBody } = buildSentencesFromChunks(chunks, pages(1));
+  const kinds = nonBody.map((n) => n.kind);
+  assert.deepEqual([...new Set(kinds)].sort(), ['caption', 'pageNumber', 'table'], JSON.stringify(nonBody.map((n) => `${n.kind}:${n.text}`)));
+
+  // 本文の文には入っていない（入れると訳す対象になり、進捗の分母も狂う）。
+  const texts = sentences.map((s) => s.text);
+  assert.ok(!texts.some((t) => t.includes('81.2')), '表のセルが本文の文に入った');
+  assert.ok(!texts.some((t) => t.includes('Overview of the proposed pipeline')), 'キャプションが本文の文に入った');
+  // 落とした行は右に出せる形で残っている。
+  assert.ok(nonBody.some((n) => n.kind === 'table' && n.text.includes('81.2')), '表のセルが消えた');
+  assert.ok(nonBody.some((n) => n.kind === 'pageNumber' && n.text === '7'), 'ノンブルが消えた');
+});
+
+test('折り返したキャプションは 1 件にまとまり、矩形も行ごとに付く', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 230, 'The paragraph ends here.'));
+  chunks.push(chunk(1, 50, 243, 'Figure 1: Overview of the proposed pipeline.'.padEnd(49, ' ')));
+  chunks.push(chunk(1, 50, 256, 'Darker cells are retained across every head.'));
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i + 20, 269 + i * 13));
+
+  const { nonBody } = buildSentencesFromChunks(chunks, pages(1));
+  const captions = nonBody.filter((n) => n.kind === 'caption');
+  assert.equal(captions.length, 1, `キャプションが 1 件にまとまっていない: ${JSON.stringify(captions.map((c) => c.text))}`);
+  assert.ok(captions[0]!.text.includes('Overview of the proposed pipeline'), captions[0]!.text);
+  assert.ok(captions[0]!.text.includes('Darker cells are retained'), `続きの行が落ちた: ${captions[0]!.text}`);
+  assert.equal(captions[0]!.rects.length, 2, '行ごとの矩形が付いていない');
+});
+
+test('参考文献は 1 エントリごとに 1 件で残す', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 260, 'References', 11));
+  const entries = [
+    ['[1] J. Doe and A. Smith. Sparse transformers. In', 'Proc. NeurIPS, 2024.'],
+    ['[2] R. Roe. Efficient attention. Journal of ML,', '12(3):45-67, 2025.'],
+    ['[3] M. Tanaka. Long documents. In Proc. ICML,', 'pages 12-24, 2023.'],
+  ];
+  entries.forEach(([head, tail], i) => {
+    chunks.push(chunk(1, 50, 286 + i * 26, head!));
+    chunks.push(chunk(1, 50, 299 + i * 26, tail!));
+  });
+
+  const { sentences, nonBody } = buildSentencesFromChunks(chunks, pages(1));
+  const references = nonBody.filter((n) => n.kind === 'reference');
+  assert.equal(references.length, 3, `参考文献が 1 件ずつに分かれていない: ${JSON.stringify(references.map((r) => r.text))}`);
+  entries.forEach(([head, tail], i) => {
+    assert.ok(references[i]!.text.startsWith(head!.slice(0, 3)), references[i]!.text);
+    assert.ok(references[i]!.text.includes(tail!.slice(0, 8)), `続きの行が落ちた: ${references[i]!.text}`);
+  });
+  assert.ok(!sentences.some((s) => s.text.includes('NeurIPS')), '参考文献が本文の文に入った');
+});
+
+test('落とした行は afterOrder で本文の文の間に差し込める', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 178, 'The paragraph ends here.'));
+  chunks.push(chunk(1, 50, 191, 'Figure 1: Overview of the proposed pipeline.'.padEnd(49, ' ')));
+  // 図版の下には余白が入る。ここを詰めると、キャプションの塊が本文まで伸びる。
+  for (let i = 0; i < 6; i++) chunks.push(measureLine(i + 20, 230 + i * 13));
+
+  const { sentences, nonBody } = buildSentencesFromChunks(chunks, pages(1));
+  const caption = nonBody.find((n) => n.kind === 'caption');
+  assert.ok(caption !== undefined, 'キャプションが残っていない');
+  // 直前は「段落の最終行」、直後は次の本文行。
+  assert.equal(sentences[caption!.afterOrder]?.text, 'The paragraph ends here.');
+  assert.ok(sentences[caption!.afterOrder + 1]?.text.startsWith('Body line 20'), JSON.stringify(sentences[caption!.afterOrder + 1]?.text));
+  // ID は本文の文とぶつからない。
+  assert.ok(nonBody.every((n) => sentences.every((s) => s.id !== n.id)), 'ID が本文の文とぶつかっている');
+});
+
+test('落とした行の位置は、区切りを直しても追える hash でも持つ', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 178, 'The paragraph ends here.'));
+  chunks.push(chunk(1, 50, 191, 'Figure 1: Overview of the proposed pipeline.'.padEnd(49, ' ')));
+  for (let i = 0; i < 6; i++) chunks.push(measureLine(i + 20, 230 + i * 13));
+
+  const { sentences, nonBody } = buildSentencesFromChunks(chunks, pages(1));
+  const caption = nonBody.find((n) => n.kind === 'caption')!;
+  // 通し番号と hash が同じ文を指している。通し番号は文の結合・分割でずれるので、
+  // 画面はまず hash で探せる。
+  assert.equal(caption.afterHash, sentences[caption.afterOrder]!.hash);
+  assert.equal(sentences[caption.afterOrder]!.text, 'The paragraph ends here.');
+});
+
+test('付物にした行を 1 行も取りこぼさない', () => {
+  // 落とした行が「文にも nonBody にも出てこない」状態を作らないための不変条件。
+  // ここが崩れると、PDF に見えているのに右に何も無い行が生まれる。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 230, 'Information retrieval benefits from'));
+  chunks.push(chunk(1, 120, 243, 'Model     Acc     F1'));
+  chunks.push(chunk(1, 120, 256, 'Dense     81.2    79.4'));
+  chunks.push(chunk(1, 50, 269, 'the same sparsity pattern at every depth.'));
+  chunks.push(chunk(1, 50, 282, 'Figure 1: Overview of the proposed pipeline.'.padEnd(49, ' ')));
+  chunks.push(chunk(1, 50, 295, 'Darker cells are retained across every head.'));
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i + 20, 320 + i * 13));
+  chunks.push(chunk(1, 50, 470, 'References', 11));
+  chunks.push(chunk(1, 50, 496, '[1] J. Doe and A. Smith. Sparse transformers. In Proc. NeurIPS, 2024.'));
+  chunks.push(chunk(1, 290, 800, '7', 9));
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const dropped = lines.filter((l) => l.role === 'furniture' && l.text.trim().length > 0);
+  assert.ok(dropped.length >= 5, `付物が足りない: ${dropped.length}`);
+
+  const { nonBody } = buildSentencesFromChunks(chunks, pages(1));
+  const kept = nonBody.map((n) => n.text).join(' | ');
+  for (const line of dropped) {
+    assert.ok(kept.includes(line.text.trim().slice(0, 12)), `落とした行が行方不明: ${JSON.stringify(line.text)}`);
+  }
+});

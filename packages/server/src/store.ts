@@ -188,6 +188,30 @@ export class DocumentStore {
     }
   }
 
+  /**
+   * 置き場そのものが在るか。**document.json が読めるかどうかは見ない。**
+   *
+   * 削除はこちらで判断する。document.json が壊れている文書や、PDF だけ残った
+   * ディレクトリも一覧には行として出る以上、その行から消せなければならない。
+   */
+  async dirExists(id: string): Promise<boolean> {
+    try {
+      return (await stat(this.dir(id))).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  /** 文書の置き場（絶対パス）。壊れた文書を人が自分で覗きにいけるように外へ出す。 */
+  pathOf(id: string): string {
+    return this.dir(id);
+  }
+
+  /** PDF 本体の置き場（絶対パス）。 */
+  pdfPathOf(id: string): string {
+    return join(this.dir(id), PDF_FILE);
+  }
+
   private async writeAtomic(dir: string, file: string, data: string | Uint8Array): Promise<void> {
     const target = join(dir, file);
     const temporary = `${target}.${process.pid}.${Math.random().toString(16).slice(2, 8)}.tmp`;

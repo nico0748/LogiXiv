@@ -12,6 +12,23 @@ export interface Rect {
   h: number;
 }
 
+export interface NonBodySentence extends Sentence {
+  kind:
+    | 'frontMatter'
+    | 'runningHead'
+    | 'pageNumber'
+    | 'caption'
+    | 'reference'
+    | 'footnote'
+    | 'formula'
+    | 'table'
+    | 'other';
+  /** 直前に来る本文の文の通し番号。本文より前なら -1。 */
+  afterOrder: number;
+  /** 同じ位置を hash で指したもの。区切りを直しても追随するのでこちらを優先。 */
+  afterHash: string | null;
+}
+
 export interface Sentence {
   id: string;
   hash: string;
@@ -62,6 +79,11 @@ export interface PaperDocument {
     pageSizes: { page: number; width: number; height: number }[];
     sections: Section[];
     sentences: Sentence[];
+    /**
+     * 本文として扱わなかった行。訳の対象ではないが、画面には出す。
+     * 出さないと「左の PDF に見えているのに右に無い」が説明なしに起きる。
+     */
+    nonBody?: NonBodySentence[];
   };
   annotations: {
     translations: Record<string, Translation>;
@@ -335,19 +357,74 @@ export const api = {
       body: html,
     }),
 
+  /**
+   * 書き出しを取得する。**リンクで落とさせない。**
+   *
+   * 上限を超える PDF には本体が 413 と日本語の理由を返すが、`<a download>` では
+   * その本文の行き先が無い。ブラウザは export.json（＝エラー JSON）を落としかけて
+   * 黙って取り消すので、押した人には「ボタンが効かない」としか見えなかった。
+   * ここで取ってから Blob にすれば、失敗は普通の例外として画面に出せる。
+   */
+  exportDocument: async (id: string): Promise<{ blob: Blob; fileName: string }> => {
+    const response = await fetch(`/api/documents/${id}/export`);
+    if (!response.ok) {
+      const text = await response.text();
+      let message = `${response.status} ${response.statusText}`;
+      try {
+        const parsed = JSON.parse(text) as { error?: string };
+        if (parsed.error) message = parsed.error;
+      } catch {
+        if (text) message = text.slice(0, 300);
+      }
+      throw new ApiError(response.status, message);
+    }
+    return {
+      blob: await response.blob(),
+      fileName: fileNameFrom(response.headers.get('Content-Disposition')) ?? `${id}.logixiv.html`,
+    };
+  },
+
   exportUrl: (id: string) => `/api/documents/${id}/export`,
   pdfUrl: (id: string) => `/api/documents/${id}/pdf`,
 };
 
-/** SSE。Claude が MCP から書き込んだ訳を、リロード無しで反映するための購読。 */
+/** Content-Disposition から保存名を取り出す。題名は日本語なので UTF-8 の形を先に見る。 */
+function fileNameFrom(header: string | null): string | null {
+  if (!header) return null;
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1]);
+    } catch {
+      /* 壊れた値は既定の名前に任せる */
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header);
+  return plain?.[1] ?? null;
+}
+
+/**
+ * SSE。Claude が MCP から書き込んだ訳を、リロード無しで反映するための購読。
+ *
+ * `onStatus` は「つながっているか」を知らせる。切れたことを画面に出さないと、
+ * 本体が落ちたあとも更新が届かないまま古い内容を最新として読み続けることになる
+ * （kill -9 しても画面は完全に正常のままだった）。EventSource は自分で張り直すので、
+ * 切れた＝終わりではない。騒ぐかどうかは受け取った側が決める。
+ */
 export function subscribe(
   onEvent: (event: { type: string; documentId: string }) => void,
   onReconnect?: () => void,
+  onStatus?: (status: 'open' | 'lost') => void,
 ): () => void {
   const source = new EventSource('/api/events');
   // 接続し直したときに知らせる。これが無いと、サーバーが落ちている間に
   // 失敗した一覧の取得が、サーバーが戻っても永久にエラー表示のまま残る。
-  if (onReconnect) source.addEventListener('open', () => onReconnect());
+  source.addEventListener('open', () => {
+    onReconnect?.();
+    onStatus?.('open');
+  });
+  // error は「切れた」と「張り直しに失敗し続けている」の両方で飛ぶ。
+  source.addEventListener('error', () => onStatus?.('lost'));
   const handler = (event: MessageEvent<string>): void => {
     try {
       onEvent(JSON.parse(event.data) as { type: string; documentId: string });

@@ -46,6 +46,21 @@ export interface Note {
   createdAt: string;
 }
 
+export interface NonBodySentence extends Sentence {
+  kind:
+    | 'frontMatter'
+    | 'runningHead'
+    | 'pageNumber'
+    | 'caption'
+    | 'reference'
+    | 'footnote'
+    | 'formula'
+    | 'table'
+    | 'other';
+  afterOrder: number;
+  afterHash: string | null;
+}
+
 export interface ExportPayload {
   format: 'logixiv-export';
   formatVersion: 1;
@@ -59,6 +74,11 @@ export interface ExportPayload {
       parserNote: string;
       sections: Section[];
       sentences: Sentence[];
+      /**
+       * 本文として扱わなかった行（参考文献・表・柱など）。訳の対象ではない。
+       * 出さないと、左の PDF に見えているものが右に 1 行も無い状態になる。
+       */
+      nonBody?: NonBodySentence[];
     };
     annotations: {
       translations: Record<string, Translation>;

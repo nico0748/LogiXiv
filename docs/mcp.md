@@ -55,7 +55,7 @@ MCP サーバーはファイルを直接触らず、本体へ HTTP で話しか�
 | `get_document_outline` | タイトル・節構成・ページ数・解析方式・用語集・進捗 |
 | `get_sentences` | 文を範囲・節・ページで取得（原文 + 既存訳 + メモ）。`from` は**通し番号 (order)** |
 | `get_translation_batch` | 翻訳作業の入口。連続した本文と、そのうちの未訳リストを返す |
-| `set_translations` | 訳をまとめて書き込む（最大 100 文）。結果は JSON |
+| `set_translations` | 訳をまとめて書き込む（1 回 最大 120 文）。結果は JSON |
 | `add_note` | 文にメモを付ける。存在しない hash は拒否される |
 | `search_document` | 原文・訳文・メモを横断検索。ヒットに訳文とメモが入る |
 | `update_glossary` | 用語集を更新。既定は追記、`mode: "replace"` で全置換 |
@@ -128,7 +128,22 @@ MCP サーバーはファイルを直接触らず、本体へ HTTP で話しか�
 - `unknown_hash` … この文書に無い hash。取り直すべき
 - `other` … その他
 
-打ち切りはしない（1 回 100 件上限なので全件返しても小さい）。
+打ち切りはしない（1 回 120 件上限なので全件返しても小さい）。
+
+### 項目名はツールごとに違う
+
+同じ「訳語」でも、`set_translations` では `text`、`update_glossary` では `translation` になる。
+手順だけを読んで `translation` と書いた呼び出しが実際に 1 回失敗しているので、表にしておく。
+
+| ツール | 1 件の形 |
+| --- | --- |
+| `set_translations` | `{ "sentenceHash": "…", "text": "日本語訳" }` |
+| `update_glossary` | `{ "term": "原語", "translation": "訳語", "note": "なぜその訳か（任意）" }` |
+| `add_note` | `{ "document_id": "…", "sentence_hash": "…", "body": "メモ本文" }` |
+| `skip_sentences` | `{ "document_id": "…", "sentence_hashes": ["…"], "reason": "…" }` |
+
+間違えたときのエラーも直し方を返す。`set_translations` に `translation` と書くと
+「訳の項目名は text です（translation ではありません）」と、正しい形の例が返る。
 
 ### 解析方式による制約はその場で伝える
 

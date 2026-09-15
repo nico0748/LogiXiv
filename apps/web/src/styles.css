@@ -86,6 +86,19 @@ textarea {
   font-size: 0.85rem;
 }
 
+/* 「つながりが切れている」のように、操作の結果ではなく状態を出す知らせ。
+   ふつうの flash（黄色の縁）と見分けが付くよう、色だけ変える。 */
+.flash.is-warn {
+  border-left-color: var(--warn);
+  color: var(--warn);
+}
+
+/* 消えた文書の画面で、本体が返した素の理由を小さく添える。 */
+.pane-message .hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .flash-close {
   position: absolute;
   top: 0.25rem;
@@ -394,6 +407,15 @@ textarea {
   padding: 0.5rem 0.55rem 0.3rem;
   border-radius: 6px;
   border-left: 3px solid transparent;
+  /* 画面の外にあるカードは、ブラウザに組ませない。
+     カードは全部 DOM に置いたままにする（そうしないと scrollIntoView も
+     検索も PDF のマーカーからの飛び先も無くなる）が、1 文選び直すたびに
+     全カードの組み直しが走るのは避けたい。付録込みの論文では、この組み直しが
+     1 打の半分（8267 行で 93ms のうち 50ms）を占めていた。
+     contain-intrinsic-size の auto は「一度組んだ高さを覚える」指定で、
+     読んだところは実寸に戻るので、行き先がずれ続けることはない。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 5.5rem;
 }
 
 .card:hover {
@@ -655,6 +677,22 @@ textarea {
 
 .card-note-author::before {
   content: '— ';
+}
+
+/* 本文として扱わなかった行。在ることだけ示し、訳の対象と見分けが付く見た目にする。 */
+.card.is-nonbody {
+  border-left-color: var(--line);
+  opacity: 0.65;
+}
+
+.card.is-nonbody:hover {
+  background: none;
+}
+
+.card-nonbody-kind {
+  margin: 0 0 0.1rem;
+  font-size: 0.7rem;
+  color: var(--muted);
 }
 
 /* どの文の訳かを突き合わせるための原文と位置。訳文だけでは見分けが付かない。 */

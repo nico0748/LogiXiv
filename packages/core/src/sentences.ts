@@ -1,4 +1,4 @@
-import type { PageSize, Rect, Sentence, Section } from './types.ts';
+import type { NonBodySentence, PageSize, Rect, Sentence, Section } from './types.ts';
 import { sentenceHash, sentenceId, stableId } from './hash.ts';
 import { buildLines, classifyLines, type ClassifiedLine } from './layout.ts';
 
@@ -231,6 +231,14 @@ function round(n: number): number {
 export interface FallbackResult {
   sentences: Sentence[];
   sections: Section[];
+  /** 本文として扱わなかった行。訳の対象ではないが、画面には出せるように残す。 */
+  nonBody: NonBodySentence[];
+}
+
+/** 連結した文字列と、1 文字ずつの出どころ。 */
+interface Segment {
+  buffer: string;
+  owners: CharOwner[];
 }
 
 /**
@@ -389,44 +397,166 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
   };
 
   /**
-   * 本文を読み順（ページ → 段 → 行）に連結しつつ、
-   * 連結後の文字位置 →（文字片, 行, 節）の対応表を作る。
+   * 本文の塊。見出しで**切る**。
    *
-   * 見出しで**段落の塊を切る**。以前は区切り文字を 1 つ挟むだけだったが、
-   * 分割器は改行を空白として畳むので、見出しの手前で切れていない文が
-   * 見出しの次の文と 1 枚のカードに同居していた（しかも節の帰属まで狂う）。
+   * 以前は区切り文字を 1 つ挟むだけだったが、分割器は改行を空白として畳むので、
+   * 見出しの手前で切れていない文が見出しの次の文と 1 枚のカードに同居していた
+   * （しかも節の帰属まで狂う）。節は塊の中で変わらないので、塊ごとに持つ。
+   *
+   * 付物の行は塊を**切らない**。切ると、本文の途中に挟まった表や数式のところで
+   * 文が 2 つに割れる（"Information retrieval benefits from" と
+   * "the same sparsity pattern at every depth." が別のカードになる）。
    */
-  interface Segment {
-    buffer: string;
-    owners: (CharOwner & { section: string | null })[];
+  interface Block {
+    lines: ClassifiedLine[];
+    section: string | null;
+    hasText: boolean;
   }
-  const segments: Segment[] = [{ buffer: '', owners: [] }];
-  let currentSection: string | null = null;
+  const blocks: Block[] = [{ lines: [], section: null, hasText: false }];
 
+  for (const line of lines) {
+    if (line.role === 'furniture') continue;
+    const current = blocks[blocks.length - 1]!;
+    if (line.role === 'heading') {
+      const section = registerSection(line.text);
+      // 見出しは本文に混ぜない。ここで塊を切る（跨いだ文を作らないため）。
+      if (current.hasText) blocks.push({ lines: [], section, hasText: false });
+      else current.section = section;
+      continue;
+    }
+    current.lines.push(line);
+    if (line.text.trim().length > 0) current.hasText = true;
+  }
+
+  const occurrences = new Map<string, number>();
+  const sentences: Sentence[] = [];
+  /** 文ごとに、その文が最後に触れた行の番号。付物を読み順に差し込むときに使う。 */
+  const lastLineOf: number[] = [];
+
+  for (const block of blocks) {
+    const { buffer, owners } = joinLines(block.lines, hyphenEvidence);
+    let cursor = 0;
+    for (const raw of splitIntoSentences(buffer)) {
+      const at = buffer.indexOf(raw, cursor);
+      const from = at === -1 ? cursor : at;
+      const to = from + raw.length;
+      cursor = to;
+
+      const covered = owners.slice(from, to);
+      const text = raw.replace(/\s+/g, ' ').trim();
+      if (text.length === 0) continue;
+      const hash = sentenceHash(text);
+      const occurrence = occurrences.get(hash) ?? 0;
+      occurrences.set(hash, occurrence + 1);
+      sentences.push({
+        id: sentenceId(hash, occurrence),
+        hash,
+        order: sentences.length,
+        page: covered[0]?.chunk.page ?? 1,
+        text,
+        rects: mergeRects(covered),
+        sectionId: block.section,
+      });
+      lastLineOf.push(covered.length === 0 ? -1 : Math.max(...covered.map((o) => o.line)));
+    }
+  }
+
+  return { sentences, sections, nonBody: buildNonBody(lines, hyphenEvidence, sentences, lastLineOf) };
+}
+
+/**
+ * 本文として扱わなかった行を、捨てずに読み順つきで組み立てる。
+ *
+ * 落とすこと自体は正しくても（参考文献を訳す必要はない）、落としたことが
+ * 誰にも見えないと「まだ訳が来ていないのか、自分が見落としたのか」を区別できない。
+ * はじめて使った人の言葉: 「ヘッダーは 26 / 27 文 と出るので、完了したように見えます」。
+ *
+ * ここで返すものは `sentences` には入れない。入れると訳す対象になり、進捗の分母も
+ * 狂う。画面が「（訳さない：参考文献）」として並べるための材料としてだけ持つ。
+ */
+function buildNonBody(
+  lines: readonly ClassifiedLine[],
+  evidence: HyphenEvidence,
+  sentences: readonly Sentence[],
+  lastLineOf: readonly number[],
+): NonBodySentence[] {
+  // 紙面の 1 かたまり（折り返したキャプション 1 つ、参考文献 1 エントリ）に束ねる。
+  // 行ごとに 1 件にすると "pipeline." のような断片が並び、かえって読めない。
+  const groups: ClassifiedLine[][] = [];
+  for (const line of lines) {
+    if (line.role !== 'furniture') continue;
+    const current = groups[groups.length - 1];
+    const previous = current?.[current.length - 1];
+    const continues =
+      previous !== undefined &&
+      previous.page === line.page &&
+      previous.column === line.column &&
+      previous.kind === line.kind &&
+      // 間に本文の行が挟まっていたら別のかたまり。
+      line.index === previous.index + 1 &&
+      // 参考文献の次のエントリや次のキャプションは、そこで区切る
+      // （参考文献 3 件が 1 件に束ねられて画面に出てしまう）。
+      line.startsBlock !== true &&
+      Math.abs(line.y - previous.y) <= Math.max(4, previous.height * 2.2);
+    if (continues) current!.push(line);
+    else groups.push([line]);
+  }
+
+  const out: NonBodySentence[] = [];
+  const occurrences = new Map<string, number>();
+  // かたまりは行番号の順に並ぶので、本文側の走査位置も前へ戻らない。
+  let cursor = 0;
+  for (const group of groups) {
+    const { buffer, owners } = joinLines(group, evidence);
+    const text = buffer.replace(/\s+/g, ' ').trim();
+    if (text.length === 0) continue;
+    const firstLine = group[0]!.index;
+    while (cursor < sentences.length && lastLineOf[cursor]! < firstLine) cursor++;
+    const afterOrder = cursor - 1;
+    const hash = sentenceHash(text);
+    const occurrence = occurrences.get(hash) ?? 0;
+    occurrences.set(hash, occurrence + 1);
+    out.push({
+      // 本文の文と ID がぶつからないよう、別の接頭辞を使う
+      // （同じ文字列が本文にも付物にも出ることはある）。
+      id: occurrence === 0 ? `nb_${hash}` : `nb_${hash}_${occurrence}`,
+      hash,
+      order: out.length,
+      page: owners[0]?.chunk.page ?? group[0]!.page,
+      text,
+      rects: mergeRects(owners),
+      // 直前の本文の文と同じ節に置く。画面で節の中の正しい位置に差し込める。
+      sectionId: afterOrder >= 0 ? (sentences[afterOrder]?.sectionId ?? null) : null,
+      kind: group[0]!.kind ?? 'other',
+      afterOrder,
+      afterHash: afterOrder >= 0 ? (sentences[afterOrder]?.hash ?? null) : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * 行の並びを 1 本の文字列に連結し、連結後の 1 文字ずつの出どころを記録する。
+ *
+ * 本文の塊にも付物の塊にも使う。行の組み立て方（文字片の継ぎ目に空白を入れるか、
+ * 行末のハイフンを残すか）は、本文でも図表キャプションでも同じでよい。
+ */
+function joinLines(lines: readonly ClassifiedLine[], evidence: HyphenEvidence): Segment {
+  const segment: Segment = { buffer: '', owners: [] };
   /**
-   * 連結後の文字と、その出どころ（文字片・行・節）を対応づける。
+   * 連結後の文字と、その出どころ（文字片・行）を対応づける。
    * `offset` は文字片の本文内の位置。行の継ぎ目に入れる空白は元の文字片に無いので、
    * `from` に -1 を渡して「位置を持たない文字」として記録する（mergeRects が幅から除く）。
    */
   const push = (text: string, chunk: TextChunk, line: number, from: number): void => {
-    const segment = segments[segments.length - 1]!;
     segment.buffer += text;
     for (let k = 0; k < text.length; k++) {
-      segment.owners.push({ chunk, line, offset: from < 0 ? -1 : from + k, section: currentSection });
+      segment.owners.push({ chunk, line, offset: from < 0 ? -1 : from + k });
     }
   };
 
-  const bodyLines = lines.filter((line) => line.role !== 'furniture');
-
-  for (let li = 0; li < bodyLines.length; li++) {
-    const line = bodyLines[li]!;
-
-    if (line.role === 'heading') {
-      currentSection = registerSection(line.text);
-      // 見出しは本文に混ぜない。ここで塊を切る（跨いだ文を作らないため）。
-      if (segments[segments.length - 1]!.buffer.trim().length > 0) segments.push({ buffer: '', owners: [] });
-      continue;
-    }
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]!;
 
     let previousRight: number | null = null;
     for (const chunk of line.chunks) {
@@ -434,34 +564,29 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
       // 文字片の境目に無条件で空白を入れると、書体が変わるだけの箇所（斜体・合字・
       // カーニング）で語が割れる。実際に隙間があるときだけ空白を入れる。
       const gap = previousRight === null ? Infinity : chunk.x - previousRight;
-      if (previousRight !== null && gap > chunk.h * 0.22) {
-        const segment = segments[segments.length - 1]!;
-        if (!segment.buffer.endsWith(' ')) push(' ', chunk, line.index, -1);
+      if (previousRight !== null && gap > chunk.h * 0.22 && !segment.buffer.endsWith(' ')) {
+        push(' ', chunk, line.index, -1);
       }
       push(chunk.text, chunk, line.index, 0);
       previousRight = chunk.x + chunk.w;
     }
-    {
-      const segment = segments[segments.length - 1]!;
-      if (segment.buffer.length > 0 && !segment.buffer.endsWith(' ')) {
-        push(' ', line.chunks[line.chunks.length - 1]!, line.index, -1);
-      }
+    if (segment.buffer.length > 0 && !segment.buffer.endsWith(' ')) {
+      push(' ', line.chunks[line.chunks.length - 1]!, line.index, -1);
     }
 
-    // 行末ハイフンの処理。読み順で次に来る**本文**行が続きなので、
-    // 段やページを跨いでいても結合を検討する（跨いだときだけ "informa- tion" が
-    // 画面に残る、という妙な非対称が起きていた）。
-    const next = bodyLines[li + 1];
-    if (!next || next.role !== 'body') continue;
+    // 行末ハイフンの処理。読み順で次に来る行が続きなので、段やページを跨いでいても
+    // 結合を検討する（跨いだときだけ "informa- tion" が画面に残る、という妙な
+    // 非対称が起きていた）。
+    const next = lines[li + 1];
+    if (!next) continue;
     // ハイフンを含む語全体を取る。"state-of-the-" の末尾から "the" だけを見ると、
     // 文書内の用例 "state-of-the-art" と照合できない。
-    const segment = segments[segments.length - 1]!;
     const hyphen = /((?:\p{L}+-)*\p{L}+)-\s$/u.exec(segment.buffer);
     if (!hyphen) continue;
     const nextWord = /^(\p{L}+)/u.exec(next.text)?.[1];
     if (!nextWord) continue;
 
-    if (decideLineEndHyphen(hyphen[1]!, nextWord, hyphenEvidence)) {
+    if (decideLineEndHyphen(hyphen[1]!, nextWord, evidence)) {
       // 本来ハイフンを含む複合語。ハイフンを残したまま行を直結する（空白だけ落とす）。
       segment.buffer = segment.buffer.slice(0, -1);
       segment.owners.length = segment.buffer.length;
@@ -473,33 +598,5 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
     }
   }
 
-  const occurrences = new Map<string, number>();
-  const sentences: Sentence[] = [];
-  for (const { buffer, owners } of segments) {
-  let cursor = 0;
-  for (const raw of splitIntoSentences(buffer)) {
-    const at = buffer.indexOf(raw, cursor);
-    const from = at === -1 ? cursor : at;
-    const to = from + raw.length;
-    cursor = to;
-
-    const covered = owners.slice(from, to);
-    const text = raw.replace(/\s+/g, ' ').trim();
-    if (text.length === 0) continue;
-    const hash = sentenceHash(text);
-    const occurrence = occurrences.get(hash) ?? 0;
-    occurrences.set(hash, occurrence + 1);
-    sentences.push({
-      id: sentenceId(hash, occurrence),
-      hash,
-      order: sentences.length,
-      page: covered[0]?.chunk.page ?? 1,
-      text,
-      rects: mergeRects(covered),
-      sectionId: covered[0]?.section ?? null,
-    });
-  }
-  }
-
-  return { sentences, sections };
+  return segment;
 }

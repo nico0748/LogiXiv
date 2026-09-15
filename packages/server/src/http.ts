@@ -4,10 +4,19 @@ import { realpath, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { ImportError } from '@logixiv/core';
 import type { Config } from './config.ts';
-import { BadRequestError, LogiXivApi, NotFoundError, TooLargeError, type ParserPreference } from './api.ts';
+import {
+  BadRequestError,
+  LogiXivApi,
+  MAX_GLOSSARY_ENTRIES,
+  MAX_PDF_BYTES,
+  NotFoundError,
+  TooLargeError,
+  type ParserPreference,
+} from './api.ts';
 import { ViewerNotBuiltError } from './exporter.ts';
-import { GrobidUnavailableError } from './grobid.ts';
+import { GrobidParseError, GrobidUnavailableError } from './grobid.ts';
 import { FallbackParseError } from './fallback.ts';
+import { PdfUnreadableError } from './pdf-failure.ts';
 
 /**
  * ローカル専用の HTTP 層。
@@ -21,7 +30,11 @@ import { FallbackParseError } from './fallback.ts';
  * （しかもディスクに残るので再起動しても直らない）。
  */
 
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+/**
+ * 本文の上限。PDF の上限は api.ts の 1 箇所で決める（取り込みと書き出しでずらさないため）。
+ * 書き出し HTML の取り込みは PDF を base64 で抱えるぶん膨らむので、同じ値で足りる。
+ */
+const MAX_UPLOAD_BYTES = MAX_PDF_BYTES;
 const MAX_JSON_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_FIELD = 20_000;
 const MAX_NOTE_FIELD = 50_000;
@@ -128,12 +141,41 @@ function isLocalRequest(request: IncomingMessage): boolean {
 
 function errorStatus(error: unknown): number {
   if (error instanceof NotFoundError) return 404;
+  // PDF の失敗は 3 通りに分かれる。
+  //   missing … 文書は在るのに PDF 本体が欠けている → 404
+  //   not-pdf … そもそも PDF を送ってきていない（入口の検査）→ 400
+  //   それ以外 … PDF ではあるが解析できない（暗号化・途中で切れた・壊れている）→ 422
+  if (error instanceof PdfUnreadableError) {
+    if (error.reason === 'missing') return 404;
+    return error.reason === 'not-pdf' ? 400 : 422;
+  }
   if (error instanceof BadRequestError || error instanceof ImportError) return 400;
   if (error instanceof TooLargeError) return 413;
   if (error instanceof FallbackParseError) return 422;
+  if (error instanceof GrobidParseError) return 422;
   if (error instanceof GrobidUnavailableError) return 502;
   if (error instanceof ViewerNotBuiltError) return 503;
   return 500;
+}
+
+/**
+ * 失敗の本文。`error` は人がそのまま読める日本語の 1 文に固定する。
+ *
+ * PDF の失敗だけは、画面が文言を読まずに分岐できるよう `code` を添え、
+ * pdf.js や OS が返した英語は `detail` に落とす（人が最初に読む文にはしないが、
+ * 症状を追うときの唯一の手がかりなので捨てない）。
+ */
+function errorBody(error: unknown): Record<string, unknown> {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof PdfUnreadableError) {
+    return {
+      error: message,
+      code: `pdf_${error.reason.replace(/-/g, '_')}`,
+      fileName: error.fileName,
+      detail: error.detail,
+    };
+  }
+  return { error: message };
 }
 
 async function serveStatic(root: string, pathname: string, response: ServerResponse): Promise<boolean> {
@@ -172,7 +214,7 @@ export function createHttpServer(config: Config, api: LogiXivApi): Server {
       const status = errorStatus(error);
       if (status === 500) console.error('[logixiv]', error);
       if (!response.headersSent) {
-        sendJson(response, status, { error: error instanceof Error ? error.message : String(error) });
+        sendJson(response, status, errorBody(error));
       } else {
         response.end();
       }
@@ -253,6 +295,8 @@ async function handle(
       warning: result.warning,
       parserNote: result.document.structure.parserNote,
       sentences: result.document.structure.sentences.length,
+      // 「読めて訳せるが書き出せない」文書を、訳し終わってからではなく今ここで伝える。
+      exportability: result.exportability,
     });
     return;
   }
@@ -263,7 +307,10 @@ async function handle(
     const rest = documentMatch[2] ?? '';
 
     if (rest === '' && method === 'GET') {
-      sendJson(response, 200, await api.getDocument(id));
+      const document = await api.getDocument(id);
+      // 文書そのものには持たせず、応答にだけ足す（ディスクの document.json は
+      // 「アプリを捨てても人が読める」形のままにしておきたい）。
+      sendJson(response, 200, { ...document, exportability: await api.exportability(id) });
       return;
     }
     if (rest === '' && method === 'DELETE') {
@@ -469,7 +516,11 @@ async function handle(
       if (!Array.isArray(body.entries)) throw new BadRequestError('entries が配列ではありません');
       // 空配列での置換は、確認も無く用語集を消す操作になる。意図が読めないので断る。
       if (body.entries.length === 0) throw new BadRequestError('entries が空です');
-      if (body.entries.length > 2000) throw new BadRequestError('entries は 2000 件までです');
+      // 上限は api.ts の 1 箇所で決める。ここにだけ書いていた頃は、
+      // 書き出し HTML の取り込み経路が素通りして 3000 件の用語集が入った。
+      if (body.entries.length > MAX_GLOSSARY_ENTRIES) {
+        throw new BadRequestError(`entries は ${MAX_GLOSSARY_ENTRIES} 件までです`);
+      }
       const entries = body.entries.map((raw, index) => {
         if (typeof raw !== 'object' || raw === null) {
           throw new BadRequestError(`entries[${index}] がオブジェクトではありません`);

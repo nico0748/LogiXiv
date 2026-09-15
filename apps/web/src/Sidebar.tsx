@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import type { Note, PaperDocument, Sentence } from './api.ts';
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
+import type { NonBodySentence, Note, PaperDocument, Sentence, Translation } from './api.ts';
 
 /**
  * 1 文 = 1 カードのサイドバー。
@@ -11,7 +11,22 @@ import type { Note, PaperDocument, Sentence } from './api.ts';
  * 見出しとカードは .sidebar の直接の子にする。ラッパの <div> で包むと
  * その div が position:sticky の包含ブロックになり、見出しがカード 1 枚ぶんで
  * 流れて消える（＝どの節を読んでいるか分からなくなる）。
+ *
+ * **カードは値で比べて memo する。**
+ * この道具の中核は「j/k で 1 文ずつ読む」ことなのに、選択が動くたびに全カードを
+ * 作り直していた（実測: 2750 行の論文で 1 打 141ms、130 行なら 12.6ms）。
+ * さらに MCP の流し込み中は 300ms ごとのリロードでも全件が作り直され、
+ * 10.3 秒の書き込みのあいだ longtask が 10.5 秒ぶん（最大 397ms）出ていた。
+ *
+ * 参照で比べても意味がない。リロードのたびに JSON から作り直すので、
+ * 中身が同じでも `sentence` も `translation` も別物になる。だから
+ * 「画面に出る値」だけを取り出して比べる（下の sameCard）。文書まるごとを
+ * カードに渡していたのも同じ理由でやめた — 1 文の訳が届いただけで
+ * 全カードの props が変わってしまう。
  */
+
+/** メモが無い文に渡す配列。毎回 [] を作ると、その 1 点だけで比較が外れる。 */
+const NO_NOTES: Note[] = [];
 
 interface Props {
   document: PaperDocument;
@@ -48,6 +63,40 @@ export function Sidebar(props: Props): React.JSX.Element {
   );
 
   /**
+   * 本文として扱わなかった行（参考文献・表・柱・著者行など）を、
+   * 直前の本文の後ろに差し込むための索引。
+   *
+   * 落とすこと自体は正しい（参考文献を訳す必要はない）が、落としたことが
+   * どこにも出ないと、左の PDF に見えているものが右に 1 行も無い状態になる。
+   * はじめて使った人はそこで「まだ訳が来ていないのか、自分が見落としたのか」
+   * を判断できず、しかもヘッダーは「26 / 27 文」と完了したように出る。
+   *
+   * 位置はまず hash で探す（区切りを直すと通し番号は振り直されるため）。
+   */
+  const nonBodyAfter = useMemo(() => {
+    const map = new Map<string, NonBodySentence[]>();
+    const byOrder = new Map<number, string>();
+    for (const sentence of paper.structure.sentences) {
+      if (!byOrder.has(sentence.order)) byOrder.set(sentence.order, sentence.id);
+    }
+    const byHash = new Map<string, string>();
+    for (const sentence of paper.structure.sentences) {
+      if (!byHash.has(sentence.hash)) byHash.set(sentence.hash, sentence.id);
+    }
+    for (const item of paper.structure.nonBody ?? []) {
+      const anchor =
+        (item.afterHash ? byHash.get(item.afterHash) : undefined) ??
+        byOrder.get(item.afterOrder) ??
+        // 本文より前にあるもの（表題・著者行）は先頭の文の前に置く。
+        HEAD_ANCHOR;
+      const list = map.get(anchor);
+      if (list) list.push(item);
+      else map.set(anchor, [item]);
+    }
+    return map;
+  }, [paper.structure.nonBody, paper.structure.sentences]);
+
+  /**
    * 区切りを直す操作の相手と、それが何か所に効くか。
    *
    * 相手は絞り込み後の並びではなく本文の並びで引く。検索中に見えている次の
@@ -79,11 +128,42 @@ export function Sidebar(props: Props): React.JSX.Element {
     return { nextById, hashCounts, pairCounts, repeated };
   }, [paper.structure.sentences]);
 
+  /**
+   * 選ばれた文のカードまでスクロールする。**着いたかどうかを見届ける。**
+   *
+   * カードは画面の外では組まれない（styles.css の content-visibility）ので、
+   * 遠くへ飛ぶときの道中の高さは見積もりでしかない。飛んだ先で実寸に置き換わると
+   * その差だけ行き先がずれ、PDF のマーカーから飛んだカードが画面の外に居座る。
+   * 一度で当てようとせず、落ち着いたころに測り直して、ずれていたら合わせ直す。
+   * 補正は一瞬で済ませる（また滑らせると、直したことが分かりにくい）。
+   */
   useEffect(() => {
     if (!scrollTarget) return;
-    window.document
-      .querySelector(`.sidebar [data-card-for="${CSS.escape(scrollTarget.id)}"]`)
-      ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const selector = `.sidebar [data-card-for="${CSS.escape(scrollTarget.id)}"]`;
+    const first = window.document.querySelector(selector);
+    if (!first) return;
+    first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const check = (): void => {
+      timer = null;
+      const card = window.document.querySelector(selector);
+      const sidebar = card?.closest('.sidebar');
+      if (!card || !sidebar) return;
+      const cardBox = card.getBoundingClientRect();
+      const paneBox = sidebar.getBoundingClientRect();
+      const off = (cardBox.top + cardBox.bottom) / 2 - (paneBox.top + paneBox.bottom) / 2;
+      // 中央から半画面以上ずれていたら、まだ着いていない。
+      if (Math.abs(off) > paneBox.height / 2 - cardBox.height) {
+        card.scrollIntoView({ block: 'center' });
+      }
+      if (++attempts < 3) timer = setTimeout(check, 200);
+    };
+    timer = setTimeout(check, 400);
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [scrollTarget]);
 
   if (visibleSentences.length === 0) {
@@ -101,9 +181,18 @@ export function Sidebar(props: Props): React.JSX.Element {
   }
 
   let lastSection: string | null | undefined;
+  // 絞り込み中は本文以外を出さない。検索は本文に当てるものなので、
+  // 引っかからなかった行が混ざると「一致した結果」として読まれる。
+  const filtering = props.filter.trim().length > 0;
 
   return (
     <div className="sidebar">
+      {/* 本文より前にあるもの（表題・著者行）。検索で絞り込んでいるときは出さない。 */}
+      {!filtering &&
+        (nonBodyAfter.get(HEAD_ANCHOR) ?? []).map((item) => (
+          <NonBodyCard key={item.id} item={item} />
+        ))}
+
       {visibleSentences.map((sentence) => {
         const heading = sentence.sectionId !== lastSection ? sectionTitles.get(sentence.sectionId ?? '') : undefined;
         lastSection = sentence.sectionId;
@@ -113,8 +202,9 @@ export function Sidebar(props: Props): React.JSX.Element {
             {heading && <h2 className="sidebar-section">{heading}</h2>}
             <SentenceCard
               sentence={sentence}
-              document={paper}
-              notes={notesByHash.get(sentence.hash) ?? []}
+              translation={paper.annotations.translations[sentence.hash]}
+              skipped={Boolean(paper.annotations.skipped?.[sentence.hash])}
+              notes={notesByHash.get(sentence.hash) ?? NO_NOTES}
               active={selectedId === sentence.id}
               onSelect={props.onSelect}
               onSaveTranslation={props.onSaveTranslation}
@@ -129,6 +219,10 @@ export function Sidebar(props: Props): React.JSX.Element {
               onMergeWithNext={props.onMergeWithNext}
               onSplit={props.onSplit}
             />
+            {!filtering &&
+              (nonBodyAfter.get(sentence.id) ?? []).map((item) => (
+                <NonBodyCard key={item.id} item={item} />
+              ))}
           </Fragment>
         );
       })}
@@ -136,9 +230,42 @@ export function Sidebar(props: Props): React.JSX.Element {
   );
 }
 
+/** 本文より前にあるものを束ねる、実在しない文 id。 */
+const HEAD_ANCHOR = '\u0000head';
+
+const KIND_LABELS: Record<NonBodySentence['kind'], string> = {
+  frontMatter: '表題・著者',
+  runningHead: '柱',
+  pageNumber: 'ページ番号',
+  caption: '図表キャプション',
+  reference: '参考文献',
+  footnote: '脚注',
+  formula: '数式',
+  table: '表',
+  other: '本文以外',
+};
+
+/**
+ * 本文として扱わなかった行。訳の対象ではないので、操作は付けずに「在ること」だけ示す。
+ * ここに本文が紛れ込んでいたら、それは解析の誤りなので、種類を出して気づけるようにする。
+ */
+const NonBodyCard = memo(function NonBodyCard({ item }: { item: NonBodySentence }): React.JSX.Element {
+  return (
+    <article className="card is-nonbody" data-card-for={item.id}>
+      <p className="card-nonbody-kind">{KIND_LABELS[item.kind]}（訳しません）</p>
+      <p className="card-source" lang="en">
+        {item.text}
+      </p>
+    </article>
+  );
+});
+
 interface CardProps {
   sentence: Sentence;
-  document: PaperDocument;
+  /** この文に付いている訳。無ければ undefined。文書ごと渡すと比較が効かない。 */
+  translation: Translation | undefined;
+  /** 「訳さない」に入っているか。 */
+  skipped: boolean;
   notes: Note[];
   active: boolean;
   onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar' | 'keyboard') => void;
@@ -179,10 +306,9 @@ function tail(text: string, length = 20): string {
   return text.length <= length ? text : `…${text.slice(-length)}`;
 }
 
-function SentenceCard(props: CardProps): React.JSX.Element {
-  const { sentence, document: paper, notes, active } = props;
-  const translation = paper.annotations.translations[sentence.hash];
-  const isSkipped = Boolean(paper.annotations.skipped?.[sentence.hash]);
+function SentenceCardView(props: CardProps): React.JSX.Element {
+  const { sentence, translation, notes, active } = props;
+  const isSkipped = props.skipped;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(translation?.text ?? '');
   const [noteDraft, setNoteDraft] = useState('');
@@ -507,3 +633,44 @@ function SentenceCard(props: CardProps): React.JSX.Element {
     </article>
   );
 }
+
+/**
+ * カードを作り直すべきかを、参照ではなく**画面に出る値**で決める。
+ *
+ * リロードのたびに JSON から作り直されるので、同じ内容でも `sentence` や
+ * `translation` は必ず別のオブジェクトになる。既定の浅い比較では 1 件も
+ * 一致せず、memo が空振りする。
+ *
+ * メモは件数と id だけを見る（本文を全部たどると、比較のほうが描き直しより高くつく）。
+ * 本文が変われば id か updatedAt が動くので、これで取りこぼさない。
+ */
+function sameCard(a: CardProps, b: CardProps): boolean {
+  if (a.active !== b.active || a.skipped !== b.skipped || a.repeat !== b.repeat) return false;
+  if (a.mergeOccurrences !== b.mergeOccurrences || a.splitOccurrences !== b.splitOccurrences) return false;
+  if (a.sentence.id !== b.sentence.id) return false;
+  if (a.sentence.hash !== b.sentence.hash) return false;
+  if (a.sentence.text !== b.sentence.text) return false;
+  if (a.sentence.page !== b.sentence.page) return false;
+  if (a.next?.hash !== b.next?.hash) return false;
+  if (a.next?.text !== b.next?.text) return false;
+  if (a.translation?.text !== b.translation?.text) return false;
+  if (a.translation?.revisedByHuman !== b.translation?.revisedByHuman) return false;
+  if (a.notes.length !== b.notes.length) return false;
+  for (let i = 0; i < a.notes.length; i++) {
+    const before = a.notes[i]!;
+    const after = b.notes[i]!;
+    if (before.id !== after.id || before.body !== after.body || before.author !== after.author) return false;
+  }
+  return (
+    a.onSelect === b.onSelect &&
+    a.onSaveTranslation === b.onSaveTranslation &&
+    a.onAddNote === b.onAddNote &&
+    a.onDeleteNote === b.onDeleteNote &&
+    a.onToggleSkip === b.onToggleSkip &&
+    a.onDeleteTranslation === b.onDeleteTranslation &&
+    a.onMergeWithNext === b.onMergeWithNext &&
+    a.onSplit === b.onSplit
+  );
+}
+
+const SentenceCard = memo(SentenceCardView, sameCard);

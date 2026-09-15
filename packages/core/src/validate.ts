@@ -2,6 +2,7 @@ import type {
   Annotations,
   DocumentStructure,
   GlossaryEntry,
+  NonBodySentence,
   Note,
   PageSize,
   PaperDocument,
@@ -222,7 +223,68 @@ export function sanitizeStructure(value: unknown, report: SanitizeReport, remap?
     pageSizes: sanitizePageSizes(source['pageSizes'], report),
     sections,
     sentences,
+    nonBody: sanitizeNonBody(source['nonBody'], report, knownSections),
   };
+}
+
+/**
+ * 本文として扱わなかった行（参考文献・表・柱など）。
+ *
+ * 訳の対象ではないので hash は結合キーとして使われないが、
+ * ここを組み直さないと書き出し → 取り込みの往復で落ち、
+ * 「PDF には見えているのに右に無い」が取り込んだ側でだけ復活する。
+ */
+function sanitizeNonBody(
+  value: unknown,
+  report: SanitizeReport,
+  knownSections: ReadonlySet<string>,
+): NonBodySentence[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const kinds: ReadonlySet<string> = new Set([
+    'frontMatter',
+    'runningHead',
+    'pageNumber',
+    'caption',
+    'reference',
+    'footnote',
+    'formula',
+    'table',
+    'other',
+  ]);
+  const out: NonBodySentence[] = [];
+  const occurrences = new Map<string, number>();
+  for (const raw of value) {
+    if (!isRecord(raw)) {
+      report.droppedStructure++;
+      continue;
+    }
+    const text = str(raw['text'], 20_000);
+    if (text === null || text.trim().length === 0) {
+      report.droppedStructure++;
+      continue;
+    }
+    const rawRects = Array.isArray(raw['rects']) ? raw['rects'] : [];
+    const rects = rawRects.map(sanitizeRect).filter((r): r is Rect => r !== null);
+    const hash = sentenceHash(text);
+    const occurrence = occurrences.get(hash) ?? 0;
+    occurrences.set(hash, occurrence + 1);
+    const sectionId = str(raw['sectionId'], 200);
+    const afterHash = str(raw['afterHash'], 64);
+    const afterOrder = finiteNumber(raw['afterOrder']);
+    out.push({
+      id: occurrence === 0 ? `nb_${hash}` : `nb_${hash}_${occurrence}`,
+      hash,
+      order: out.length,
+      page: Math.max(1, Math.floor(finiteNumber(raw['page']) ?? 1)),
+      text,
+      rects,
+      sectionId: sectionId !== null && knownSections.has(sectionId) ? sectionId : null,
+      kind: (typeof raw['kind'] === 'string' && kinds.has(raw['kind']) ? raw['kind'] : 'other') as NonBodySentence['kind'],
+      afterOrder: afterOrder === null ? -1 : Math.floor(afterOrder),
+      afterHash: afterHash !== null && /^[0-9a-f]{4,64}$/.test(afterHash) ? afterHash : null,
+    });
+  }
+  return out;
 }
 
 function sanitizePageSizes(value: unknown, report: SanitizeReport): PageSize[] {

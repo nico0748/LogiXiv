@@ -394,7 +394,12 @@ export function createMcpServer(baseUrl: string): McpServer {
     {
       title: '訳を書き込む',
       description:
-        '訳をまとめて書き込む。sentenceHash で文を指定する。結果は JSON で返る。' +
+        '訳をまとめて書き込む。1 件は {"sentenceHash": "…", "text": "日本語訳"}。' +
+        // 項目名を description にも書く。用語集は term/translation、メモは
+        // sentence_hash/body と流儀が違うので、手順だけ読んで translation と
+        // 書いてしまう呼び出しが実際に出た（1 往復まるごと無駄になる）。
+        '**訳の項目名は text。`translation` ではない**（`translation` は update_glossary の方）。' +
+        '1 回に渡せるのは 120 件まで（get_translation_batch の limit と同じ）。結果は JSON で返る。' +
         'skipped の code が revised_by_human なら対応不要（人手修正済みなので上書きしない仕様）、' +
         'unknown_hash なら hash が間違っているので取り直すこと。',
       inputSchema: {
@@ -402,10 +407,29 @@ export function createMcpServer(baseUrl: string): McpServer {
         translations: z
           .array(
             z.object({
-              sentenceHash: z.string().describe('get_translation_batch の untranslated が返した hash'),
+              sentenceHash: z
+                .string({
+                  required_error:
+                    '文の指定は sentenceHash という項目名で送ってください（get_translation_batch の window/untranslated が返した hash）。',
+                })
+                .describe('get_translation_batch の untranslated が返した hash'),
               // 空の訳を通すと、その文は「訳し終わった」ことになって二度と出てこない。
               // 生成が途中で切れたときに静かに欠落するので、ここで断る。
-              text: z.string().trim().min(1).describe('日本語訳（空にはできない）'),
+              //
+              // required_error に直し方を書いておく。zod の既定は "Required" だけなので、
+              // `translation` と書いた呼び出し側には「何が足りないか」しか伝わらず、
+              // 正しい項目名（このツール固有の text）はどこにも出てこなかった。
+              text: z
+                .string({
+                  required_error:
+                    '訳の項目名は text です（translation ではありません）。' +
+                    '例: {"sentenceHash": "…", "text": "日本語訳"}。' +
+                    'term/translation は update_glossary、sentence_hash/body は add_note の項目名です。',
+                  invalid_type_error: 'text は文字列で渡してください。',
+                })
+                .trim()
+                .min(1, '訳が空です。訳せない文は skip_sentences に渡してください。')
+                .describe('日本語訳（項目名は text。空にはできない）'),
             }),
           )
           .min(1)
@@ -792,6 +816,9 @@ export function createMcpServer(baseUrl: string): McpServer {
               '   window は [order, hash, 原文, 訳?] の並び。untranslated がそのうち訳すべき order',
               '   （同じ本文は最初の 1 つだけ。残りは duplicateOf に出る）。',
               '3. 訳を set_translations でまとめて書き戻す（hash は window から引く）。',
+              '   1 件の形は {"sentenceHash": "…", "text": "日本語訳"}。**訳の項目名は text**',
+              '   （translation ではない。用語集だけが term/translation、メモは sentence_hash/body）。',
+              '   1 回に渡せるのは 120 件まで。',
               '4. 返ってきた nextUntranslatedFrom を from に入れて 2 に戻る。',
               '   **終わりの判定は remainingUnique が 0 になったとき。** nextUntranslatedFrom は',
               '   末尾まで行くと先頭へ回り込むので、保留した文があれば必ずもう一度回ってくる。',

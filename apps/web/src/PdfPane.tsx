@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
-import type { PaperDocument, Sentence } from './api.ts';
+import type { PaperDocument, Sentence, Translation } from './api.ts';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -95,6 +95,33 @@ export function PdfPane({
     }
     return map;
   }, [paper]);
+
+  /**
+   * ページごとの「中身が変わったか」を 1 本の文字列にまとめた印。
+   *
+   * マーカーは文書全体で数千個ある。選択が動くたびに全部作り直していたので、
+   * j/k の 1 打のうち 32ms（2750 文の論文）がここで消えていた。リロードのたびに
+   * 文も訳も別オブジェクトになるので参照では比べられない。印が同じページは
+   * 描き直さない（下の PageMarkers）。
+   */
+  const pageStamps = useMemo(() => {
+    const translations = paper.annotations.translations;
+    const map = new Map<number, string>();
+    for (const [page, list] of sentencesByPage) {
+      const parts: string[] = [];
+      for (const sentence of list) parts.push(`${sentence.id}${translations[sentence.hash] ? '1' : '0'}`);
+      map.set(page, parts.join('|'));
+    }
+    return map;
+  }, [sentencesByPage, paper.annotations.translations]);
+
+  /** 選択が乗っているページ。ここだけ選択の印を渡し、他のページは作り直さない。 */
+  const activePages = useMemo(() => {
+    if (selectedId === null) return null;
+    const sentence = paper.structure.sentences.find((s) => s.id === selectedId);
+    if (!sentence) return null;
+    return new Set(sentence.rects.map((rect) => rect.page));
+  }, [selectedId, paper.structure.sentences]);
 
   // 幅の変化に追随する。以前はマウント時の幅で固定していたので、
   // ウィンドウを狭めると PDF がペインからはみ出したまま戻らなかった。
@@ -349,43 +376,93 @@ export function PdfPane({
               className="pdf-canvas-slot"
               data-page={page.pageNumber}
             />
-            <div className="pdf-overlay">
-              {(sentencesByPage.get(page.pageNumber) ?? []).flatMap((sentence) => {
-                const dimmed = visibleSentenceIds !== null && !visibleSentenceIds.has(sentence.id);
-                return sentence.rects
-                  .filter((rect) => rect.page === page.pageNumber)
-                  .map((rect, index) => (
-                    <button
-                      type="button"
-                      key={`${sentence.id}-${index}`}
-                      data-marker-for={sentence.id}
-                      // マーカーは文書全体で数千個になる。タブ順から外し、
-                      // キーボード操作はサイドバー側に一本化する。
-                      tabIndex={-1}
-                      aria-hidden="true"
-                      className={[
-                        'pdf-marker',
-                        paper.annotations.translations[sentence.hash] ? 'is-translated' : '',
-                        selectedId === sentence.id ? 'is-active' : '',
-                        dimmed ? 'is-filtered-out' : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' ')}
-                      style={{
-                        left: rect.x * page.scale,
-                        top: rect.y * page.scale,
-                        width: rect.w * page.scale,
-                        height: rect.h * page.scale,
-                      }}
-                      title={sentence.text}
-                      onClick={() => handleSelect(sentence.id)}
-                    />
-                  ));
-              })}
-            </div>
+            <PageMarkers
+              pageNumber={page.pageNumber}
+              scale={page.scale}
+              sentences={sentencesByPage.get(page.pageNumber) ?? NO_SENTENCES}
+              translations={paper.annotations.translations}
+              activeId={activePages?.has(page.pageNumber) ? selectedId : null}
+              visibleSentenceIds={visibleSentenceIds}
+              stamp={pageStamps.get(page.pageNumber) ?? ''}
+              onSelect={handleSelect}
+            />
           </div>
         </div>
       ))}
     </div>
   );
 }
+
+/** 文が 1 つも無いページに渡す配列。毎回 [] を作ると、それだけで比較が外れる。 */
+const NO_SENTENCES: Sentence[] = [];
+
+interface PageMarkersProps {
+  pageNumber: number;
+  scale: number;
+  sentences: Sentence[];
+  translations: Record<string, Translation>;
+  /** このページに乗っている選択。乗っていなければ null。 */
+  activeId: string | null;
+  visibleSentenceIds: ReadonlySet<string> | null;
+  /** このページの「文 id ＋ 訳の有無」をつないだ印。 */
+  stamp: string;
+  onSelect: (sentenceId: string) => void;
+}
+
+function PageMarkersView(props: PageMarkersProps): React.JSX.Element {
+  const { pageNumber, scale, sentences, translations, activeId, visibleSentenceIds } = props;
+  return (
+    <div className="pdf-overlay">
+      {sentences.flatMap((sentence) => {
+        const dimmed = visibleSentenceIds !== null && !visibleSentenceIds.has(sentence.id);
+        return sentence.rects
+          .filter((rect) => rect.page === pageNumber)
+          .map((rect, index) => (
+            <button
+              type="button"
+              key={`${sentence.id}-${index}`}
+              data-marker-for={sentence.id}
+              // マーカーは文書全体で数千個になる。タブ順から外し、
+              // キーボード操作はサイドバー側に一本化する。
+              tabIndex={-1}
+              aria-hidden="true"
+              className={[
+                'pdf-marker',
+                translations[sentence.hash] ? 'is-translated' : '',
+                activeId === sentence.id ? 'is-active' : '',
+                dimmed ? 'is-filtered-out' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              style={{
+                left: rect.x * scale,
+                top: rect.y * scale,
+                width: rect.w * scale,
+                height: rect.h * scale,
+              }}
+              title={sentence.text}
+              onClick={() => props.onSelect(sentence.id)}
+            />
+          ));
+      })}
+    </div>
+  );
+}
+
+/**
+ * 印が同じページは作り直さない。
+ *
+ * `sentences` と `translations` は参照で比べない — リロードのたびに JSON から
+ * 作り直されるので、中身が同じでも必ず別物になる。両方の中身は `stamp` に
+ * 畳んであるので、そちらだけを見る。
+ */
+const PageMarkers = memo(
+  PageMarkersView,
+  (a, b) =>
+    a.pageNumber === b.pageNumber &&
+    a.scale === b.scale &&
+    a.activeId === b.activeId &&
+    a.visibleSentenceIds === b.visibleSentenceIds &&
+    a.stamp === b.stamp &&
+    a.onSelect === b.onSelect,
+);

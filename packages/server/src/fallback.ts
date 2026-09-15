@@ -8,6 +8,7 @@ import {
   type TextChunk,
 } from '@logixiv/core';
 import type { FallbackWorkerInput, FallbackWorkerOutput } from './fallback-worker.ts';
+import { describePdfFailure, type RawPdfFailure } from './pdf-failure.ts';
 
 /**
  * GROBID が無い環境向けのフォールバック解析。
@@ -41,7 +42,12 @@ function workerUrl(): URL {
   return new URL(here.endsWith('.ts') ? './fallback-worker.ts' : './fallback-worker.js', here);
 }
 
-function runWorker(input: FallbackWorkerInput, timeoutMs: number): Promise<FallbackWorkerOutput> {
+function runWorker(
+  input: FallbackWorkerInput,
+  timeoutMs: number,
+  /** pdf.js 由来の失敗を日本語に翻訳するための情報（何のファイルか・中身は何か）。 */
+  context: { fileName: string | null; pdf: Uint8Array },
+): Promise<FallbackWorkerOutput> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(workerUrl(), { workerData: input });
     let settled = false;
@@ -65,10 +71,15 @@ function runWorker(input: FallbackWorkerInput, timeoutMs: number): Promise<Fallb
     }, timeoutMs);
     timer.unref();
 
-    worker.on('message', (message: { ok: true; result: FallbackWorkerOutput } | { ok: false; error: string }) => {
-      if (message.ok) finish(() => resolve(message.result));
-      else finish(() => reject(new FallbackParseError(message.error)));
-    });
+    worker.on(
+      'message',
+      (message: { ok: true; result: FallbackWorkerOutput } | { ok: false; error: RawPdfFailure }) => {
+        if (message.ok) finish(() => resolve(message.result));
+        // pdf.js の英語をそのまま投げない。ここで「暗号化・途中で切れた・壊れている」
+        // に振り分けて、人がやるべきことまで書いた日本語にする。
+        else finish(() => reject(describePdfFailure(message.error, context)));
+      },
+    );
     worker.on('error', (error) => finish(() => reject(error)));
     worker.on('exit', (code) => {
       if (!settled) finish(() => reject(new FallbackParseError(`解析ワーカーが異常終了しました (code ${code})`)));
@@ -93,16 +104,27 @@ function pickTitle(metadataTitle: string | null, chunks: TextChunk[]): string | 
   return guessed === null ? null : sanitizeTitle(guessed);
 }
 
+export interface FallbackParseOptions {
+  /** 取り込もうとしているファイルの名前。失敗を「どのファイルの話か」と一緒に伝えるために要る。 */
+  fileName?: string | null;
+  limits?: FallbackLimits;
+}
+
 export async function parseWithPdfJs(
   pdf: Uint8Array,
-  limits: FallbackLimits = DEFAULT_FALLBACK_LIMITS,
+  options: FallbackParseOptions = {},
 ): Promise<DocumentStructure> {
+  const limits = options.limits ?? DEFAULT_FALLBACK_LIMITS;
   const output = await runWorker(
     { pdf, maxPages: limits.maxPages, maxChunks: limits.maxChunks },
     limits.timeoutMs,
+    { fileName: options.fileName ?? null, pdf },
   );
 
-  const { sentences, sections } = buildSentencesFromChunks(output.chunks, output.pageSizes);
+  // nonBody は「PDF には見えているのに右に出てこない行」（参考文献・表・柱・著者行など）。
+  // 落とすこと自体は正しいが、落としたことが見えないと
+  // 「まだ訳が来ていないのか、自分が見落としたのか」が区別できない。
+  const { sentences, sections, nonBody } = buildSentencesFromChunks(output.chunks, output.pageSizes);
 
   const warnings: string[] = [];
   if (sections.length > 0) warnings.push(`節 ${sections.length} 件を検出`);
@@ -123,5 +145,6 @@ export async function parseWithPdfJs(
     pageSizes: output.pageSizes,
     sections,
     sentences,
+    nonBody,
   };
 }

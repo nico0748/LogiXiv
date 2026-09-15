@@ -1,4 +1,4 @@
-import type { ExportPayload, PaperDocument, Sentence } from './types.ts';
+import type { ExportPayload, NonBodySentence, PaperDocument, Sentence } from './types.ts';
 import { escapeHtml, escapeJsonForScript } from './escape.ts';
 import { progress } from './document.ts';
 import { LOGIXIV_VERSION } from './hash.ts';
@@ -61,7 +61,28 @@ function staticFallback(document: PaperDocument): string {
   }
   const sectionTitles = new Map(document.structure.sections.map((s) => [s.id, s.title]));
 
-  const rows: string[] = [];
+  // 本文として扱わなかった行を、直前の本文の後ろに差し込む。
+  // 位置はまず hash で探す（区切りを直すと通し番号は振り直されるため）。
+  const nonBodyAfter = new Map<string, NonBodySentence[]>();
+  const byHash = new Map<string, string>();
+  const byOrder = new Map<number, string>();
+  for (const sentence of document.structure.sentences) {
+    if (!byHash.has(sentence.hash)) byHash.set(sentence.hash, sentence.id);
+    if (!byOrder.has(sentence.order)) byOrder.set(sentence.order, sentence.id);
+  }
+  const head: NonBodySentence[] = [];
+  for (const item of document.structure.nonBody ?? []) {
+    const anchor = (item.afterHash ? byHash.get(item.afterHash) : undefined) ?? byOrder.get(item.afterOrder);
+    if (anchor === undefined) {
+      head.push(item);
+      continue;
+    }
+    const list = nonBodyAfter.get(anchor);
+    if (list) list.push(item);
+    else nonBodyAfter.set(anchor, [item]);
+  }
+
+  const rows: string[] = head.map(renderNonBody);
   let lastSection: string | null = null;
   for (const sentence of document.structure.sentences) {
     if (sentence.sectionId !== lastSection) {
@@ -70,8 +91,31 @@ function staticFallback(document: PaperDocument): string {
       if (title) rows.push(`<h2>${escapeHtml(title)}</h2>`);
     }
     rows.push(renderSentence(sentence, document, notesByHash.get(sentence.hash) ?? []));
+    for (const item of nonBodyAfter.get(sentence.id) ?? []) rows.push(renderNonBody(item));
   }
   return rows.join('\n');
+}
+
+const NON_BODY_LABELS: Record<NonBodySentence['kind'], string> = {
+  frontMatter: '表題・著者',
+  runningHead: '柱',
+  pageNumber: 'ページ番号',
+  caption: '図表キャプション',
+  reference: '参考文献',
+  footnote: '脚注',
+  formula: '数式',
+  table: '表',
+  other: '本文以外',
+};
+
+/** 本文として扱わなかった行。訳の対象ではないが、在ることは示す。 */
+function renderNonBody(item: NonBodySentence): string {
+  return (
+    '<article class="lx-pair lx-nonbody">' +
+    `<p class="lx-nonbody-kind">${escapeHtml(NON_BODY_LABELS[item.kind])}（訳しません）</p>` +
+    `<p class="lx-source" lang="en">${escapeHtml(item.text)}</p>` +
+    '</article>'
+  );
 }
 
 function renderSentence(sentence: Sentence, document: PaperDocument, notes: string[]): string {
@@ -97,6 +141,31 @@ function renderSentence(sentence: Sentence, document: PaperDocument, notes: stri
   return parts.join('');
 }
 
+/**
+ * 用語集も書き出す。
+ *
+ * これまで書き出し HTML に用語集は 1 文字も出ていなかった（JSON には入っているが
+ * 誰も描かない）。訳語をどう決めたかが受け取った側に伝わらないので、
+ * 相手は同じ語を別の訳で書き直し、2 人で訳すほど揺れる。
+ * 訳文そのものより、訳語の方針の方が引き継ぎに効く。
+ */
+function glossarySection(document: PaperDocument): string {
+  const entries = document.annotations.glossary;
+  if (entries.length === 0) return '';
+  const rows = entries
+    .map(
+      (entry) =>
+        `<tr><td lang="en">${escapeHtml(entry.term)}</td><td>${escapeHtml(entry.translation)}</td>` +
+        `<td>${entry.note ? escapeHtml(entry.note) : ''}</td></tr>`,
+    )
+    .join('');
+  return (
+    `<h2 id="lx-glossary">用語集（${entries.length}）</h2>` +
+    '<table class="lx-glossary"><thead><tr><th>原語</th><th>訳語</th><th>メモ</th></tr></thead>' +
+    `<tbody>${rows}</tbody></table>`
+  );
+}
+
 const STATIC_STYLE = `
   :root { color-scheme: light dark; }
   body { margin: 0; font: 15px/1.7 -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
@@ -110,6 +179,11 @@ const STATIC_STYLE = `
   .lx-target.lx-untranslated, .lx-target.lx-skipped { color: #9ca3af; }
   .lx-note { margin: .35rem 0 0; padding-left: .7rem; border-left: 3px solid #f59e0b; font-size: .88rem; }
   .lx-banner { max-width: 46rem; margin: 1rem auto 0; padding: .6rem .9rem; border: 1px solid rgba(128,128,128,.4); border-radius: 6px; font-size: .85rem; }
+  .lx-glossary { border-collapse: collapse; font-size: .9rem; }
+  .lx-glossary th, .lx-glossary td { text-align: left; padding: .25rem .8rem .25rem 0; border-bottom: 1px solid rgba(128,128,128,.25); vertical-align: top; }
+  .lx-glossary th { color: #6b7280; font-weight: 600; }
+  .lx-nonbody { opacity: .6; }
+  .lx-nonbody-kind { margin: 0 0 .1rem; font-size: .72rem; color: #6b7280; }
 `;
 
 export function buildExportHtml(input: BuildExportInput): string {
@@ -146,6 +220,7 @@ export function buildExportHtml(input: BuildExportInput): string {
 <p class="lx-banner">${progressLine}</p>
 <p class="lx-banner">この HTML は LogiXiv の書き出しです。JavaScript が動く環境では PDF と対訳が並んだビューアが開きます。動かない環境では以下の対訳がそのまま読めます。<br>（未訳）＝まだ訳していない文、（訳さない）＝参考文献や数式など訳す対象から外した文、✓ ＝人が手を入れた訳です。</p>
 ${staticFallback(input.document)}
+${glossarySection(input.document)}
 </div>
 <script type="application/json" id="${EXPORT_DATA_ELEMENT_ID}">${json}</script>
 <script>${sealInline(input.viewerScript, 'script')}</script>

@@ -45,6 +45,66 @@ export interface Sentence {
   sectionId: string | null;
 }
 
+/**
+ * 本文として扱わなかった行の種類。
+ *
+ * 「なぜ右（対訳）に出ていないのか」を画面でその場に言うために要る。
+ * 落とすこと自体は正しくても（参考文献を訳す必要はない）、落としたことが
+ * 誰にも見えないと「まだ訳が来ていないのか、自分が見落としたのか」を
+ * 区別できない。この道具は原文と訳が 1 対 1 で並ぶことが成立条件なので、
+ * PDF に見えているものが右に無いなら、無い理由がその場に要る。
+ */
+export type NonBodyKind =
+  /** 表題・著者・所属など、本文が始まる前の行。 */
+  | 'frontMatter'
+  /** ページの上下で繰り返される柱（ランニングヘッド）。 */
+  | 'runningHead'
+  /** ノンブル（ページ番号）。 */
+  | 'pageNumber'
+  /** 図表キャプションとその続きの行。 */
+  | 'caption'
+  /** 参考文献の 1 エントリ、および参考文献節より後ろ。 */
+  | 'reference'
+  /** 脚注。 */
+  | 'footnote'
+  /** 別行立ての数式（式番号を含む）。 */
+  | 'formula'
+  /** 表のセル。 */
+  | 'table'
+  /** 上のどれとも決められなかったもの。 */
+  | 'other';
+
+/**
+ * 本文ではないと判断した、紙面の 1 かたまり。
+ *
+ * `DocumentStructure.sentences` には**入れない**。入れると訳す対象になり、
+ * 進捗の分母も狂う（「26 / 27 文」が急に「26 / 60 文」になる）。
+ * かといって捨てもしない。画面は `afterOrder` を見て本文の文の間に差し込み、
+ * 「（訳さない：参考文献）」のように理由つきで並べられる。
+ *
+ * 1 件 = **紙面の 1 かたまり**（折り返したキャプション 1 つ、参考文献 1 エントリ）で、
+ * 文には割らない。参考文献 1 件が 3 枚のカードに割れるより読みやすく、
+ * 「なぜ右に無いのか」という問いにそのまま答える単位になるため。
+ */
+export interface NonBodySentence extends Sentence {
+  /** なぜ本文として扱わなかったか。 */
+  kind: NonBodyKind;
+  /**
+   * 読み順で直前に来る本文の文の `order`。本文より前にあるものは -1。
+   * 画面はこれを見て、本文の文の間の正しい位置に差し込める。
+   */
+  afterOrder: number;
+  /**
+   * 同じ「直前の本文の文」を `hash` で指したもの。本文より前にあるものは null。
+   *
+   * `afterOrder` は解析時点の通し番号なので、人が文の区切りを直すと
+   * （`fix_sentence_boundary` の結合・分割で通し番号が振り直される）ずれる。
+   * hash なら、その編集に巻き込まれた文以外は追随する。
+   * 画面はまず hash で探し、見つからないときだけ `afterOrder` に落ちればよい。
+   */
+  afterHash: string | null;
+}
+
 export type ParserKind = 'grobid' | 'fallback';
 
 export interface DocumentStructure {
@@ -59,6 +119,13 @@ export interface DocumentStructure {
   pageSizes: PageSize[];
   sections: Section[];
   sentences: Sentence[];
+  /**
+   * 本文として扱わなかった行。古い保存データと GROBID 経路には無いので省略可。
+   *
+   * ここに入るものは訳の対象ではない（進捗の分母にも入らない）。
+   * 画面に「PDF には見えているのに右に無い」を作らないためだけに持つ。
+   */
+  nonBody?: NonBodySentence[];
 }
 
 export type TranslationSource = 'claude' | 'human' | 'import';

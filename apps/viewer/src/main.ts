@@ -1,5 +1,5 @@
 import './style.css';
-import type { ExportPayload, Note, Section, Sentence } from './types.ts';
+import type { ExportPayload, NonBodySentence, Note, Section, Sentence } from './types.ts';
 import {
   base64ToBytes,
   isWorkerAvailable,
@@ -77,16 +77,36 @@ function countLabel(
   paper: ExportPayload['document'],
   sentences: readonly { hash: string }[],
 ): string {
-  const unique = new Set(sentences.map((sentence) => sentence.hash)).size;
+  const hashes = new Set(sentences.map((sentence) => sentence.hash));
   const translations = paper.annotations.translations;
   const skipped = paper.annotations.skipped ?? {};
-  let done = 0;
-  for (const hash of new Set(sentences.map((sentence) => sentence.hash))) {
-    if (translations[hash] || skipped[hash]) done++;
+  let translated = 0;
+  let skippedCount = 0;
+  for (const hash of hashes) {
+    // 訳と「訳さない」を足して 1 つの数にすると、27 文中 26 文しか訳していない論文が
+    // 「27 / 27 文」と名乗る。訳し残しが無いという意味に読まれてしまう。
+    if (translations[hash]) translated++;
+    else if (skipped[hash]) skippedCount++;
   }
-  const repeats = sentences.length > unique ? `（画面には延べ ${sentences.length} 行）` : '';
-  return `${done} / ${unique} 文${repeats}`;
+  const repeats = sentences.length > hashes.size ? `（画面には延べ ${sentences.length} 行）` : '';
+  const notTranslated = skippedCount > 0 ? `（訳さない ${skippedCount}）` : '';
+  return `${translated} / ${hashes.size} 文${notTranslated}${repeats}`;
 }
+
+/** 本文より前にあるものを束ねる、実在しない文 id。 */
+const HEAD_ANCHOR = '\u0000head';
+
+const NON_BODY_LABELS: Record<NonBodySentence['kind'], string> = {
+  frontMatter: '表題・著者',
+  runningHead: '柱',
+  pageNumber: 'ページ番号',
+  caption: '図表キャプション',
+  reference: '参考文献',
+  footnote: '脚注',
+  formula: '数式',
+  table: '表',
+  other: '本文以外',
+};
 
 function boot(): void {
   const payload = readPayload();
@@ -139,8 +159,34 @@ function boot(): void {
   let currentGroup: { heading: HTMLElement | null; cards: HTMLElement[] } = { heading: null, cards: [] };
   groups.push(currentGroup);
 
+  /**
+   * 本文として扱わなかった行を、直前の本文の後ろに差し込むための索引。
+   * 位置はまず hash で探す（区切りを直すと通し番号は振り直されるため）。
+   */
+  const nonBodyAfter = new Map<string, NonBodySentence[]>();
+  {
+    const byHash = new Map<string, string>();
+    const byOrder = new Map<number, string>();
+    for (const sentence of sentences) {
+      if (!byHash.has(sentence.hash)) byHash.set(sentence.hash, sentence.id);
+      if (!byOrder.has(sentence.order)) byOrder.set(sentence.order, sentence.id);
+    }
+    for (const item of paper.structure.nonBody ?? []) {
+      const anchor =
+        (item.afterHash ? byHash.get(item.afterHash) : undefined) ?? byOrder.get(item.afterOrder) ?? HEAD_ANCHOR;
+      const list = nonBodyAfter.get(anchor);
+      if (list) list.push(item);
+      else nonBodyAfter.set(anchor, [item]);
+    }
+  }
+
   let lastSection: string | null | undefined;
   sidebar.append(emptyMessage);
+  for (const item of nonBodyAfter.get(HEAD_ANCHOR) ?? []) {
+    const card = buildNonBodyCard(item);
+    currentGroup.cards.push(card);
+    sidebar.append(card);
+  }
   for (const sentence of sentences) {
     if (sentence.sectionId !== lastSection) {
       lastSection = sentence.sectionId;
@@ -155,6 +201,19 @@ function boot(): void {
     const card = buildCard(sentence);
     currentGroup.cards.push(card);
     sidebar.append(card);
+    for (const item of nonBodyAfter.get(sentence.id) ?? []) {
+      const extra = buildNonBodyCard(item);
+      currentGroup.cards.push(extra);
+      sidebar.append(extra);
+    }
+  }
+
+  function buildNonBodyCard(item: NonBodySentence): HTMLElement {
+    const card = el('article', 'lxv-card lxv-nonbody');
+    card.dataset['id'] = item.id;
+    card.append(el('p', 'lxv-nonbody-kind', `${NON_BODY_LABELS[item.kind]}（訳しません）`));
+    card.append(el('p', 'lxv-source', item.text));
+    return card;
   }
 
   function buildCard(sentence: Sentence): HTMLElement {

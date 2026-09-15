@@ -13,6 +13,14 @@ import { parseTei, type DocumentStructure } from '@logixiv/core';
 
 export class GrobidUnavailableError extends Error {}
 
+/**
+ * GROBID は動いているが、この PDF を処理できなかった。
+ *
+ * 「GROBID が落ちている（＝別の PDF なら通る）」と分けてある。前者は待つ／起動する話、
+ * 後者はその PDF をどうにかする話で、人がやることが違う。
+ */
+export class GrobidParseError extends Error {}
+
 export interface GrobidOptions {
   baseUrl: string;
   timeoutMs?: number;
@@ -82,8 +90,16 @@ export async function processFulltext(
     throw new GrobidUnavailableError('GROBID が処理中で受け付けられません（同時実行数の上限）。少し待って再試行してください。');
   }
   if (!response.ok) {
-    const detail = (await response.text()).slice(0, 500);
-    throw new Error(`GROBID がエラーを返しました (${response.status}): ${detail}`);
+    // GROBID の本文は英語（`[NO_BLOCKS] PDF parsing …` など）。そのまま前に出すと
+    // pdf.js のときと同じで「何をしようとして失敗したのか」がどこにも書かれない文になる。
+    // 人が読む文は日本語で組み立て、GROBID の返事は原因を追うための添え物にする。
+    const detail = (await response.text()).slice(0, 500).trim();
+    throw new GrobidParseError(
+      `「${fileName}」を GROBID で解析しようとしましたが、GROBID が処理できませんでした（HTTP ${response.status}）。` +
+        'PDF が壊れている、暗号化されている、または本文がすべて画像（スキャン）の可能性があります。' +
+        '簡易解析（pdf.js）で取り込み直すと、この PDF の何が読めないかがより具体的に分かります。' +
+        (detail.length > 0 ? `\nGROBID の返答: ${detail}` : ''),
+    );
   }
 
   const tei = await response.text();

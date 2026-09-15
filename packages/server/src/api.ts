@@ -38,6 +38,7 @@ import { EventBus } from './bus.ts';
 import { GrobidUnavailableError, isGrobidAlive, processFulltext } from './grobid.ts';
 import { parseWithPdfJs } from './fallback.ts';
 import { exportDocumentHtml } from './exporter.ts';
+import { missingStoredPdf, PdfUnreadableError } from './pdf-failure.ts';
 
 /**
  * HTTP からも MCP からも同じ入口を通すためのアプリケーション層。
@@ -54,10 +55,80 @@ export interface IngestResult {
   document: PaperDocument;
   usedFallback: boolean;
   warning: string | null;
+  /** 取り込んだ時点で分かる「この文書は書き出せるか」。詳細は Exportability を見ること。 */
+  exportability: Exportability;
 }
 
-/** 書き出しは PDF 全体を base64 にしてメモリに載せるので、上限を切っておく。 */
-const MAX_EXPORT_PDF_BYTES = 60 * 1024 * 1024;
+/**
+ * 一覧 1 行ぶん。
+ *
+ * `unreadable` は「ディスクには在るが document.json を読めない」行。
+ * 見えも消せもしない文書を作らないために行として出しているので、
+ * **画面はこの行から削除できなければならない**（DELETE は読まずに消す）。
+ */
+export interface DocumentRow {
+  id: string;
+  title: string;
+  updatedAt: string;
+  parser: string;
+  total: number;
+  translated: number;
+  remaining: number;
+  unreadable: boolean;
+  /** 読めなかった理由（英語の例外メッセージを含む）。読めた行では null。 */
+  unreadableReason: string | null;
+  /** この文書の置き場。壊れた文書を人が自分で覗きにいけるように返す。 */
+  path: string;
+}
+
+/**
+ * 「この文書は 1 枚の HTML に書き出せるか」。
+ *
+ * 訳し終わってから 413 で初めて知る、という順番をなくすために、
+ * 取り込みの応答と GET /api/documents/:id の両方に載せる。
+ */
+export interface Exportability {
+  /** source.pdf の大きさ（バイト）。PDF が見つからなければ null。 */
+  pdfBytes: number | null;
+  limitBytes: number;
+  exportable: boolean;
+  /** 書き出せないときだけ入る、人に見せられる日本語の理由。 */
+  reason: string | null;
+}
+
+/**
+ * 扱える PDF の上限。**取り込みと書き出しで同じ値を使う。**
+ *
+ * 以前は取り込み 100MB / 書き出し 60MB で、その間の PDF は
+ * 「読めて訳せるが、訳を外に出せない」文書になっていた。しかも書き出しは
+ * 訳し終わってから押すボタンなので、**作業をぜんぶ終えた後にしか気づけない**。
+ * 上限が 2 つあること自体が事故なので、1 つにまとめて import と export の
+ * 両方からこの定数を見る（片方だけ動かせないようにする）。
+ *
+ * 100MB という値の根拠（このファイルを直す人へ）:
+ *  - 書き出しは PDF 全体を base64 にして 1 枚の HTML に載せる。100MB の PDF は
+ *    135MB の HTML になり、組み立て中のサーバーの RSS は実測で 0.4GB → 0.7GB、
+ *    所要 5 秒（60MB なら 0.5GB / 2 秒）。ここまでは手元の PC で問題なく通る。
+ *  - これ以上に上げると Node の文字列上限（約 512MB）が先に見えてくるうえ、
+ *    書き出した HTML を**ブラウザで開く側**が持たない。書き出しは配って読ませる
+ *    ためのものなので、作れても開けないファイルを作れるようにする意味がない。
+ *  - 論文 PDF は図をそのまま貼ったものでも通常 50MB 未満。100MB を超えるのは
+ *    ほぼ「論文ではない何か」なので、入口で断る側に倒す。
+ */
+export const MAX_PDF_BYTES = 100 * 1024 * 1024;
+
+/**
+ * 用語集の上限。取り込み経路にも同じ値を効かせるために、ここに置いて共有する。
+ *
+ * 以前は HTTP の /glossary にしか置いていなかったので、書き出し HTML の取り込みは
+ * 素通りし、3000 件の用語集がそのまま入った。上限を置いた理由は 2 つあって、
+ * どちらも取り込み経路でも同じように効く:
+ *  - 用語集は MCP の窓に「変わるたび」丸ごと載る。件数が増えるほど毎回の往復が太り、
+ *    訳すための文脈をこれが押し出す。
+ *  - 用語集は文のハッシュで弾けない唯一の注釈なので、混ざったものを後から
+ *    1 件ずつ選り分けるのは人手でしかできない。数が多いほど取り返しがつかない。
+ */
+export const MAX_GLOSSARY_ENTRIES = 2000;
 
 /**
  * 解析の同時実行数。
@@ -138,19 +209,9 @@ export class LogiXivApi {
     }
   }
 
-  async listDocuments(): Promise<
-    {
-      id: string;
-      title: string;
-      updatedAt: string;
-      parser: string;
-      total: number;
-      translated: number;
-      remaining: number;
-    }[]
-  > {
+  async listDocuments(): Promise<DocumentRow[]> {
     const documents = await this.store.list();
-    const rows = [];
+    const rows: DocumentRow[] = [];
     for (const document of documents) {
       // 1 件が壊れていても一覧全体を落とさない。
       try {
@@ -163,8 +224,11 @@ export class LogiXivApi {
           total: stats.uniqueSentences,
           translated: stats.translated,
           remaining: stats.remaining,
+          unreadable: false,
+          unreadableReason: null,
+          path: this.store.pathOf(document.id),
         });
-      } catch {
+      } catch (error) {
         rows.push({
           id: document.id,
           title: `${document.id}（読み込めませんでした）`,
@@ -173,10 +237,15 @@ export class LogiXivApi {
           total: 0,
           translated: 0,
           remaining: 0,
+          unreadable: true,
+          unreadableReason: error instanceof Error ? error.message : String(error),
+          path: this.store.pathOf(document.id),
         });
       }
     }
     // 読み出しそのものに失敗したものも行として出す（消せなくならないように）。
+    // 理由と置き場を機械可読な形でも返す。題名に埋めた文字列だけだと、
+    // 画面側は「この行は壊れている」を日本語の部分一致で判定するしかない。
     for (const [id, reason] of this.store.unreadable) {
       rows.push({
         id,
@@ -186,6 +255,9 @@ export class LogiXivApi {
         total: 0,
         translated: 0,
         remaining: 0,
+        unreadable: true,
+        unreadableReason: reason,
+        path: this.store.pathOf(id),
       });
     }
     return rows;
@@ -217,12 +289,46 @@ export class LogiXivApi {
 
   async getPdf(id: string): Promise<Buffer> {
     await this.require(id);
-    return this.store.readPdf(id);
+    return this.readPdf(id);
+  }
+
+  /**
+   * 保存してある PDF 本体を読む。
+   *
+   * `ENOENT: … /home/…/source.pdf` を素のまま返していた頃は、読んだ人に
+   * 「何が起きたのか・自分に何ができるのか」が一切伝わらなかった。
+   * 文書の記録だけ残って PDF が消えている、という状態は実際に起きる
+   * （書き込み途中の電源断、置き場を手で整理した後など）ので、専用の言い方を持たせる。
+   */
+  private async readPdf(id: string): Promise<Buffer> {
+    try {
+      return await this.store.readPdf(id);
+    } catch (error) {
+      throw this.translatePdfIoError(id, error);
+    }
+  }
+
+  private async pdfSize(id: string): Promise<number> {
+    try {
+      return await this.store.pdfSize(id);
+    } catch (error) {
+      throw this.translatePdfIoError(id, error);
+    }
+  }
+
+  private translatePdfIoError(id: string, error: unknown): unknown {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code !== 'ENOENT') return error;
+    return missingStoredPdf(
+      id,
+      this.store.pdfPathOf(id),
+      error instanceof Error ? error.message : String(error),
+    );
   }
 
   /** PDF を解析して新規文書にする。GROBID が落ちていたら黙って劣化させず、警告を返す。 */
   async ingestPdf(pdf: Uint8Array, fileName: string, preference: ParserPreference = 'auto'): Promise<IngestResult> {
-    this.assertLooksLikePdf(pdf);
+    this.assertLooksLikePdf(pdf, fileName);
 
     const { structure, usedFallback, warning } = await this.parseStructure(pdf, fileName, preference);
     const document = createDocument({ structure, sourceFileName: fileName });
@@ -238,21 +344,48 @@ export class LogiXivApi {
     }
     this.bus.publish({ type: 'document.created', documentId: document.id });
 
-    return { document, usedFallback, warning };
+    // 「訳せるが書き出せない」文書を、訳し終わってからではなく**この時点で**伝える。
+    return { document, usedFallback, warning, exportability: this.judgeExportability(pdf.byteLength) };
   }
 
   /** アップロードでも取り込みでも同じ入口検査を通す。 */
-  private assertLooksLikePdf(pdf: Uint8Array): void {
-    if (pdf.byteLength === 0) throw new BadRequestError('PDF が空です');
+  private assertLooksLikePdf(pdf: Uint8Array, fileName: string | null = null): void {
+    const name = fileName === null || fileName.length === 0 ? 'このファイル' : `「${fileName}」`;
+    if (pdf.byteLength === 0) {
+      throw new PdfUnreadableError(
+        'not-pdf',
+        `${name}は中身が空のファイルです（0 バイト）。` +
+          'ダウンロードが始まる前のファイルを掴んでいる可能性があります。落とし直してから取り込んでください。',
+        { fileName },
+      );
+    }
     if (!(pdf[0] === 0x25 && pdf[1] === 0x50 && pdf[2] === 0x44 && pdf[3] === 0x46)) {
-      throw new BadRequestError('PDF ではないファイルのようです（先頭が %PDF ではありません）');
+      throw new PdfUnreadableError(
+        'not-pdf',
+        `${name}は PDF ではないようです（ファイルの先頭が %PDF で始まっていません）。` +
+          '論文のページを保存した HTML や、中身がエラーページになっているファイルでよく起きます。' +
+          'PDF そのものを取り込んでください。',
+        { fileName },
+      );
+    }
+    if (pdf.byteLength > MAX_PDF_BYTES) {
+      // 取り込みの上限＝書き出しの上限。ここを通したものは必ず書き出せる。
+      throw new TooLargeError(
+        `${name}は大きすぎて扱えません（${Math.round(pdf.byteLength / 1024 / 1024)}MB / ` +
+          `上限 ${MAX_PDF_BYTES / 1024 / 1024}MB）。この上限は書き出しの上限と同じ値で、` +
+          '取り込めた PDF は必ず 1 枚の HTML に書き出せるようにしてあります。',
+      );
     }
   }
 
   private async parseStructure(pdf: Uint8Array, fileName: string, preference: ParserPreference) {
     return this.parseSlots.run(async () => {
       if (preference === 'fallback') {
-        return { structure: await parseWithPdfJs(pdf), usedFallback: true, warning: null as string | null };
+        return {
+          structure: await parseWithPdfJs(pdf, { fileName }),
+          usedFallback: true,
+          warning: null as string | null,
+        };
       }
 
       try {
@@ -264,8 +397,11 @@ export class LogiXivApi {
       } catch (error) {
         if (preference === 'grobid') throw error;
         const reason = error instanceof Error ? error.message : String(error);
+        // 簡易解析も失敗したときは、そちらの失敗（＝この PDF そのものの話）を前に出す。
+        // 「GROBID が使えなかった」を被せると、暗号化された PDF を入れた人に
+        // GROBID の設定を疑わせることになる。
         return {
-          structure: await parseWithPdfJs(pdf),
+          structure: await parseWithPdfJs(pdf, { fileName }),
           usedFallback: true,
           warning: `GROBID を使えなかったため簡易解析に切り替えました: ${reason}`,
         };
@@ -291,7 +427,7 @@ export class LogiXivApi {
     warning: string | null;
   }> {
     const existing = await this.require(id);
-    const pdf = await this.store.readPdf(id);
+    const pdf = await this.readPdf(id);
     const { structure, warning } = await this.parseStructure(pdf, existing.sourceFileName, preference);
 
     let rebound = 0;
@@ -487,6 +623,13 @@ export class LogiXivApi {
           if (glossary[at]!.translation !== entry.translation) updated++;
           glossary[at] = entry;
         }
+      }
+      // 追記も積み上げれば上限を越えられる。1 回ぶんの件数ではなく、結果で見る。
+      if (glossary.length > MAX_GLOSSARY_ENTRIES) {
+        throw new BadRequestError(
+          `用語集が ${glossary.length} 語になり、上限の ${MAX_GLOSSARY_ENTRIES} 語を超えます` +
+            `（今は ${current.annotations.glossary.length} 語）。使っていない語を消してから足してください。`,
+        );
       }
       total = glossary.length;
       return { ...current, updatedAt: new Date().toISOString(), annotations: { ...current.annotations, glossary } };
@@ -745,15 +888,54 @@ export class LogiXivApi {
     }));
   }
 
+  /**
+   * この文書を 1 枚の HTML に書き出せるか。書き出す前に、取り込んだ直後に答える。
+   *
+   * 判断材料は PDF の大きさだけなので、stat 1 回で済む。
+   * 画面はこれを見て、「書き出せません」を**訳す前に**出せる。
+   */
+  private judgeExportability(pdfBytes: number | null): Exportability {
+    if (pdfBytes === null) {
+      return {
+        pdfBytes: null,
+        limitBytes: MAX_PDF_BYTES,
+        exportable: false,
+        reason:
+          'PDF 本体（source.pdf）が見つからないため、書き出せません。元の PDF を取り込み直してください。',
+      };
+    }
+    if (pdfBytes > MAX_PDF_BYTES) {
+      return {
+        pdfBytes,
+        limitBytes: MAX_PDF_BYTES,
+        exportable: false,
+        reason:
+          `PDF が大きすぎて 1 ファイルに書き出せません（${Math.round(pdfBytes / 1024 / 1024)}MB / ` +
+          `上限 ${MAX_PDF_BYTES / 1024 / 1024}MB）。書き出し HTML は PDF を base64 で丸ごと抱えるので、` +
+          'この大きさを超えると、作れてもブラウザで開けないファイルになります。',
+      };
+    }
+    return { pdfBytes, limitBytes: MAX_PDF_BYTES, exportable: true, reason: null };
+  }
+
+  /** 画面と MCP から「書き出せるか」を先に問い合わせるための入口。 */
+  async exportability(id: string): Promise<Exportability> {
+    await this.require(id);
+    try {
+      return this.judgeExportability(await this.store.pdfSize(id));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') return this.judgeExportability(null);
+      throw error;
+    }
+  }
+
   async exportHtml(id: string): Promise<{ html: string; fileName: string }> {
     const document = await this.require(id);
-    const size = await this.store.pdfSize(id);
-    if (size > MAX_EXPORT_PDF_BYTES) {
-      throw new TooLargeError(
-        `PDF が大きすぎて 1 ファイルに書き出せません（${Math.round(size / 1024 / 1024)}MB / 上限 ${MAX_EXPORT_PDF_BYTES / 1024 / 1024}MB）`,
-      );
-    }
-    const pdf = await this.store.readPdf(id);
+    // 取り込みの上限と同じ値で見る。取り込めたものは必ず書き出せる、を保つ
+    // （2 つの上限がずれていた頃は、訳し終えてからでないと気づけなかった）。
+    const verdict = this.judgeExportability(await this.pdfSize(id));
+    if (!verdict.exportable) throw new TooLargeError(verdict.reason ?? '書き出せません');
+    const pdf = await this.readPdf(id);
     const html = await exportDocumentHtml(this.config, document, pdf);
     const safeTitle = document.title.replace(/[^\p{L}\p{N} ._-]/gu, '').trim() || document.id;
     return { html, fileName: `${safeTitle}.logixiv.html` };
@@ -778,6 +960,8 @@ export class LogiXivApi {
     warning: string | null;
     /** 取り込み元と取り込み先がどれだけ同じ文を持っていたか（新規取り込みでは null）。 */
     overlap: number | null;
+    /** 新規文書として取り込んだときだけ。既存へのマージでは PDF が変わらないので null。 */
+    exportability?: Exportability;
   }> {
     const parsed = parseExportHtml(html);
     const warnings: string[] = [];
@@ -802,6 +986,19 @@ export class LogiXivApi {
       throw new BadRequestError(
         `この書き出しは新しい版の LogiXiv で作られています（構造 v${declared} / ` +
           `このプログラムは v${STRUCTURE_VERSION} まで）。LogiXiv を更新してください。`,
+      );
+    }
+
+    // 用語集の上限は取り込み経路にも効かせる。
+    // HTTP の /glossary だけに置いていた頃は、書き出し HTML を落とすだけで
+    // 3000 件の用語集が入った（＝上限がある意味が無かった）。
+    // ここで断るのは、混ざった用語集を後から選り分ける手段が人手しか無いため。
+    if (parsed.annotations.glossary.length > MAX_GLOSSARY_ENTRIES) {
+      throw new BadRequestError(
+        `この書き出しの用語集は ${parsed.annotations.glossary.length} 語で、上限の ` +
+          `${MAX_GLOSSARY_ENTRIES} 語を超えています。用語集は文のハッシュで弾けないので、` +
+          '取り込むと以後の訳語の方針がそのまま置き換わります。' +
+          '取り込み元で用語集を整理してから書き出し直してください。',
       );
     }
 
@@ -837,6 +1034,15 @@ export class LogiXivApi {
 
         const hashes = new Set(base.structure.sentences.map((s) => s.hash));
         const merged = mergeAnnotations(base.annotations, parsed.annotations, hashes);
+        // 足した結果でも上限を見る。1 回ぶんが上限内でも、重ねれば超えられてしまう。
+        // 投げれば store.update は書き込みに進まないので、区切りの取り込みごと無かったことになる。
+        if (merged.annotations.glossary.length > MAX_GLOSSARY_ENTRIES) {
+          throw new BadRequestError(
+            `取り込むと用語集が ${merged.annotations.glossary.length} 語になり、上限の ` +
+              `${MAX_GLOSSARY_ENTRIES} 語を超えます（今は ${base.annotations.glossary.length} 語）。` +
+              'この文書の用語集から使っていない語を消すか、取り込み元で整理してから書き出し直してください。',
+          );
+        }
         report = merged.report;
         return { ...base, updatedAt: new Date().toISOString(), annotations: merged.annotations };
       });
@@ -886,7 +1092,7 @@ export class LogiXivApi {
     // 取り込み経路もアップロードと同じ入口検査を通す。ここを素通しにすると、
     // 任意のバイト列が source.pdf として保存され、/pdf が application/pdf として配る。
     const pdf = Buffer.from(parsed.pdfBase64, 'base64');
-    this.assertLooksLikePdf(pdf);
+    this.assertLooksLikePdf(pdf, `${parsed.documentTitle}（取り込んだ書き出しの PDF）`);
     // 新しい版は上で断り済み（判定は payload が名乗っていた版で行う）。
     try {
       await this.store.writePdf(document.id, pdf);
@@ -903,11 +1109,25 @@ export class LogiXivApi {
       note: '新しい文書として取り込みました',
       warning: warnings.length > 0 ? warnings.join(' / ') : null,
       overlap: null,
+      // アップロードと同じく、書き出せるかどうかを取り込んだ時点で返す。
+      exportability: this.judgeExportability(pdf.byteLength),
     };
   }
 
+  /**
+   * 文書を消す。**中身を読まずに消す。**
+   *
+   * 以前はここで require() → JSON.parse まで通していたので、document.json が
+   * 途中で切れている文書は削除そのものが 500 になった。一覧は「見えも消せもしない
+   * 文書を作らないため」にわざわざ壊れた行を出しているのに、その行から消せない
+   * ——ファイルを手で消す以外に逃げ道が無い、という状態だった。
+   *
+   * 削除に文書の中身は要らない。置き場が在るかどうかだけ見て、あれば消す。
+   */
   async deleteDocument(id: string): Promise<void> {
-    await this.require(id);
+    if (!(await this.store.dirExists(id))) {
+      throw new NotFoundError(`文書が見つかりません: ${id}`);
+    }
     await this.store.remove(id);
     this.bus.publish({ type: 'document.deleted', documentId: id });
   }
