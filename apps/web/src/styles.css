@@ -569,3 +569,112 @@ textarea {
     border-top: 1px solid var(--line);
   }
 }
+
+/* --- Claude に翻訳してもらう案内 ---------------------------------------- */
+
+/* 取り込み直後の画面で、次にすることが分かる唯一の入口。
+   ほかのボタンと同じ見た目にすると、また見つからない。 */
+.toolbar button.is-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.toolbar button.is-primary.is-calling {
+  background: var(--accent);
+  color: #fff;
+}
+
+.translate-panel {
+  margin: 0.5rem 1rem 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  font-size: 0.86rem;
+}
+
+.translate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.translate-note {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+}
+
+.translate-live {
+  color: var(--accent);
+}
+
+.translate-steps {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.translate-steps li > span {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.translate-code {
+  margin: 0 0 0.35rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.08);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  /* 設定は選んで手でコピーすることもある。 */
+  user-select: text;
+}
+
+.translate-warn {
+  margin: 0.3rem 0 0;
+  color: #b45309;
+}
+
+.translate-copied {
+  margin: 0.5rem 0 0;
+  color: var(--accent);
+}
+
+/* 操作の存在を 1 行だけ知らせる。見つからない機能は無いのと同じ。 */
+.parser-keys {
+  opacity: 0.75;
+}
+
+/* 題名は押すと直せる。見た目は文字のままにして、道具箱を増やさない。 */
+.toolbar button.toolbar-title {
+  border: 0;
+  background: none;
+  padding: 0.1rem 0.2rem;
+  font-size: inherit;
+  font-weight: 600;
+  color: inherit;
+  text-align: left;
+  cursor: text;
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar button.toolbar-title:hover {
+  background: rgba(127, 127, 127, 0.12);
+  border-radius: 4px;
+}
+
+.toolbar-title-input {
+  flex: 0 1 22rem;
+  min-width: 8rem;
+  font-weight: 600;
+}

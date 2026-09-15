@@ -5,6 +5,7 @@ import {
   applyStructure,
   createDocument,
   deriveEdit,
+  documentTitle,
   editSentenceBoundary,
   mergeSentences,
   migrateDocument,
@@ -503,4 +504,20 @@ test('訳と「訳さない」が両方付いた古いデータでも、合計�
   };
   const stats = progress(legacy);
   assert.equal(stats.translated + stats.skipped + stats.remaining, stats.uniqueSentences);
+});
+
+test('題名はファイル名ではなく本文から取る', () => {
+  const withTitle = structureOf(['Body sentence here.']);
+  withTitle.title = 'A Real Paper Title';
+  assert.equal(documentTitle(withTitle, '2401.01234v2.pdf'), 'A Real Paper Title');
+
+  // 簡易解析では title が取れないことがある。1 文目が表題らしければそれを使う。
+  const fallback = structureOf(['Block Sparse Attention for Long Documents', 'Body sentence here.']);
+  fallback.title = null;
+  assert.equal(documentTitle(fallback, '2401.01234v2.pdf'), 'Block Sparse Attention for Long Documents');
+
+  // 本文にしか見えないものは題名にしない（句点で終わる・短すぎる）。
+  const body = structureOf(['We present a method.']);
+  body.title = null;
+  assert.equal(documentTitle(body, '2401.01234v2.pdf'), '2401.01234v2');
 });

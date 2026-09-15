@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, subscribe, type PaperDocument, type Sentence } from './api.ts';
+import { api, subscribe, type Health, type PaperDocument, type Sentence } from './api.ts';
 import { PdfPane } from './PdfPane.tsx';
 import { Sidebar } from './Sidebar.tsx';
+import { TranslatePanel } from './TranslatePanel.tsx';
 
 interface Props {
   documentId: string;
@@ -50,6 +51,11 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   const [zoom, setZoom] = useState(1);
   const [message, setMessage] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [health, setHealth] = useState<Health | null>(null);
+  const [translateOpen, setTranslateOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  /** 直近に訳が届いた時刻。「いま Claude が書いている」を画面に出すため。 */
+  const [lastWriteAt, setLastWriteAt] = useState<number | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
 
   /** どちら側から選んだか。選んだ側はスクロールさせない。 */
@@ -76,6 +82,7 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
 
   useEffect(() => {
     void reload();
+    void api.health().then(setHealth).catch(() => setHealth(null));
   }, [reload]);
 
   // MCP 経由で Claude が書いた訳を、リロードせずに反映する。
@@ -83,6 +90,9 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const unsubscribe = subscribe((event) => {
       if (event.documentId !== documentId) return;
+      if (event.type === 'translation.updated' || event.type === 'document.updated') {
+        setLastWriteAt(Date.now());
+      }
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => void reload(), RELOAD_DEBOUNCE_MS);
     });
@@ -124,6 +134,57 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     [filter, visibleSentences],
   );
 
+  /**
+   * 文から文へキーで移動する。
+   *
+   * 1 文ずつ読む道具なのに 1 文ずつ動かす手段が無く、300 文の論文は
+   * 300 回クリックする作業になっていた。読み進める操作が重い道具は、
+   * 2 本目の論文で開かれない。
+   *
+   * j/k と ↓/↑ が 1 文、n が「次の未訳」。入力欄にいるときは何もしない。
+   */
+  const move = useCallback(
+    (step: 1 | -1 | 'next-untranslated') => {
+      if (!paper) return;
+      const list = visibleSentences.length > 0 ? visibleSentences : paper.structure.sentences;
+      if (list.length === 0) return;
+      const at = selectedId === null ? -1 : list.findIndex((sentence) => sentence.id === selectedId);
+      let target: Sentence | undefined;
+      if (step === 'next-untranslated') {
+        const skipped = paper.annotations.skipped ?? {};
+        const needs = (sentence: Sentence): boolean =>
+          !paper.annotations.translations[sentence.hash] && !skipped[sentence.hash];
+        target = list.slice(at + 1).find(needs) ?? list.find(needs);
+      } else {
+        target = list[Math.min(Math.max(at + step, 0), list.length - 1)];
+      }
+      if (target) select(target.id, 'sidebar');
+    },
+    [paper, visibleSentences, selectedId, select],
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      // 文字を打っている最中は横取りしない。
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      const step =
+        event.key === 'j' || event.key === 'ArrowDown'
+          ? (1 as const)
+          : event.key === 'k' || event.key === 'ArrowUp'
+            ? (-1 as const)
+            : event.key === 'n'
+              ? ('next-untranslated' as const)
+              : null;
+      if (step === null) return;
+      event.preventDefault();
+      move(step);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [move]);
+
   const stats = useMemo(() => {
     if (!paper) return null;
     // 訳は「異なり文」単位で付く。文の総数を分母にすると 100% にならない。
@@ -149,6 +210,8 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     );
   }
   if (!paper || !stats) return <div className="pane-message">読み込んでいます…</div>;
+
+  const remaining = stats.total - stats.translated - stats.skipped;
 
   /** 失敗を黙って捨てないための共通ラッパ。以前は保存に失敗しても画面が無反応だった。 */
   const run = async (label: string, task: () => Promise<string | null>): Promise<boolean> => {
@@ -220,9 +283,36 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
         <button type="button" onClick={onBack}>
           ← 一覧
         </button>
-        <strong className="toolbar-title" title={paper.title}>
-          {paper.title}
-        </strong>
+        {/* 自動で当てた題名は外れることがある。推測を賢くするより直せる方が確実。 */}
+        {renaming ? (
+          <input
+            className="toolbar-title-input"
+            defaultValue={paper.title}
+            autoFocus
+            aria-label="題名"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') setRenaming(false);
+              if (event.key !== 'Enter') return;
+              const value = (event.target as HTMLInputElement).value;
+              void run('題名の変更', async () => {
+                await api.renameDocument(documentId, value);
+                await reload();
+                setRenaming(false);
+                return null;
+              });
+            }}
+            onBlur={() => setRenaming(false)}
+          />
+        ) : (
+          <button
+            type="button"
+            className="toolbar-title"
+            title={`${paper.title}（押すと題名を直せます）`}
+            onClick={() => setRenaming(true)}
+          >
+            {paper.title}
+          </button>
+        )}
         <span className={`badge${paper.structure.parser === 'grobid' ? ' is-good' : ' is-warn'}`}>
           {paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}
         </span>
@@ -230,6 +320,17 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           {stats.translated} / {stats.total} 文
           {stats.skipped > 0 && `（訳さない ${stats.skipped}）`}
         </span>
+
+        {/* 翻訳の始め方は、手順書ではなく画面に置く。ここが無いと、
+            取り込んだ直後の利用者には次にすることが何も見えない。 */}
+        <button
+          type="button"
+          className={`is-primary${remaining > 0 ? ' is-calling' : ''}`}
+          aria-expanded={translateOpen}
+          onClick={() => setTranslateOpen((open) => !open)}
+        >
+          {remaining > 0 ? `訳す（残り ${remaining}）` : '翻訳の設定'}
+        </button>
 
         <input
           className="toolbar-search"
@@ -317,7 +418,20 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
         </button>
       </header>
 
-      <p className="parser-note">{paper.structure.parserNote}</p>
+      {translateOpen && (
+        <TranslatePanel
+          health={health}
+          documentTitle={paper.title}
+          remaining={remaining}
+          lastWriteAt={lastWriteAt}
+          onClose={() => setTranslateOpen(false)}
+        />
+      )}
+
+      <p className="parser-note">
+        {paper.structure.parserNote}
+        <span className="parser-keys"> ／ j・k（↓↑）で文を移動、n で次の未訳へ</span>
+      </p>
       {message && (
         <p className="flash" role="status" aria-live="polite">
           {message}

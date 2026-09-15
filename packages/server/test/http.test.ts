@@ -717,3 +717,31 @@ test('読めない文書も一覧に行として出る（見えも消せもし�
   assert.ok(row, '読めない文書が一覧から消えている');
   assert.match(row!.title, /開けません|読み込めませんでした/);
 });
+
+test('画面に出す Claude の設定が、実際に開いた URL と一致する', async () => {
+  // ここがずれると、貼った設定で Claude が本体に繋がらない。
+  const health = (await (await fetch(`${baseUrl}/api/health`)).json()) as {
+    mcp: { entry: string | null; url: string };
+  };
+  assert.equal(health.mcp.url, baseUrl);
+  assert.ok(health.mcp.entry === null || health.mcp.entry.endsWith('packages/mcp/dist/index.js'));
+});
+
+test('題名は直せる', async () => {
+  const id = await ingest();
+  const response = await fetch(`${baseUrl}/api/documents/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: '  ブロック疎な注意機構  ' }),
+  });
+  assert.equal(response.status, 200);
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as { title: string };
+  assert.equal(document.title, 'ブロック疎な注意機構');
+
+  const empty = await fetch(`${baseUrl}/api/documents/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: '   ' }),
+  });
+  assert.equal(empty.status, 400);
+});

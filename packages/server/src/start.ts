@@ -52,6 +52,9 @@ export async function start(overrides: Partial<Config> = {}): Promise<StartResul
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : config.port;
   const url = `http://${config.host}:${port}`;
+  // 実際に開いた番号で上書きする。port 0（自動割り当て）で起動したときに、
+  // 画面へ出す設定例が http://127.0.0.1:0 になってしまう。
+  config.publicUrl = url;
 
   return {
     server,

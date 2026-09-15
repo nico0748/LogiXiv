@@ -277,6 +277,13 @@ async function handle(
       response.end(pdf);
       return;
     }
+    if (rest === '' && method === 'PATCH') {
+      const body = await readJson<{ title?: unknown }>(request);
+      const title = requireString(body.title, 'title', 300);
+      const document = await api.renameDocument(id, title);
+      sendJson(response, 200, { id: document.id, title: document.title });
+      return;
+    }
     if (rest === '/reparse' && method === 'POST') {
       const body = await readJson<{ parser?: string }>(request).catch(() => ({}) as { parser?: string });
       const preference: ParserPreference =

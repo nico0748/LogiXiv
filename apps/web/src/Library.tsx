@@ -154,7 +154,7 @@ export function Library({ onOpen }: Props): React.JSX.Element {
               <span className="document-meta">
                 {document.translated} / {document.total} 文 ·{' '}
                 {document.parser === 'grobid' ? 'GROBID' : '簡易解析'} ·{' '}
-                {new Date(document.updatedAt).toLocaleString()}
+                {new Date(document.updatedAt).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' })}
               </span>
               <span className="document-bar">
                 <span

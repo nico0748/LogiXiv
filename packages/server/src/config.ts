@@ -1,5 +1,7 @@
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface Config {
   /** 既定は 127.0.0.1。未公開原稿を扱う前提なので 0.0.0.0 は明示的な指定でしか選べない。 */
@@ -11,6 +13,25 @@ export interface Config {
   webDir: string | null;
   /** apps/viewer のビルド成果物（書き出し HTML に埋め込む）。 */
   viewerDir: string | null;
+  /**
+   * MCP サーバーの入口（packages/mcp/dist/index.js）の絶対パス。
+   * 画面に Claude 用の設定をそのまま出すために要る。見つからなければ null。
+   */
+  mcpEntry: string | null;
+  /** 画面や設定例に出す、この本体の URL。 */
+  publicUrl: string;
+}
+
+/** 同じリポジトリの中から MCP の入口を探す。見つからなければ null（未ビルド）。 */
+function findMcpEntry(): string | null {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [
+    resolve(here, '../../mcp/dist/index.js'),
+    resolve(here, '../../../packages/mcp/dist/index.js'),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 function envString(name: string): string | undefined {
@@ -20,9 +41,13 @@ function envString(name: string): string | undefined {
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
   const dataDir = overrides.dataDir ?? envString('LOGIXIV_DATA_DIR') ?? join(homedir(), '.logixiv');
+  const host = overrides.host ?? envString('LOGIXIV_HOST') ?? '127.0.0.1';
+  const port = overrides.port ?? Number.parseInt(envString('LOGIXIV_PORT') ?? '4173', 10);
   return {
-    host: overrides.host ?? envString('LOGIXIV_HOST') ?? '127.0.0.1',
-    port: overrides.port ?? Number.parseInt(envString('LOGIXIV_PORT') ?? '4173', 10),
+    host,
+    port,
+    mcpEntry: overrides.mcpEntry ?? envString('LOGIXIV_MCP_ENTRY') ?? findMcpEntry(),
+    publicUrl: overrides.publicUrl ?? `http://${host}:${port}`,
     dataDir: resolve(dataDir),
     grobidUrl: (overrides.grobidUrl ?? envString('LOGIXIV_GROBID_URL') ?? 'http://localhost:8070').replace(/\/$/, ''),
     webDir: overrides.webDir ?? envString('LOGIXIV_WEB_DIR') ?? null,

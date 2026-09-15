@@ -172,6 +172,24 @@ export class LogiXivApi {
     return this.require(id);
   }
 
+  /**
+   * 題名を付け直す。
+   *
+   * 自動で当てた題名は、簡易解析だと著者行まで拾うなど当たり外れがある。
+   * 推測を賢くするより、直せるようにする方が確実に効く。
+   */
+  async renameDocument(id: string, title: string): Promise<PaperDocument> {
+    const trimmed = title.trim();
+    if (trimmed.length === 0) throw new BadRequestError('題名が空です');
+    const document = await this.mutate(id, (current) => ({
+      ...current,
+      title: trimmed.slice(0, 300),
+      updatedAt: new Date().toISOString(),
+    }));
+    this.bus.publish({ type: 'document.updated', documentId: id, reason: 'rename' });
+    return document;
+  }
+
   async getPdf(id: string): Promise<Buffer> {
     await this.require(id);
     return this.store.readPdf(id);
@@ -672,13 +690,23 @@ export class LogiXivApi {
     this.bus.publish({ type: 'document.deleted', documentId: id });
   }
 
-  async health(): Promise<{ ok: true; version: string; grobid: 'up' | 'down'; grobidUrl: string; dataDir: string }> {
+  async health(): Promise<{
+    ok: true;
+    version: string;
+    grobid: 'up' | 'down';
+    grobidUrl: string;
+    dataDir: string;
+    mcp: { entry: string | null; url: string };
+  }> {
     return {
       ok: true,
       version: LOGIXIV_VERSION,
       grobid: (await isGrobidAlive(this.config.grobidUrl)) ? 'up' : 'down',
       grobidUrl: this.config.grobidUrl,
       dataDir: this.config.dataDir,
+      // 画面から Claude の設定をそのまま貼れるようにする。
+      // 手順書にしか無い状態だと、翻訳の始め方が製品の中のどこにも書かれていない。
+      mcp: { entry: this.config.mcpEntry, url: this.config.publicUrl },
     };
   }
 

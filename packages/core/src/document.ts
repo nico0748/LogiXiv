@@ -20,11 +20,29 @@ export interface CreateDocumentInput {
   annotations?: Annotations;
 }
 
+/**
+ * 表示に使う題名。
+ *
+ * ファイル名を題名にしていたので、一覧にも書き出しにも `paper` や `2401.01234v2`
+ * が並んでいた。GROBID が題名を返さない簡易解析の経路でも、本文の 1 文目は
+ * たいてい表題そのものなので、そちらの方がまだ当たる。
+ */
+export function documentTitle(structure: DocumentStructure, sourceFileName: string): string {
+  const fromStructure = structure.title?.trim();
+  if (fromStructure && fromStructure.length > 0) return fromStructure;
+
+  const first = structure.sentences[0]?.text.trim() ?? '';
+  // 長すぎるもの・文末が句点のもの（＝本文の 1 文）は題名として使わない。
+  if (first.length >= 8 && first.length <= 160 && !/[.!?。]$/.test(first)) return first;
+
+  return sourceFileName.replace(/\.pdf$/i, '');
+}
+
 export function createDocument(input: CreateDocumentInput): PaperDocument {
   const now = new Date().toISOString();
   return {
     id: input.id ?? newId('doc'),
-    title: input.title ?? input.structure.title ?? input.sourceFileName.replace(/\.pdf$/i, ''),
+    title: input.title ?? documentTitle(input.structure, input.sourceFileName),
     sourceFileName: input.sourceFileName,
     createdAt: now,
     updatedAt: now,

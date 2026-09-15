@@ -1,5 +1,6 @@
 import type { ExportPayload, PaperDocument, Sentence } from './types.ts';
 import { escapeHtml, escapeJsonForScript } from './escape.ts';
+import { progress } from './document.ts';
 import { LOGIXIV_VERSION } from './hash.ts';
 
 /**
@@ -82,6 +83,12 @@ function renderSentence(sentence: Sentence, document: PaperDocument, notes: stri
   if (translation) {
     const mark = translation.revisedByHuman ? ' data-human="1"' : '';
     parts.push(`<p class="lx-target" lang="ja"${mark}>${escapeHtml(translation.text)}</p>`);
+  } else if (document.annotations.skipped?.[sentence.hash]) {
+    // 「訳さない」と決めた文まで（未訳）にすると、受け取った側には
+    // やり残しにしか見えない。
+    parts.push('<p class="lx-target lx-skipped">（訳さない）</p>');
+  } else {
+    parts.push('<p class="lx-target lx-untranslated">（未訳）</p>');
   }
   for (const note of notes) {
     parts.push(`<p class="lx-note">${escapeHtml(note)}</p>`);
@@ -100,6 +107,7 @@ const STATIC_STYLE = `
   .lx-source { margin: 0; color: #6b7280; font-size: .92rem; }
   .lx-target { margin: .2rem 0 0; }
   .lx-target[data-human="1"]::after { content: " ✓"; color: #059669; }
+  .lx-target.lx-untranslated, .lx-target.lx-skipped { color: #9ca3af; }
   .lx-note { margin: .35rem 0 0; padding-left: .7rem; border-left: 3px solid #f59e0b; font-size: .88rem; }
   .lx-banner { max-width: 46rem; margin: 1rem auto 0; padding: .6rem .9rem; border: 1px solid rgba(128,128,128,.4); border-radius: 6px; font-size: .85rem; }
 `;
@@ -108,8 +116,17 @@ export function buildExportHtml(input: BuildExportInput): string {
   const payload = buildExportPayload(input);
   const json = escapeJsonForScript(JSON.stringify(payload));
   const title = escapeHtml(input.document.title);
+  // 受け取った側がまず知りたいのは「どこまで訳してあるか」。
+  // 文数と解析方式だけでは、開いて（未訳）の壁に当たるまで分からない。
+  const stats = progress(input.document);
+  const exportedAt = new Date(input.exportedAt ?? Date.now()).toLocaleString('ja-JP', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
   const progressLine = escapeHtml(
-    `${input.document.structure.sentences.length} 文 / 解析: ${input.document.structure.parserNote}`,
+    `${stats.uniqueSentences} 文中 ${stats.translated} 文訳済み` +
+      (stats.skipped > 0 ? `・${stats.skipped} 文は訳さない判断` : '') +
+      ` ／ ${exportedAt} 時点`,
   );
 
   return `<!doctype html>
@@ -126,7 +143,8 @@ export function buildExportHtml(input: BuildExportInput): string {
 <div id="lx-root"></div>
 <div class="lx-static" id="lx-static">
 <h1>${title}</h1>
-<p class="lx-banner">この HTML は LogiXiv の書き出しです。JavaScript が動く環境では PDF と対訳が並んだビューアが開きます。動かない環境では以下の対訳がそのまま読めます（${progressLine}）。</p>
+<p class="lx-banner">${progressLine}</p>
+<p class="lx-banner">この HTML は LogiXiv の書き出しです。JavaScript が動く環境では PDF と対訳が並んだビューアが開きます。動かない環境では以下の対訳がそのまま読めます。<br>（未訳）＝まだ訳していない文、（訳さない）＝参考文献や数式など訳す対象から外した文、✓ ＝人が手を入れた訳です。</p>
 ${staticFallback(input.document)}
 </div>
 <script type="application/json" id="${EXPORT_DATA_ELEMENT_ID}">${json}</script>

@@ -101,6 +101,8 @@ export interface Health {
   grobid: 'up' | 'down';
   grobidUrl: string;
   dataDir: string;
+  /** Claude 用の MCP 設定を画面に出すための情報。 */
+  mcp?: { entry: string | null; url: string };
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -125,6 +127,13 @@ export const api = {
   listDocuments: () => request<{ documents: DocumentSummary[] }>('/api/documents'),
 
   getDocument: (id: string) => request<PaperDocument>(`/api/documents/${id}`),
+
+  renameDocument: (id: string, title: string) =>
+    request<{ id: string; title: string }>(`/api/documents/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    }),
 
   deleteDocument: (id: string) => request<{ ok: true }>(`/api/documents/${id}`, { method: 'DELETE' }),
 
