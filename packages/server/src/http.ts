@@ -308,6 +308,22 @@ async function handle(
       sendJson(response, 200, await api.importHtml(html, target));
       return;
     }
+    if (rest === '/glossary/replace' && method === 'POST') {
+      const body = await readJson<{ from?: unknown; to?: unknown; dryRun?: unknown; includeRevisedByHuman?: unknown }>(
+        request,
+      );
+      const from = requireString(body.from, 'from', 500);
+      const to = optionalString(body.to, 'to', 500) ?? '';
+      sendJson(
+        response,
+        200,
+        await api.replaceTerm(id, from, to, {
+          dryRun: body.dryRun === true,
+          includeRevisedByHuman: body.includeRevisedByHuman !== false,
+        }),
+      );
+      return;
+    }
     if (rest === '/search' && method === 'GET') {
       const query = url.searchParams.get('q') ?? '';
       const limit = Number.parseInt(url.searchParams.get('limit') ?? '30', 10);

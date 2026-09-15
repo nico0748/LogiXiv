@@ -10,6 +10,7 @@ import {
   mergeAnnotations,
   parseExportHtml,
   progress,
+  replaceInTranslations,
   searchDocument,
   sentenceEditsOf,
   sentencesByHash,
@@ -441,6 +442,54 @@ export class LogiXivApi {
     });
     this.bus.publish({ type: 'document.updated', documentId: id, reason: 'glossary' });
     return { added, updated, total };
+  }
+
+  /**
+   * 訳語の一括置換。既に書いた訳を、新しい訳語に追随させる。
+   * dryRun のときは何も書かず、対象の件数と最初の数件だけ返す。
+   */
+  async replaceTerm(
+    id: string,
+    from: string,
+    to: string,
+    options: { dryRun?: boolean; includeRevisedByHuman?: boolean } = {},
+  ): Promise<{
+    applied: number;
+    revisedByHuman: number;
+    preview: { sentenceHash: string; before: string; after: string }[];
+  }> {
+    if (from.trim().length === 0) throw new BadRequestError('置き換える語が空です');
+
+    if (options.dryRun) {
+      const document = await this.require(id);
+      const { replacements } = replaceInTranslations(document, from, to, options);
+      return {
+        applied: replacements.length,
+        revisedByHuman: replacements.filter((r) => r.revisedByHuman).length,
+        preview: replacements.slice(0, 5).map(({ sentenceHash, before, after }) => ({
+          sentenceHash,
+          before,
+          after,
+        })),
+      };
+    }
+
+    let applied = 0;
+    let revisedByHuman = 0;
+    let preview: { sentenceHash: string; before: string; after: string }[] = [];
+    await this.mutate(id, (current) => {
+      const result = replaceInTranslations(current, from, to, options);
+      applied = result.replacements.length;
+      revisedByHuman = result.replacements.filter((r) => r.revisedByHuman).length;
+      preview = result.replacements.slice(0, 5).map(({ sentenceHash, before, after }) => ({
+        sentenceHash,
+        before,
+        after,
+      }));
+      return result.document;
+    });
+    if (applied > 0) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'glossary-replace' });
+    return { applied, revisedByHuman, preview };
   }
 
   /** 「これは訳す対象ではない」と記録する。未訳の集計から外れる。 */

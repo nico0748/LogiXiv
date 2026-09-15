@@ -448,3 +448,70 @@ export function structureSummary(structure: DocumentStructure): string {
     `pages=${structure.pageSizes.length}`,
   ].join(' ');
 }
+
+export interface TermReplacement {
+  sentenceHash: string;
+  before: string;
+  after: string;
+  revisedByHuman: boolean;
+}
+
+/**
+ * 訳語を変えたときに、既に書いた訳を追随させる。
+ *
+ * 用語集は「これから訳すとき」にしか効かない。途中で訳語を変えると、
+ * 前半と後半で訳語が違う論文ができあがる。直すには検索して 1 件ずつ開き直す
+ * しかなく、100 件あれば実質やらない。
+ *
+ * 人手修正済みの訳も対象にする。**用語を変えるのは人の意思**なので、
+ * ここで機械が遠慮すると「自分で直した箇所だけ古い訳語のまま」という
+ * いちばん厄介な状態になる。ただし件数は分けて返し、画面で断れるようにする。
+ */
+export function replaceInTranslations(
+  document: PaperDocument,
+  from: string,
+  to: string,
+  options: { includeRevisedByHuman?: boolean } = {},
+): { document: PaperDocument; replacements: TermReplacement[] } {
+  const needle = from.trim();
+  if (needle.length === 0) return { document, replacements: [] };
+  const includeHuman = options.includeRevisedByHuman ?? true;
+
+  const replacements: TermReplacement[] = [];
+  const translations: Record<string, Translation> = { ...document.annotations.translations };
+  const now = new Date().toISOString();
+
+  for (const [hash, translation] of Object.entries(document.annotations.translations)) {
+    if (!translation.text.includes(needle)) continue;
+    if (translation.revisedByHuman && !includeHuman) continue;
+    const after = translation.text.split(needle).join(to);
+    if (after === translation.text) continue;
+    replacements.push({
+      sentenceHash: hash,
+      before: translation.text,
+      after,
+      revisedByHuman: translation.revisedByHuman,
+    });
+    translations[hash] = { ...translation, text: after, updatedAt: now };
+  }
+
+  if (replacements.length === 0) return { document, replacements };
+  return {
+    document: { ...document, updatedAt: now, annotations: { ...document.annotations, translations } },
+    replacements,
+  };
+}
+
+/** 置き換えずに、対象になる訳だけ数える（押す前に件数を出すため）。 */
+export function countTermUses(document: PaperDocument, term: string): { total: number; revisedByHuman: number } {
+  const needle = term.trim();
+  if (needle.length === 0) return { total: 0, revisedByHuman: 0 };
+  let total = 0;
+  let revisedByHuman = 0;
+  for (const translation of Object.values(document.annotations.translations)) {
+    if (!translation.text.includes(needle)) continue;
+    total++;
+    if (translation.revisedByHuman) revisedByHuman++;
+  }
+  return { total, revisedByHuman };
+}

@@ -678,3 +678,78 @@ textarea {
   min-width: 8rem;
   font-weight: 600;
 }
+
+/* --- 用語集 ------------------------------------------------------------- */
+
+.glossary-panel {
+  margin: 0.5rem 1rem 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  font-size: 0.86rem;
+}
+
+.glossary-list {
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.3rem;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.glossary-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.glossary-term {
+  min-width: 10rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+}
+
+.glossary-value {
+  border: 0;
+  background: none;
+  padding: 0.1rem 0.25rem;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: text;
+  border-radius: 4px;
+}
+
+.glossary-value:hover {
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.glossary-input {
+  flex: 0 1 14rem;
+}
+
+.glossary-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.glossary-remove {
+  margin-left: auto;
+  padding: 0 0.35rem;
+}
+
+.glossary-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.glossary-add input {
+  flex: 1 1 9rem;
+  min-width: 0;
+}

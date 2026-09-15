@@ -128,6 +128,36 @@ export const api = {
 
   getDocument: (id: string) => request<PaperDocument>(`/api/documents/${id}`),
 
+  setGlossary: (id: string, entries: { term: string; translation: string; note: string | null }[]) =>
+    request<{ ok: true; total: number }>(`/api/documents/${id}/glossary`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries }),
+    }),
+
+  addGlossary: (id: string, entries: { term: string; translation: string }[]) =>
+    request<{ added: number; total: number }>(`/api/documents/${id}/glossary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries }),
+    }),
+
+  /** 訳語を変えたときに既訳を追随させる。dryRun なら件数だけ数える。 */
+  replaceTerm: (
+    id: string,
+    from: string,
+    to: string,
+    options: { dryRun?: boolean; includeRevisedByHuman?: boolean },
+  ) =>
+    request<{ applied: number; revisedByHuman: number; preview: { before: string; after: string }[] }>(
+      `/api/documents/${id}/glossary/replace`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from, to, ...options }),
+      },
+    ),
+
   renameDocument: (id: string, title: string) =>
     request<{ id: string; title: string }>(`/api/documents/${id}`, {
       method: 'PATCH',

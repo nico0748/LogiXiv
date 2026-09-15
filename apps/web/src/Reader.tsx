@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, subscribe, type Health, type PaperDocument, type Sentence } from './api.ts';
 import { PdfPane } from './PdfPane.tsx';
 import { Sidebar } from './Sidebar.tsx';
+import { GlossaryPanel } from './GlossaryPanel.tsx';
 import { TranslatePanel } from './TranslatePanel.tsx';
 
 interface Props {
@@ -54,6 +55,7 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   const [health, setHealth] = useState<Health | null>(null);
   const [translateOpen, setTranslateOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [glossaryOpen, setGlossaryOpen] = useState(false);
   /** 直近に訳が届いた時刻。「いま Claude が書いている」を画面に出すため。 */
   const [lastWriteAt, setLastWriteAt] = useState<number | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
@@ -378,6 +380,10 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           </button>
         )}
 
+        <button type="button" aria-expanded={glossaryOpen} onClick={() => setGlossaryOpen((open) => !open)}>
+          用語集{paper.annotations.glossary.length > 0 ? `（${paper.annotations.glossary.length}）` : ''}
+        </button>
+
         <a className="button-link" href={api.exportUrl(documentId)} download>
           書き出し
         </a>
@@ -425,6 +431,15 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           remaining={remaining}
           lastWriteAt={lastWriteAt}
           onClose={() => setTranslateOpen(false)}
+        />
+      )}
+
+      {glossaryOpen && (
+        <GlossaryPanel
+          document={paper}
+          onChanged={reload}
+          onClose={() => setGlossaryOpen(false)}
+          onMessage={setMessage}
         />
       )}
 
