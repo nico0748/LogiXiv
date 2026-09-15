@@ -227,8 +227,14 @@ export const api = {
 };
 
 /** SSE。Claude が MCP から書き込んだ訳を、リロード無しで反映するための購読。 */
-export function subscribe(onEvent: (event: { type: string; documentId: string }) => void): () => void {
+export function subscribe(
+  onEvent: (event: { type: string; documentId: string }) => void,
+  onReconnect?: () => void,
+): () => void {
   const source = new EventSource('/api/events');
+  // 接続し直したときに知らせる。これが無いと、サーバーが落ちている間に
+  // 失敗した一覧の取得が、サーバーが戻っても永久にエラー表示のまま残る。
+  if (onReconnect) source.addEventListener('open', () => onReconnect());
   const handler = (event: MessageEvent<string>): void => {
     try {
       onEvent(JSON.parse(event.data) as { type: string; documentId: string });

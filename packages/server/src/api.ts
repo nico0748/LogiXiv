@@ -16,6 +16,7 @@ import {
   setTranslation,
   skipSentences,
   skippedOf,
+  STRUCTURE_VERSION,
   unskipSentences,
   structureSummary,
   undoSentenceEdit,
@@ -151,6 +152,18 @@ export class LogiXivApi {
           remaining: 0,
         });
       }
+    }
+    // 読み出しそのものに失敗したものも行として出す（消せなくならないように）。
+    for (const [id, reason] of this.store.unreadable) {
+      rows.push({
+        id,
+        title: `${id}（開けません: ${reason.slice(0, 120)}）`,
+        updatedAt: new Date(0).toISOString(),
+        parser: 'unknown',
+        total: 0,
+        translated: 0,
+        remaining: 0,
+      });
     }
     return rows;
   }
@@ -633,8 +646,22 @@ export class LogiXivApi {
     // 任意のバイト列が source.pdf として保存され、/pdf が application/pdf として配る。
     const pdf = Buffer.from(parsed.pdfBase64, 'base64');
     this.assertLooksLikePdf(pdf);
-    await this.store.writePdf(document.id, pdf);
-    await this.store.write(document);
+    // 新しい版で書かれたものは保存しない。保存できてしまうと、一覧に出ないのに
+    // ディスクには在って、開くと 500 になる文書ができる。
+    if (document.structure.version > STRUCTURE_VERSION) {
+      throw new BadRequestError(
+        `この書き出しは新しい版の LogiXiv で作られています（構造 v${document.structure.version} / ` +
+          `このプログラムは v${STRUCTURE_VERSION} まで）。LogiXiv を更新してください。`,
+      );
+    }
+    try {
+      await this.store.writePdf(document.id, pdf);
+      await this.store.write(document);
+    } catch (error) {
+      // 取り込みでも、書けなかったときに作りかけを残さない。
+      await this.store.remove(document.id).catch(() => undefined);
+      throw error;
+    }
     this.bus.publish({ type: 'document.created', documentId: document.id });
     return { documentId: document.id, report: null, note: '新しい文書として取り込みました', warning };
   }

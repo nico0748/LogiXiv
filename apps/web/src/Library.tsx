@@ -28,7 +28,12 @@ export function Library({ onOpen }: Props): React.JSX.Element {
 
   useEffect(() => {
     void reload();
-    return subscribe(() => void reload());
+    // SSE が繋がり直したら取り直す。サーバーを起動し直したあと、
+    // 画面がエラーのまま取り残されないように。
+    return subscribe(
+      () => void reload(),
+      () => void reload(),
+    );
   }, [reload]);
 
   /**

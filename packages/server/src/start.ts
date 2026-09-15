@@ -33,13 +33,21 @@ export async function start(overrides: Partial<Config> = {}): Promise<StartResul
   await api.init();
 
   const server = createHttpServer(config, api);
-  await new Promise<void>((resolveListen, rejectListen) => {
-    server.once('error', rejectListen);
-    server.listen(config.port, config.host, () => {
-      server.off('error', rejectListen);
-      resolveListen();
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once('error', rejectListen);
+      server.listen(config.port, config.host, () => {
+        server.off('error', rejectListen);
+        resolveListen();
+      });
     });
-  });
+  } catch (error) {
+    // 待ち受けに失敗したらロックも返す。返さないまま生き続けると、
+    // ポートを直して起動し直したときに自分の残骸に締め出される。
+    api.bus.close();
+    await api.store.releaseLock().catch(() => undefined);
+    throw error;
+  }
 
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : config.port;
@@ -52,10 +60,19 @@ export async function start(overrides: Partial<Config> = {}): Promise<StartResul
     url,
     async close() {
       api.bus.close();
-      await new Promise<void>((done) => server.close(() => done()));
-      // 置き場のロックを返す。返さないと、次の起動が「別のプロセスが使っている」
-      // と誤判定する余地を残す（PID の生死で救えはするが、余地は作らない）。
+      // ロックは server.close() より先に返す。読みかけの本文を抱えたソケットが
+      // 1 本残っていると close のコールバックは呼ばれず、そのまま終了すると
+      // ロックだけが置き去りになる（413 を返した直後がまさにそれ）。
       await api.store.releaseLock().catch(() => undefined);
+      await new Promise<void>((done) => {
+        const timer = setTimeout(done, 2000);
+        timer.unref();
+        server.close(() => {
+          clearTimeout(timer);
+          done();
+        });
+      });
+      server.closeAllConnections?.();
     },
   };
 }

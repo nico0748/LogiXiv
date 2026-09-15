@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import type { PaperDocument, Sentence } from './api.ts';
@@ -57,7 +57,13 @@ export function PdfPane({
   scrollTarget,
 }: Props): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [pages, setPages] = useState<PageState[]>([]);
+  /**
+   * 枠の一覧は「どの文書のものか」まで持つ。
+   * 文書を切り替えた最初の 1 フレームは、新しい文書のマーカーが前の文書の判型に
+   * 乗った状態で描かれてしまうため（状態の更新は描画の後になる）。
+   */
+  const [pageSet, setPageSet] = useState<{ id: string; list: PageState[] }>({ id: paper.id, list: [] });
+  const pages = pageSet.id === paper.id ? pageSet.list : [];
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   /** 実際に描画した倍率。表示中の zoom との比が CSS スケールになる。 */
@@ -112,6 +118,23 @@ export function PdfPane({
     const timer = setTimeout(() => setRenderKey((k) => k + 1), RERENDER_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [zoom, renderedZoom]);
+
+  /**
+   * 拡大しても読んでいた場所を保つ。
+   *
+   * ブラウザは中身が伸びても scrollTop を据え置くので、拡大するほど上へずれる
+   * （20% ごとに 2 ページぶん）。倍率が変わった瞬間に、画面の中心が指していた
+   * 位置を新しい倍率へ写し替える。
+   */
+  const appliedZoom = useRef(zoom);
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    const previous = appliedZoom.current;
+    appliedZoom.current = zoom;
+    if (!host || previous === zoom || previous === 0) return;
+    const centre = host.scrollTop + host.clientHeight / 2;
+    host.scrollTop = Math.max(0, (centre * zoom) / previous - host.clientHeight / 2);
+  }, [zoom]);
 
   const previousWidth = useRef(0);
   useEffect(() => {
@@ -182,46 +205,25 @@ export function PdfPane({
     [release],
   );
 
-  // --- PDF を開いて、寸法だけ先に決める ------------------------------------
+  // --- PDF を開く。文書が変わったときだけ ----------------------------------
   useEffect(() => {
     let cancelled = false;
-    const host = hostRef.current;
-    if (!host) return;
-
     const generation = ++generationRef.current;
-    const targetZoom = zoomRef.current;
-    // 再描画の間もスクロール位置を保つ。
-    const scrollRatio = host.scrollHeight > 0 ? host.scrollTop / host.scrollHeight : 0;
-
     for (const pageNumber of [...drawnRef.current.keys()]) release(pageNumber);
+    // 前の文書の枠を残さない。残すと、一瞬だけ前の判型に新しい文書の
+    // マーカーが乗った画面が出る。
+    setPageSet({ id: paper.id, list: [] });
     setLoading(true);
     setError(null);
+    pdfRef.current = null;
 
     const task = pdfjs.getDocument({ url: `/api/documents/${paper.id}/pdf`, disableFontFace: false });
-
     void (async () => {
       try {
         const pdf = await task.promise;
         if (cancelled || generation !== generationRef.current) return;
         pdfRef.current = pdf;
-        cssWidthRef.current = Math.max(320, (host.clientWidth - 48) * targetZoom);
-
-        const geometry: PageState[] = [];
-        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
-          const page = await pdf.getPage(pageNumber);
-          if (cancelled || generation !== generationRef.current) return;
-          const base = page.getViewport({ scale: 1 });
-          const scale = cssWidthRef.current / base.width;
-          geometry.push({ pageNumber, scale, width: base.width * scale, height: base.height * scale });
-        }
-
-        setPages(geometry);
-        setRenderedZoom(targetZoom);
-        setLoading(false);
-
-        requestAnimationFrame(() => {
-          if (!cancelled && scrollRatio > 0) host.scrollTop = scrollRatio * host.scrollHeight;
-        });
+        setRenderKey((k) => k + 1);
       } catch (cause) {
         if (!cancelled) {
           setError(cause instanceof Error ? cause.message : String(cause));
@@ -232,9 +234,51 @@ export function PdfPane({
 
     return () => {
       cancelled = true;
+      generationRef.current++;
+      for (const pageNumber of [...drawnRef.current.keys()]) release(pageNumber);
       void task.destroy();
     };
-  }, [paper.id, renderKey, release]);
+  }, [paper.id, release]);
+
+  // --- 幅や倍率が変わったら、開いてある PDF から寸法を計算し直す -------------
+  useEffect(() => {
+    const host = hostRef.current;
+    const pdf = pdfRef.current;
+    if (!host || !pdf) return;
+    let cancelled = false;
+    const generation = ++generationRef.current;
+    const targetZoom = zoomRef.current;
+
+    for (const pageNumber of [...drawnRef.current.keys()]) release(pageNumber);
+
+    void (async () => {
+      try {
+        cssWidthRef.current = Math.max(320, (host.clientWidth - 48) * targetZoom);
+        const geometry: PageState[] = [];
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+          const page = await pdf.getPage(pageNumber);
+          if (cancelled || generation !== generationRef.current) return;
+          const base = page.getViewport({ scale: 1 });
+          const scale = cssWidthRef.current / base.width;
+          geometry.push({ pageNumber, scale, width: base.width * scale, height: base.height * scale });
+        }
+        setPageSet({ id: paper.id, list: geometry });
+        setRenderedZoom(targetZoom);
+        setLoading(false);
+      } catch (cause) {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+          setLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // renderKey が上がるたびに走る。PDF の取得はここではやらない
+    // （拡大を 1 回押すたびに PDF 全体を取り直していた）。
+  }, [renderKey, release, paper.id]);
 
   // --- 見える範囲になったページだけ描く ------------------------------------
   useEffect(() => {
@@ -271,16 +315,18 @@ export function PdfPane({
 
   const handleSelect = useCallback((id: string) => onSelect(id, 'pdf'), [onSelect]);
 
-  if (error) {
-    return <div className="pane-message">PDF を表示できませんでした: {error}</div>;
-  }
-
   // 実描画とのズレを CSS で吸収する。押した瞬間の反応はこれで返す。
   const cssScale = renderedZoom === 0 ? 1 : zoom / renderedZoom;
 
   return (
+    /**
+     * エラーでも .pdf-pane 自体は描き続ける。ここを別の要素に差し替えると
+     * hostRef が外れ、次に開いた文書の読み込みが「host が無い」で即座に諦める。
+     * 1 本の壊れた PDF が、他のすべての文書の PDF 欄を道連れにしていた。
+     */
     <div className="pdf-pane" ref={hostRef}>
-      {loading && <div className="pane-message">PDF を読み込んでいます…</div>}
+      {error !== null && <div className="pane-message">PDF を表示できませんでした: {error}</div>}
+      {error === null && loading && <div className="pane-message">PDF を読み込んでいます…</div>}
       {pages.map((page) => (
         <div
           key={page.pageNumber}

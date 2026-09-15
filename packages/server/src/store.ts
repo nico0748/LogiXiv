@@ -1,4 +1,5 @@
-import { mkdir, open, readdir, readFile, rename, writeFile, stat, rm } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, writeFile, stat, rm } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { migrateDocument, type PaperDocument } from '@logixiv/core';
 import { type Config, documentDir, documentsDir } from './config.ts';
@@ -53,6 +54,9 @@ export function assertSafeId(id: string): string {
 }
 
 function isAlive(pid: number): boolean {
+  // 0 と負数はプロセス群を指す特別な値で、kill(0, 0) は必ず成功してしまう。
+  // 壊れたロックファイルを「生きている持ち主」と読み違えない。
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     // シグナル 0 は「送らずに存在だけ確かめる」。
     process.kill(pid, 0);
@@ -62,9 +66,20 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/** ついさっき作られたファイルか（書き込み前のロックを残骸と誤認しないため）。 */
+async function isFresh(path: string, withinMs = 5000): Promise<boolean> {
+  try {
+    return Date.now() - (await stat(path)).mtimeMs < withinMs;
+  } catch {
+    return false;
+  }
+}
+
 export class DocumentStore {
   private readonly config: Config;
   private holdsLock = false;
+  /** 読めなかった文書と、その理由。一覧に「読めません」の行として出す。 */
+  readonly unreadable = new Map<string, string>();
 
   constructor(config: Config) {
     this.config = config;
@@ -88,18 +103,27 @@ export class DocumentStore {
     const path = this.lockPath();
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const handle = await open(path, 'wx');
-        await handle.writeFile(`${process.pid}\n`);
-        await handle.close();
+        // 作成と PID の書き込みを 1 回で行う。2 段階にすると、その隙間に読んだ
+        // 別プロセスが「中身が空だから残骸だ」と判断してロックを消し、
+        // 両方が持ち主のつもりで動き出す（実際に再現した）。
+        writeFileSync(path, `${process.pid}\n`, { flag: 'wx' });
         this.holdsLock = true;
         return;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        const owner = Number.parseInt(await readFile(path, 'utf8').catch(() => ''), 10);
-        if (Number.isFinite(owner) && owner !== process.pid && isAlive(owner)) {
+        const raw = await readFile(path, 'utf8').catch(() => '');
+        const owner = Number.parseInt(raw.trim(), 10);
+        if (owner !== process.pid && isAlive(owner)) {
           throw new DataDirectoryLockedError(
             `${this.config.dataDir} は別の LogiXiv（PID ${owner}）が使っています。` +
-              '同じ置き場を 2 つのプロセスで開くと、受け付けた書き込みが黙って消えます。',
+              '同じ置き場を 2 つのプロセスで開くと、受け付けた書き込みが黙って消えます。\n' +
+              `他に動いていないのにこの表示が出る場合は ${path} を消してください。`,
+          );
+        }
+        if (!Number.isInteger(owner) && (await isFresh(path))) {
+          // 中身がまだ書かれていないだけの、たった今作られたロック。待たずに断る。
+          throw new DataDirectoryLockedError(
+            `${this.config.dataDir} を別の LogiXiv が開こうとしています。少し待って試してください。`,
           );
         }
         // 持ち主が居ない残骸。消してもう一度だけ試す。
@@ -121,14 +145,17 @@ export class DocumentStore {
 
   async list(): Promise<PaperDocument[]> {
     await this.init();
+    this.unreadable.clear();
     const entries = await readdir(documentsDir(this.config), { withFileTypes: true });
     const documents: PaperDocument[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
         documents.push(await this.read(entry.name));
-      } catch {
-        // 壊れた・書きかけのディレクトリは一覧から黙って外す（一覧が開けなくなる方が困る）。
+      } catch (error) {
+        // 読めないものを一覧から黙って外すと、ディスクには在るのに画面からは
+        // 見えも消せもしない文書になる。行だけは出して、理由を添える。
+        this.unreadable.set(entry.name, error instanceof Error ? error.message : String(error));
       }
     }
     return documents.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));

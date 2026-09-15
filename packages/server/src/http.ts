@@ -63,7 +63,13 @@ async function readBody(request: IncomingMessage, limit = MAX_UPLOAD_BYTES): Pro
   for await (const chunk of request) {
     const buffer = chunk as Buffer;
     size += buffer.length;
-    if (size > limit) throw new TooLargeError(`本文が大きすぎます（上限 ${Math.floor(limit / 1024 / 1024)}MB）`);
+    if (size > limit) {
+      // 読みかけで抜けると、残りを抱えたソケットが開いたままになる。
+      // その 1 本のせいで server.close() のコールバックが呼ばれず、
+      // 終了処理（ロックの返却など）が走らないまま落ちる。
+      request.destroy();
+      throw new TooLargeError(`本文が大きすぎます（上限 ${Math.floor(limit / 1024 / 1024)}MB）`);
+    }
     chunks.push(buffer);
   }
   return Buffer.concat(chunks);

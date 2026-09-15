@@ -680,3 +680,40 @@ test('PDF でないバイト列は、取り込み経路からも入れない', a
   assert.equal(response.status, 400);
   assert.match(await response.text(), /PDF ではない/);
 });
+
+test('新しい版で書かれた書き出しは、保存せずに断る', async () => {
+  // 保存できてしまうと、一覧に出ないのにディスクには在って、開くと 500 になる
+  // 文書ができる。利用者からは見えも消せもしない。
+  const source = await ingest();
+  const html = await (await fetch(`${baseUrl}/api/documents/${source}/export`)).text();
+  const future = html.replace(/"version":\s*\d+/, '"version":999');
+  assert.notEqual(future, html, '前提: 構造バージョンを差し替えられている');
+
+  const before = ((await (await fetch(`${baseUrl}/api/documents`)).json()) as { documents: unknown[] }).documents
+    .length;
+  const response = await fetch(`${baseUrl}/api/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/html' },
+    body: future,
+  });
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /新しい版/);
+
+  const after = ((await (await fetch(`${baseUrl}/api/documents`)).json()) as { documents: unknown[] }).documents
+    .length;
+  assert.equal(after, before, '断ったはずの文書が保存されている');
+});
+
+test('読めない文書も一覧に行として出る（見えも消せもしない状態を作らない）', async () => {
+  const id = await ingest();
+  const { writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  await writeFile(join(dataDir, 'documents', id, 'document.json'), '{ this is not json', 'utf8');
+
+  const list = (await (await fetch(`${baseUrl}/api/documents`)).json()) as {
+    documents: { id: string; title: string }[];
+  };
+  const row = list.documents.find((d) => d.id === id);
+  assert.ok(row, '読めない文書が一覧から消えている');
+  assert.match(row!.title, /開けません|読み込めませんでした/);
+});
