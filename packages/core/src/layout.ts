@@ -72,6 +72,21 @@ const BIN_WIDTH = 2;
  * 実効の比は 1.8 倍。1.5 倍を下限にすれば両方が成り立つ。
  */
 const MIN_GUTTER_ADVANCES = 1.5;
+/**
+ * 同じ下限を、**文字の大きさ（em）**の何倍かでも測る。小さい方を採る。
+ *
+ * 字送りだけで測ると和文で破綻する。和文は 1 文字がほぼ 1em 進むので、
+ * 10pt 本文で下限が 14.9pt になり、`\documentclass[twocolumn]` の既定
+ * `\columnsep` = 10pt がそのまま下回って**段組の検出が丸ごと失敗**する
+ * （実測: 和文 2 段組で再現率 9%、左右の段が 1 行に混ざる）。
+ * 欧文は字送り 4.4pt 前後なので、同じ 10pt が 2.3 倍あって通っていた。
+ *
+ * 一方で em は書記系に依らない。柱間は組版の慣習として 0.6em 以上あり、
+ * 語間は欧文でも 0.25〜0.33em（両端揃えで伸びても 0.5em 前後）、和文の字間は
+ * 0.04em ほどしかない。0.66em は欧文 10pt での従来の下限（字送り 4.4pt × 1.5 =
+ * 6.6pt）とほぼ同じ値なので、欧文の挙動を変えずに和文だけを救える。
+ */
+const MIN_GUTTER_EMS = 0.66;
 /** 字送りが測れないページ（図版だけのページなど）で使う下限（pt）。 */
 const MIN_GUTTER_FLOOR = 5;
 /** 段として認めるための最小幅（文字のある幅に対する比）。 */
@@ -89,6 +104,26 @@ const MIN_COLUMN_RATIO = 0.12;
  * 実測の下限は、2 段組の論文で 55 文字・3 段組で 38 文字ぶんの幅。
  */
 const MIN_COLUMN_CHARS = 15;
+/**
+ * 文末の記号。
+ *
+ * 和文の句点・疑問符・感嘆符を入れておかないと、和文では**どの行も文を閉じていない**
+ * ことになる。見出しの合算点では「直前の行が閉じていなければ段落の途中」という
+ * 減点が常に効いてしまい、番号の無い和文の見出し（`概要`・`おわりに`）が
+ * 本文に落ちて直後の文と癒着する。
+ */
+const SENTENCE_END = /[.!?。！？]$/;
+/** 文が途中で終わっていない（＝続きがある）ことを否定する記号。読点・中黒も含む。 */
+const CLAUSE_END = /[.!?:;,。！？：；、]$/;
+
+/** 柱と見なすための、本文の塊からの隔たり（行送りの何倍か）。 */
+const DETACHED_SPACINGS = 3;
+/** 「文章として読める」と認めるための、空白を除いた最小の文字数。 */
+const PROSE_MIN_CHARS = 25;
+/** 和文で同じことを見るときの最小の文字数。1 文字あたりの情報量が多いので短くてよい。 */
+const PROSE_MIN_CHARS_CJK = 12;
+/** 同じく、小文字の語（和文ならひらがな）の最小個数。数式と表のセルには現れない。 */
+const PROSE_MIN_WORDS = 3;
 
 export interface ColumnRange {
   from: number;
@@ -128,6 +163,22 @@ function charAdvance(chunks: TextChunk[]): number {
     advances.push(chunk.w / chunk.text.length);
   }
   return median(advances);
+}
+
+/**
+ * 文字の大きさ（em）。pdf.js の文字片の高さは版面の文字サイズにほぼ等しい。
+ *
+ * 字送りと違って書記系に依らないので、「柱間かどうか」のように
+ * 和文でも欧文でも同じ尺度で測りたいものの物差しになる。
+ * 断片（3 文字以下）を除くのは charAdvance と同じ理由。
+ */
+function charHeight(chunks: TextChunk[]): number {
+  const heights: number[] = [];
+  for (const chunk of chunks) {
+    if (chunk.text.length < 4 || chunk.h <= 0) continue;
+    heights.push(chunk.h);
+  }
+  return median(heights);
 }
 
 /**
@@ -186,8 +237,12 @@ export function detectColumns(chunks: TextChunk[], tolerance = 0.15): ColumnRang
     Math.floor(totalRows / 2),
   );
 
-  // 空白帯の下限は、絶対値ではなくこのページの字送りとの比で決める（定数の説明を参照）。
-  const minGutter = Math.max(MIN_GUTTER_FLOOR, charAdvance(chunks) * MIN_GUTTER_ADVANCES);
+  // 空白帯の下限は、絶対値ではなくこのページの字送りと文字の大きさから決める。
+  // 小さい方を採るのは、和文（字送りがほぼ 1em）で下限が跳ね上がるのを防ぐため。
+  const minGutter = Math.max(
+    MIN_GUTTER_FLOOR,
+    Math.min(charAdvance(chunks) * MIN_GUTTER_ADVANCES, charHeight(chunks) * MIN_GUTTER_EMS),
+  );
 
   const gutters: ColumnRange[] = [];
   let runStart: number | null = null;
@@ -232,6 +287,62 @@ export function detectColumns(chunks: TextChunk[], tolerance = 0.15): ColumnRang
  * 他のページの結果を借りられる。表や全幅ブロックのあるページだけ 1 段と判定されて
  * 本文が交互に混ざる、という壊れ方を防ぐ。
  */
+
+/**
+ * 全ページの文字片を 1 枚のページに重ねる。x はそのまま、y だけページごとに離す。
+ *
+ * 離すのは「行」の識別（rowKey）がページをまたいで混ざらないようにするため。
+ * x をそのまま使うのは、段の位置を見たいのがまさに x だから。
+ */
+
+/** 文書全体で段を探し直すときの許容（段間をまたいでよい行の割合）。緩い順に試す。 */
+const POOLED_TOLERANCES = [0.15, 0.3, 0.45];
+/** 段組と認めるための、段間をまたがない行の割合。 */
+const MIN_NON_CROSSING_RATIO = 0.5;
+
+/**
+ * その段割りが本当に段組か。許容を緩めて探したときの歯止め。
+ *
+ * 段組なら、ほとんどの行は段間をまたがず、またがない行の中に左段の文字も右段の
+ * 文字もある。1 段組の文書は**全ての行が段間をまたぐ**ので、どれだけ許容を
+ * 緩めてもここで落ちる。ページごとの判定（段抜きの行が少ないこと）とは違う見方を
+ * しているので、段抜きの多い 1 ページ目があっても通る。
+ */
+function looksLikeColumns(ranges: readonly ColumnRange[], chunks: readonly TextChunk[]): boolean {
+  const rows = new Set(chunks.map(rowKey));
+  if (rows.size === 0) return false;
+  const crossing = new Set<number>();
+  for (let i = 0; i + 1 < ranges.length; i++) {
+    const from = ranges[i]!.to;
+    const to = ranges[i + 1]!.from;
+    for (const chunk of chunks) {
+      if (chunk.x < to && chunk.x + chunk.w > from) crossing.add(rowKey(chunk));
+    }
+  }
+  const notCrossing = [...rows].filter((row) => !crossing.has(row));
+  if (notCrossing.length < rows.size * MIN_NON_CROSSING_RATIO) return false;
+  const kept = new Set(notCrossing);
+  const gutterFrom = ranges[0]!.to;
+  const gutterTo = ranges[1]!.from;
+  const hasLeft = chunks.some((c) => kept.has(rowKey(c)) && c.x + c.w <= gutterFrom + 1);
+  const hasRight = chunks.some((c) => kept.has(rowKey(c)) && c.x >= gutterTo - 1);
+  return hasLeft && hasRight;
+}
+
+function stackPages(byPage: Map<number, TextChunk[]>): TextChunk[] {
+  const out: TextChunk[] = [];
+  let offset = 0;
+  for (const [, chunks] of [...byPage.entries()].sort((a, b) => a[0] - b[0])) {
+    let bottom = 0;
+    for (const chunk of chunks) {
+      out.push({ ...chunk, y: chunk.y + offset });
+      bottom = Math.max(bottom, chunk.y + chunk.h);
+    }
+    offset += bottom + 100;
+  }
+  return out;
+}
+
 function resolveColumns(byPage: Map<number, TextChunk[]>): Map<number, ColumnRange[]> {
   const perPage = new Map<number, ColumnRange[]>();
   for (const [page, chunks] of byPage) perPage.set(page, detectColumns(chunks));
@@ -249,20 +360,53 @@ function resolveColumns(byPage: Map<number, TextChunk[]>): Map<number, ColumnRan
       modeCount = count;
     }
   }
-  if (modeCount <= 1) return perPage;
-
-  const samples = [...perPage.values()].filter((r) => r.length === modeCount);
-  const reference: ColumnRange[] = [];
-  for (let i = 0; i < modeCount; i++) {
-    reference.push({
-      from: i === 0 ? -Infinity : median(samples.map((r) => r[i]!.from)),
-      to: i === modeCount - 1 ? Infinity : median(samples.map((r) => r[i]!.to)),
-    });
+  let reference: ColumnRange[] | null = null;
+  if (modeCount > 1) {
+    const samples = [...perPage.values()].filter((r) => r.length === modeCount);
+    reference = [];
+    for (let i = 0; i < modeCount; i++) {
+      reference.push({
+        from: i === 0 ? -Infinity : median(samples.map((r) => r[i]!.from)),
+        to: i === modeCount - 1 ? Infinity : median(samples.map((r) => r[i]!.to)),
+      });
+    }
+  } else {
+    /**
+     * どのページも自力では段を見つけられなかった。**全ページの文字を 1 枚に重ねて**
+     * もう一度だけ探す。
+     *
+     * ページごとの判定は「段間をまたぐ行が全体の 15% 未満」を要求する。
+     * 段抜きの表題・著者ブロック・アブストラクト・全幅の表があるページでは
+     * ここを超えるので、2 段組の論文でも 1 段と判定される。1 ページでも自力で
+     * 見つかれば他のページはそれを借りられるが、**どのページにも段抜きがあると
+     * 借り元が無く、文書全体が 1 段扱い**になって左右の段が 1 行に連結される。
+     *
+     * 実測: アブストラクトに 2 文足しただけ（段抜きが許容 11 行に対して 11 行）で
+     * 再現率 100% → 34%。REVTeX 風の体裁では 31〜49%。
+     * ページを重ねれば、段抜きの行は全ページぶんの行数に薄まって 15% を下回る。
+     * 段の x 位置は 1 本の論文の中でほぼ動かないので、重ねても帯はぼやけない。
+     */
+    const stacked = stackPages(byPage);
+    /**
+     * 許容を段階的に緩める。0.15 のままでは、段抜きが「行数の 15%」をわずかに
+     * 超えるだけで見つからない（実測: 許容 12 行に対して段抜き 12 行）。
+     * 緩めるかわりに、見つかった段割りが本当に段組かどうかを確かめる
+     * （`looksLikeColumns`）。1 段組の文書はどれだけ緩めてもここを通らない —
+     * 全ての行が段間をまたぐため。
+     */
+    for (const tolerance of POOLED_TOLERANCES) {
+      const pooled = detectColumns(stacked, tolerance);
+      if (pooled.length > 1 && looksLikeColumns(pooled, stacked)) {
+        reference = pooled;
+        break;
+      }
+    }
   }
+  if (reference === null) return perPage;
 
   // 段数が足りなかったページだけ、緩い許容で代表値を当てはめられるか確かめる。
   for (const [page, ranges] of perPage) {
-    if (ranges.length >= modeCount) continue;
+    if (ranges.length >= reference.length) continue;
     const chunks = byPage.get(page) ?? [];
     const totalRows = new Set(chunks.map(rowKey)).size;
     if (totalRows === 0) continue;
@@ -365,7 +509,42 @@ export function buildLines(chunks: TextChunk[]): Line[] {
       for (const chunk of list) {
         // 許容量は小さい方の文字高で測る。大きい見出しの許容量で測ると、
         // その少し上に浮いている小さな柱まで同じ行に吸い込んでしまう。
-        const tolerance = Math.max(2, Math.min(chunk.h, current?.height ?? chunk.h) * 0.6);
+        let tolerance = Math.max(2, Math.min(chunk.h, current?.height ?? chunk.h) * 0.6);
+
+        /**
+         * 添字・上付きは、**その行の一部**であって別の行ではない。
+         *
+         * pdf.js は `Q_1` を「Q」と「1」の 2 つの文字片で返す。添字は本文より
+         * 小さく（10pt に対して 7pt）、ベースラインが 4pt ほど下がるので、
+         * 小さい方の文字高で測った許容量（7 × 0.6 = 4.2pt）をわずかに超えて
+         * **独立した行**になっていた。そうなると「短くて字下げされていて機能語も
+         * 文末記号も無い行」に見えるので、別行立ての数式・表として落ちる。
+         * しかも `displayBlock` の塊まとめが、上下の本文行まで道連れにする。
+         * 実測（pdflatex の 2 段組）で、インライン数式を入れただけの同じ文章が
+         * 4 文とも消え、残骸が文法の通る英文に癒着した。
+         *
+         * 許容量は**行の側の文字高**で測り直す。ただし「小さい文字片が行の文字の
+         * 並びに続いている」ときだけ — 少し上に浮いている柱やノンブルは、
+         * 行の x 範囲から離れているので、この条件で外れる。
+         */
+        if (current !== null) {
+          /**
+           * 行の代表的な文字高は `current.height`（＝行を作った文字片の高さ）では
+           * 測れない。上付きが行の先頭に来ると、その 7.4pt が行の高さになり、
+           * 同じ行の添字（7.4pt）が「小さくない」ことになって外れてしまう。
+           * 実測（pdflatex の 2 段組）で `f_m = f^\star + b + \varepsilon_m` の
+           * `⋆` が行を作り、添字 `m` が 2 つとも別の行に落ちて本文から消えた。
+           * これまでに入った文字片のいちばん大きい高さを行の高さとみなす。
+           */
+          const lineHeight = Math.max(...current.chunks.map((c) => c.h));
+          const right = Math.max(...current.chunks.map((c) => c.x + c.w));
+          const left = Math.min(...current.chunks.map((c) => c.x));
+          const adjacent = chunk.x >= left - lineHeight && chunk.x <= right + lineHeight;
+          // 0.65 は実測値。添字だけなら 0.45 で足りるが、`\beta_i^2` のように
+          // 上付きと添字が同居すると添字がさらに下がる（10pt の行で 6.2pt）。
+          if (chunk.h < lineHeight * 0.85 && adjacent) tolerance = Math.max(tolerance, lineHeight * 0.65);
+        }
+
         if (current && Math.abs(chunk.y - current.y) <= tolerance) {
           current.chunks.push(chunk);
           continue;
@@ -435,10 +614,20 @@ const KNOWN_HEADINGS = new Set([
   'results', 'evaluation', 'discussion', 'conclusion', 'conclusions', 'future work',
   'references', 'bibliography', 'acknowledgments', 'acknowledgements',
   'appendix', 'limitations', 'ethics statement', 'broader impact',
+  // 和文の見出し語。欧文と違って大文字という手掛かりが無く、本文と同じ大きさで
+  // 組まれる小見出しもあるので、語そのものを知らないと拾えない。知らなかった頃は
+  // 見出しが本文に落ちて直後の文と癒着していた（実測: `4 実装実装は…`）。
+  '概要', '要旨', 'はじめに', '序論', '緒言', '背景', '関連研究', '従来研究',
+  '提案手法', '手法', '提案', '方法', '実装', '実験', '実験設定', '評価', '結果',
+  '考察', '議論', '制限', '限界', '結論', 'おわりに', 'まとめ', '今後の課題',
+  '参考文献', '文献', '引用文献', '謝辞', '付録', '補遺',
 ]);
 
 /** ここから後ろは本文として扱わない見出し。 */
-const TAIL_HEADINGS = new Set(['references', 'bibliography', 'acknowledgments', 'acknowledgements']);
+const TAIL_HEADINGS = new Set([
+  'references', 'bibliography', 'acknowledgments', 'acknowledgements',
+  '参考文献', '文献', '引用文献', '謝辞',
+]);
 
 /**
  * 付録の始まりらしい見出しか。
@@ -484,8 +673,12 @@ function isCaption(text: string): boolean {
  * まるごと消えていた。`[12]` の形も、参考文献らしい手掛かり（西暦・掲載誌・
  * ページ番号）が同じ行にあるときだけ furniture にする。無条件に落とすと、
  * "[12] Recent work extends it to long documents." のような本文が消える。
+ *
+ * 続く 1 文字は `\p{Lu}` だけでなく `\p{Lo}`（大文字・小文字の区別が無い文字）も見る。
+ * 和文誌では引用先も和文で、`[1] 佐藤 花子 …` の形になる。欧文の大文字しか
+ * 見ていなかったときは、和文の参考文献がまるごと本文に混ざっていた。
  */
-const REFERENCE_ENTRY = /^\[\d+\]\s*\p{Lu}/u;
+const REFERENCE_ENTRY = /^\[\d+\]\s*[\p{Lu}\p{Lo}]/u;
 const REFERENCE_SHAPE = /\b(?:19|20)\d{2}\b|\bIn\s+Proc|\barXiv|\bJournal\b|\bpp?\.\s*\d|\bpages?\s+\d|\d+\(\d+\):\d/;
 
 /**
@@ -517,25 +710,47 @@ function looksLikeFormula(text: string): boolean {
   const body = text.replace(EQUATION_NUMBER, '');
   if (body.length < 3) return false;
   if (FUNCTION_WORDS.test(body)) return false;
-  if (/[.!?]$/.test(body)) return false;
+  if (SENTENCE_END.test(body)) return false;
   const operators = (body.match(/[=+\-*/^_<>|∑∏∫√≈≤≥±×·≠∈∀∃]/gu) ?? []).length;
   if (operators === 0) return false;
   const letters = (body.match(/\p{L}/gu) ?? []).length;
   return letters / body.length < 0.6;
 }
 
-/** 先頭の章番号（"3.1 Ablation" → [3, 1]）。 */
+/**
+ * 付録の見出し（"A Proof of the Obstruction" / "B.1 Details"）。
+ *
+ * 本体の節は数字で始まるが、`\appendix` の後ろは英字 1 文字になる。数字しか見ていない
+ * 頃は、付録の見出しが本文として扱われ、**付録の中身がその見出しと 1 文に癒着**して
+ * いた（実測: "A Proof of the Obstruction Assume the two calibration conditions …"）。
+ * 単独ではただの "A …" と区別が付かないので、見出しの合算点の 1 点ぶんとして使う。
+ */
+const APPENDIX_HEADING = /^[A-Z](?:\.\d+)*\.?\s+\p{Lu}/u;
+
+/**
+ * 先頭の章番号（"3.1 Ablation" → [3, 1]）。
+ *
+ * 番号の後ろは `\p{Lu}`（欧文の大文字）だけでなく `\p{Lo}`（大文字・小文字の
+ * 区別が無い文字）も見る。和文の見出しは `4 実装` のように漢字が続くので、
+ * 大文字しか見ていなかったときは番号つきの見出しがすべて本文に落ちていた。
+ */
 function headingNumber(text: string): number[] | null {
-  const match = /^(\d+(?:\.\d+)*)\.?\s+\p{Lu}/u.exec(text);
+  const match = /^(\d+(?:\.\d+)*)\.?\s+[\p{Lu}\p{Lo}]/u.exec(text);
   if (!match) return null;
   return match[1]!.split('.').map((part) => Number.parseInt(part, 10));
 }
 
+/**
+ * 見出しの語だけを取り出す（番号と約物を落とす）。
+ *
+ * 残す文字に漢字・かな・長音符を含めるのを忘れると、和文の見出しが空文字になって
+ * `KNOWN_HEADINGS` の照合が必ず外れる（`4 実装` → `実装` → `''`）。
+ */
 function bareHeading(text: string): string {
   return text
     .toLowerCase()
     .replace(/^\d+(\.\d+)*\.?\s*/, '')
-    .replace(/[^a-z ]/g, '')
+    .replace(/[^a-z \p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]/gu, '')
     .trim();
 }
 
@@ -651,6 +866,19 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
    * ページをまたぐ文が 2 つ、柱を挟んで真っ二つに壊れていた。
    */
   const edgeCandidate = new Set<number>();
+  /**
+   * そのうち、本文の塊から**3 行ぶん以上**離れているもの。
+   *
+   * 柱は天地の余白に組まれるので、本文の塊とはそれだけ離れる。段の先頭に来る
+   * 節見出しは本文と 1〜2 行ぶんしか離れないので、ここで見分けられる。
+   *
+   * 「同じ柱が複数ページに出ていること」だけを条件にしていたときは、
+   * 1 ページ目が plain（柱なし）の 2 ページ論文で柱が 1 回しか現れず、落とせずに
+   * **本文の文の途中へ挟まっていた**（実測: `ページの変` ＋ `情報処理学会論文誌` ＋
+   * `わり目で…`）。ページをまたぐ文の真ん中に別の文字列が入るので、
+   * 読む側には「原文がそう書いてある」ようにしか見えない。
+   */
+  const detachedFromBody = new Set<number>();
   const sameRow = (a: Line, b: Line): boolean =>
     Math.abs(a.y - b.y) <= Math.max(2, Math.min(a.height, b.height) * 0.6);
   for (const [page, pageLines] of byPage) {
@@ -672,6 +900,10 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       const next = sorted[step === 1 ? band.length : sorted.length - 1 - band.length];
       if (next !== undefined && Math.abs(next.y - band[0]!.y) <= spacing * 1.2) continue;
       for (const line of band) edgeCandidate.add(line.index);
+      // 本文の塊から 3 行ぶん以上離れているか（説明は detachedFromBody を参照）。
+      if (next !== undefined && Math.abs(next.y - band[0]!.y) > spacing * DETACHED_SPACINGS) {
+        for (const line of band) detachedFromBody.add(line.index);
+      }
     }
   }
 
@@ -783,7 +1015,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     if (line.y - previous.y > spacing * 1.3) return false;
     // 右端に届いていない行は段落の最終行。そのあとにキャプションが来るのは普通。
     if (!reachesRight(previous)) return false;
-    return !/[.!?]$/.test(previous.text);
+    return !SENTENCE_END.test(previous.text);
   };
 
   /** 図表キャプションの**先頭行**か。段落の途中に現れた参照は除く。 */
@@ -822,7 +1054,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     let blockHeight = 0;
     let blockKind: NonBodyKind = 'caption';
     let previous: Line | undefined;
-    const stillOpen = (line: Line): boolean => reachesRight(line) || !/[.!?]$/.test(line.text);
+    const stillOpen = (line: Line): boolean => reachesRight(line) || !SENTENCE_END.test(line.text);
     for (const line of ordered) {
       const starts = startsCaption(line) || startsReference(line);
       const spacing = stats.get(line.page)?.spacing ?? 13;
@@ -868,6 +1100,29 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
    *   2. 段の右端に届かない（右にぶら下がる式番号のぶんは差し引いて測る）
    *   3. 機能語も文末記号も持たない（"the" や "of" が 1 つでもあれば本文）
    */
+  /**
+   * その行が「文章」として読めるか。
+   *
+   * 落としてよい行（別行立ての数式・表のセル・擬似コード）と、落としてはいけない行
+   * （インライン数式が入っているだけの本文）を分ける、最後の歯止め。
+   *
+   * ML・統計・物理の論文は、技術的な段落のほぼ全行にギリシャ文字か添字が入る。
+   * 「数式らしさ」や「版面」だけで落とすと本文が丸ごと消える。実測（pdflatex の
+   * 2 段組）で、同じ文章にインライン数式を入れただけで 4 文すべてが消え、
+   * 残骸が `2 Same prose with inline Greek which proves the claim.` という
+   * **文法の通る英文**に癒着した。もっともらしいので、訳を読む側には
+   * 「論文がそう書いてある」としか見えない。消える方がまだ気付ける。
+   *
+   * 見るのは版面と語の両方:
+   *   - 機能語がある（the / of / and …）。数式にも表のセルにもまず無い。
+   *   - 小文字の語が 3 つ以上ある。数式と表は大文字・記号・数字が多い。
+   *   - 段の右端まで届いている（＝組版が折り返しただけの行）か、文末記号で閉じている。
+   *     別行立ての数式も表のセルも擬似コードも、段の右端には届かない。
+   */
+  /** 文章として読める行か（定義は looksLikeProse を参照）。 */
+  /** 文章として読める行か。定義は looksLikeProse（採録率の物差しと同じもの）。 */
+  const readsAsProse = (line: Line): boolean => looksLikeProse(line, reachesRight(line));
+
   const displayBlock = new Set<number>();
   {
     const isDisplay = (line: Line): boolean => {
@@ -880,7 +1135,11 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       const stripped = line.text.replace(EQUATION_NUMBER, '').trim();
       if (stripped.length === 0) return false;
       if (FUNCTION_WORDS.test(stripped)) return false;
-      if (/[.!?]$/.test(stripped)) return false;
+      if (SENTENCE_END.test(stripped)) return false;
+      // 文章として読める行は、組版が折り返した本文。別行立ての要素ではありえない。
+      // 「段の右端に届く」だけを条件にしてはいけない — 別行立ての数式も、
+      // 右にぶら下がる式番号のぶんで段の右端まで届く。
+      if (readsAsProse(line)) return false;
       if (line.left - left <= Math.max(bodyHeight * 1.5, width * 0.08)) return false;
       // 幅は式番号を除いた実効幅で測る。右端にぶら下がる "(1)" のせいで、
       // 別行立ての数式が段幅いっぱいに見えてしまう。
@@ -914,6 +1173,10 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
            * 本文になり、次の文と 1 枚のカードに同居していた。
            * 段幅の 70% という「短さ」の門も、右にぶら下がる式番号のぶんで通り抜けている。
            */
+          // 文章として読める行は、塊の続きではなく本文。ここで止める。
+          // この歯止めが無いと、添字が独立した行になった数ページぶんの本文が
+          // 「詰まって積まれている」という理由だけで道連れに落ちる。
+          if (readsAsProse(line)) break;
           const stacked = gap < spacing * 0.8;
           // 本文行は段の左端に揃うので、字下げの揃った行だけが表の続きになりうる。
           if (!stacked && Math.abs(line.left - anchor.left) > 2) break;
@@ -1016,9 +1279,25 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     // 「端にある行」だけで読み飛ばすと、表題そのものが素通りして本文に残る。
     const repeatedOn = repeated.get(line.text.replace(/\d+/g, '#'))?.size ?? 0;
     if (/^\d{1,4}$/.test(line.text) || (edgeCandidate.has(line.index) && repeatedOn >= 2)) continue;
-    if (/[.!?]["'’”)\]]?$/.test(line.text)) break;
+    // 文末記号は和文（。！？）も見る。ここを欧文だけにしていると、
+    // 和文のアブストラクトが前付として丸ごと落ちる。
+    if (/[.!?。！？]["'’”)\]）」』]?$/.test(line.text)) break;
     frontMatterLines.add(line.index);
   }
+
+  /**
+   * この行が、版面の規則だけで**すでに付物と分かっている**か。
+   *
+   * 見出しの合算点で「直前の行が文を閉じていない＝段落の途中」を見るときに要る。
+   * 直前が付物なら、そこに続いている文は無いので、その減点は当たらない。
+   */
+  const knownFurniture = (index: number): boolean =>
+    inTail.has(index) ||
+    footnote.has(index) ||
+    continuation.has(index) ||
+    frontMatterLines.has(index) ||
+    displayBlock.has(index) ||
+    pseudocode.has(index);
 
   return lines.map((original) => {
     // 肩付きの脚注記号を外した写しで判定する。記号が本文の文字列に残ると、
@@ -1057,7 +1336,14 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     if (startsCaption(line)) return drop('caption');
     if (startsReference(line)) return drop('reference');
     // 複数ページで同じ柱が出ていれば付物。1 ページだけの文書では判定できない。
-    if (nearEdge && edgeCandidate.has(line.index) && pageCount >= 2 && seenOn >= 2) {
+    // 1 回しか出ない柱（1 ページ目が plain の 2 ページ論文）は、本文の塊から
+    // 離れていることで見分ける。前付は種類がはっきりしているのでここでは扱わない。
+    if (
+      nearEdge &&
+      edgeCandidate.has(line.index) &&
+      pageCount >= 2 &&
+      (seenOn >= 2 || (detachedFromBody.has(line.index) && !frontMatterLines.has(line.index)))
+    ) {
       return drop(isPageNumber ? 'pageNumber' : 'runningHead');
     }
     // 端に出る数字だけの行はノンブル。1 ページでも落としてよい。
@@ -1090,7 +1376,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     const effectiveWidth =
       line.text.length === 0 ? 0 : ((line.right - line.left) * stripped.length) / line.text.length;
     const isShort = width > 0 && effectiveWidth < width * 0.7;
-    const endsOpen = !/[.!?:;,]$/.test(line.text);
+    const endsOpen = !CLAUSE_END.test(line.text);
 
     // 擬似コードの行。版面では本文と見分けが付かないので、行番号の形で決める
     // （説明は PSEUDOCODE_LINE を参照）。数式の判定より先に見る — 塊の中の行が
@@ -1118,12 +1404,21 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     // 見出しは弱い手掛かりの合算で決める。単独の規則には必ず反例がある
     // （番号だけを見ると箇条書きが見出しになり、文字高だけを見ると
     //  参考文献の多い論文で本文が見出しになる）。
-    if (isShort && endsOpen && line.text.length <= 80) {
+    /**
+     * 幅の門は「短いこと」だけでは足りない。段幅ちょうどまで伸びた見出しがある
+     * （実測: 付録の見出し `A Proof of the Obstruction` が段幅の 71%。門は 70%）。
+     * 本文より明らかに大きい文字で組まれていれば、幅に関わらず見出しの候補にする —
+     * 本文の行がその大きさで組まれることはない。落ちると見出しが次の文と癒着し、
+     * 付録の中身が見出しごと 1 枚のカードに入る。
+     */
+    const headingCandidate = isShort || line.height > bodyHeight * 1.12;
+    if (headingCandidate && endsOpen && line.text.length <= 80) {
       const previous = previousLine.get(line.index);
       let score = 0;
       if (KNOWN_HEADINGS.has(bareHeading(line.text))) score += 2;
       if (line.height > bodyHeight * 1.12) score += 1;
       if (monotonic.has(line.index)) score += 1;
+      if (APPENDIX_HEADING.test(line.text)) score += 1;
       if (previous && line.y - previous.y > pageStats.spacing * 1.4) score += 1;
       // 直前が文として閉じていなければ段落の途中。見出しではなく箇条書きの可能性が高い。
       //
@@ -1134,12 +1429,185 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       // `1.2 Cost of the Selection Pass` が -1 で本文に落ち、次の文と癒着していた。
       // 本文と同じ大きさの小見出し（IEEE / ACL 系の体裁）では文字高の +1 が無いので、
       // この -1 がそのまま判定をひっくり返す。
-      else if (previous && !/[.!?]$/.test(previous.text)) score -= 1;
+      //
+      // 直前の行が**本文でない**ときも、この減点は当たらない。表題・著者・所属や
+      // 図表キャプション・参考文献は文末記号で終わらないが、そこに「続いている文」は
+      // 無い。実測（和文 1 段組）で、著者行の直後に来た `概要` が -1 で本文に落ち、
+      // 要旨の 1 文目と 1 文に癒着していた（`…文境界の推定概要本稿では、…`）。
+      else if (previous && !knownFurniture(previous.index) && !SENTENCE_END.test(previous.text)) score -= 1;
       if (score >= 2) return { ...line, role: 'heading' as const };
     }
 
     return { ...line, role: 'body' as const };
   });
+}
+
+
+
+/**
+ * 「文章として読める行か」の判定。
+ *
+ * 落としてよい行（別行立ての数式・表のセル・擬似コード）と、落としてはいけない行
+ * （インライン数式が入っているだけの本文）を分ける、最後の歯止め。
+ * **落とさないための歯止めと、失われた量を数える物差しが、同じ 1 つの定義を使う。**
+ * 別々に書くと、直したつもりの穴が計測をすり抜ける。
+ *
+ * ML・統計・物理の論文は、技術的な段落のほぼ全行にギリシャ文字か添字が入る。
+ * 「数式らしさ」や「版面」だけで落とすと本文が丸ごと消える。実測（pdflatex の
+ * 2 段組）で、同じ文章にインライン数式を入れただけで 4 文すべてが消え、残骸が
+ * `2 Same prose with inline Greek which proves the claim.` という**文法の通る
+ * 英文**に癒着した。もっともらしいので、訳を読む側には「論文がそう書いてある」と
+ * しか見えない。消える方がまだ気付ける。
+ *
+ * 見るのは版面と語の両方:
+ *   - 機能語がある（the / of / and …）。数式にも表のセルにもまず無い。
+ *   - 小文字の語が 3 つ以上ある。数式と表は大文字・記号・数字が多い。
+ *   - 段の右端まで届いている（＝組版が折り返しただけの行）か、文末記号で閉じている。
+ *     別行立ての数式も表のセルも擬似コードも、段の右端には届かない。
+ */
+function looksLikeProse(line: Line, reachesRight: boolean): boolean {
+  const text = line.text;
+  const squeezed = text.replace(/\s+/g, '');
+  if (!(reachesRight || SENTENCE_END.test(text.trim()))) return false;
+
+  // 欧文: 機能語があり、小文字の語が 3 つ以上ある。
+  if (
+    squeezed.length >= PROSE_MIN_CHARS &&
+    FUNCTION_WORDS.test(text) &&
+    (text.match(/\b\p{Ll}{2,}\b/gu) ?? []).length >= PROSE_MIN_WORDS
+  ) {
+    return true;
+  }
+
+  /**
+   * 和文: ひらがなが 3 文字以上ある。
+   *
+   * 和文には機能語を空白で切り出す手掛かりも大文字小文字も無いので、欧文の条件では
+   * どの和文行も「文章ではない」ことになり、落としてはいけない行を守る歯止めも、
+   * 失われた量を数える物差しも、和文では一度も働かない。
+   * ひらがなは助詞と活用語尾にしか使わない — 別行立ての数式にも表のセルにも
+   * まず現れないので、これだけで本文かどうかが決まる。
+   * 1 文字の情報量が多いので、長さの下限は欧文より短くてよい。
+   */
+  if (
+    squeezed.length >= PROSE_MIN_CHARS_CJK &&
+    (text.match(/\p{Script=Hiragana}/gu) ?? []).length >= PROSE_MIN_WORDS
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 段ごとの代表的な右端を取り直して、「その行は段の右端に届いたか」を返す関数を作る。
+ *
+ * classifyLines の中にも同じ判定がある。こちらは行だけを受け取る外向きの入口
+ * （assessCoverage）のために作り直す — assessReadingOrder も同じやり方をしている。
+ */
+function reachesRightOf(lines: readonly ClassifiedLine[]): (line: Line) => boolean {
+  const rights = new Map<string, number[]>();
+  const widths = new Map<string, number[]>();
+  for (const line of lines) {
+    const key = `${line.page}:${line.column}`;
+    const r = rights.get(key);
+    if (r) r.push(line.right);
+    else rights.set(key, [line.right]);
+    const w = widths.get(key);
+    if (w) w.push(line.right - line.left);
+    else widths.set(key, [line.right - line.left]);
+  }
+  const right = new Map<string, number>();
+  for (const [key, values] of rights) right.set(key, percentile(values, 0.05));
+  const width = new Map<string, number>();
+  for (const [key, values] of widths) width.set(key, percentile(values, 0.1));
+  return (line: Line): boolean => {
+    const key = `${line.page}:${line.column}`;
+    const edge = right.get(key);
+    const span = width.get(key);
+    if (edge === undefined || span === undefined || span <= 0) return false;
+    return line.right >= edge - Math.max(2, span * 0.03);
+  };
+}
+
+/** これを下回ったら「本文を落としている疑い」を申告する。 */
+const MIN_COVERAGE = 0.98;
+
+/**
+ * 版面の規則だけで落とした種類。ここに入るものは「本文かもしれない」。
+ *
+ * 柱・ノンブル・キャプション・参考文献・脚注・前付は、位置や書き出しの形という
+ * **構造の手掛かり**で決めているので、落としたことに確信がある。
+ * 数式・表・擬似コードは版面の見え方だけで決めているので、外れることがある。
+ */
+const UNCERTAIN_KINDS = new Set<NonBodyKind>(['formula', 'table', 'other']);
+
+/**
+ * 「何が失われたかを数える」物差し。
+ *
+ * `assessMergedColumns` は**生き残った本文行**を走査するので、落とされた行は
+ * 検出器の入力に一度も入らない。消去は原理的に検出できない。だから別建てで、
+ * 「行になった文字のうち、行き先の説明が付いた割合」を測る。
+ *
+ * 誤検出を出さないことを最優先にしてある。正しく落としているもの（参考文献・柱・
+ * ノンブル・図表キャプション・脚注・前付）は失われた側に数えない。版面の規則だけで
+ * 落とした行も、**文章として読めなければ**数えない（別行立ての数式・表のセル・
+ * 擬似コードは、落として正しい）。数えるのは「文章として読めるのに、数式や表として
+ * 落とした行」だけ。
+ *
+ * 実測: 正しく取れている論文 5 本（1 段組・2 段組・擬似コード・定理・アルゴリズム）で
+ * いずれも 100.0%。本文が消えていた 3 本で 77.7% / 70.5% / 93.9%。
+ * 閾値 98% は、この間に十分な余裕をもって引ける位置。
+ */
+export function assessCoverage(lines: readonly ClassifiedLine[]): {
+  coverage: number;
+  coverageRisk: 'low' | 'high';
+  coverageReason: string;
+} {
+  const squeeze = (text: string): number => text.replace(/\s+/g, '').length;
+  const reaches = reachesRightOf(lines);
+
+  let total = 0;
+  let lost = 0;
+  const pages = new Set<number>();
+  for (const line of lines) {
+    const size = squeeze(line.text);
+    total += size;
+    if (line.role !== 'furniture') continue;
+    if (!UNCERTAIN_KINDS.has(line.kind ?? 'other')) continue;
+    if (!looksLikeProse(line, reaches(line))) continue;
+    lost += size;
+    pages.add(line.page);
+  }
+
+  const coverage = total === 0 ? 1 : (total - lost) / total;
+  if (coverage >= MIN_COVERAGE) {
+    return {
+      coverage,
+      coverageRisk: 'low',
+      coverageReason:
+        '本文として読める行を数式や表として落とした形跡はありませんでした（欠落が無いことの保証ではありません）。',
+    };
+  }
+  const shown = [...pages].sort((a, b) => a - b);
+  const list = shown.slice(0, 5).join(', ') + (shown.length > 5 ? ' ほか' : '');
+  return {
+    coverage,
+    coverageRisk: 'high',
+    coverageReason:
+      `${list} ページで、文章として読める行を数式や表として落としている疑いがあります` +
+      `（本文の ${Math.round((1 - coverage) * 100)}% 相当、${lost} 文字）。` +
+      '消えた文が残りの文と繋がって、もっともらしい別の文になっている可能性があります。原文と PDF を見比べてください。',
+  };
+}
+
+/**
+ * 解析結果の確からしさ。読み順の崩れと、本文の欠落を別々に見る。
+ *
+ * 名前が `assessReadingOrder` のままなのは、呼び出し側（sentences.ts）から見て
+ * 「解析の自己申告を作る入口」がここ 1 つだから。中身は 2 本の独立した物差し。
+ */
+export function assessReadingOrder(lines: readonly ClassifiedLine[]): StructureQuality {
+  return { ...assessMergedColumns(lines), ...assessCoverage(lines) };
 }
 
 /**
@@ -1207,13 +1675,16 @@ export function guessTitleFromChunks(chunks: TextChunk[]): string | null {
  * 「同じ位置で割れている行」と認める空白の幅を、字送りの何倍で測るか。
  *
  * 左右の段が 1 行に連結されると、その行の中に**柱間そのものの幅の空白**が残る。
- * 語間は両端揃えで伸びても字送りの 1 倍前後なので、1.6 倍あれば語間ではない。
+ * 語間は両端揃えで伸びても字送りの 1 倍前後なので、1.35 倍あれば語間ではない。
+ * 1.6 倍にしていたときは、柱間 6pt（字送りの 1.45 倍）の版で連結が起きているのに
+ * 申告が low のまま、再現率 24% で黙って通っていた。1.35 に下げても、実測した
+ * 26 本の PDF（1 段組・両端揃えで語間を極端に伸ばした版を含む）で誤って鳴ったものは無い。
  *
  * ここを厳しく（3 倍などに）すると、`\columnsep` 既定の 10pt（10pt 本文なら
  * 字送りの 2.3 倍）が拾えなくなる — arXiv のプレプリントで最も多い値なので、
  * いちばん見つけたい崩れを取り逃がす。緩めたぶんは「同じ x に何行そろうか」で担保する。
  */
-const MERGED_GAP_ADVANCES = 1.6;
+const MERGED_GAP_ADVANCES = 1.35;
 /** 空白の位置をまとめる粒度（pt）。両端揃えで柱間の位置は数 pt 揺れる。 */
 const MERGED_GAP_BIN = 4;
 /**
@@ -1243,7 +1714,7 @@ const MERGED_GAP_LINES = 8;
  *   - 空白の両側に十分な長さの文字があること（行末の字下げや式番号を数えない）
  *   - 空白の位置が版面の中ほどにあること（段間は真ん中付近にしか来ない）
  */
-export function assessReadingOrder(lines: readonly ClassifiedLine[]): StructureQuality {
+function assessMergedColumns(lines: readonly ClassifiedLine[]): StructureQuality {
   const clean: StructureQuality = {
     readingOrderRisk: 'low',
     reason: '段の連結など、読み順が崩れている痕跡は見つかりませんでした（崩れが無いことの保証ではありません）。',

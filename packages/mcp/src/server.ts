@@ -84,9 +84,18 @@ function makeProgressWatcher() {
 function fallbackCaveat(document: PaperDocument): string | undefined {
   if (document.structure.parser === 'grobid') return undefined;
   const parts: string[] = [];
-  if (document.structure.quality?.readingOrderRisk === 'high') {
+  const quality = document.structure.quality;
+  if (quality?.coverageRisk === 'high') {
+    // 消えた本文は読み順の検査に映らない（生き残った行しか見ないため）ので別建て。
+    // 残骸が文法の通る英文に癒着すると、訳す側にも「そう書いてある」としか見えない。
     parts.push(
-      `読み順が崩れている疑いがあります（${document.structure.quality.reason}）。` +
+      `本文の一部が取り出せていない疑いがあります（${quality.coverageReason ?? ''}）。` +
+        '欠けた文はそもそもこの一覧に出てこないので、訳す前に PDF と突き合わせてください。',
+    );
+  }
+  if (quality?.readingOrderRisk === 'high') {
+    parts.push(
+      `読み順が崩れている疑いがあります（${quality.reason}）。` +
         '原文そのものが壊れている可能性があるので、訳す前に原文を確かめてください。',
     );
   }

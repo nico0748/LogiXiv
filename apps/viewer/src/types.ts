@@ -80,7 +80,13 @@ export interface ExportPayload {
        */
       nonBody?: NonBodySentence[];
       /** 解析の確からしさ。`high` は読み順が壊れている痕跡が見つかったという意味。 */
-      quality?: { readingOrderRisk: 'low' | 'high'; reason: string };
+      quality?: {
+        readingOrderRisk: 'low' | 'high';
+        reason: string;
+        coverage?: number;
+        coverageRisk?: 'low' | 'high';
+        coverageReason?: string;
+      };
     };
     annotations: {
       translations: Record<string, Translation>;

@@ -1,0 +1,40 @@
+{
+  "expectedSentences": [
+    "Deep ensembles are widely used to report predictive uncertainty.",
+    "We show that a single rescaling of the ensemble variance cannot calibrate two shifts at once.",
+    "The obstruction is the shared bias term, which the ensemble spread never sees.",
+    "An ensemble is a collection of predictors f1 through fM fit independently from the same procedure.",
+    "Each fm decomposes into the Bayes predictor f ⋆, a shared bias b, and member noise εm.",
+    "The term b is the component of the error common to all members, and εm is the member noise.",
+    "The ensemble mean removes the second term at a rate of 1/M and leaves the first untouched.",
+    "We assume access to a small labelled sample S of size n drawn from the deployment distribution.",
+    "The reported variance is αv for a single scalar α fitted on S.",
+    "Here v denotes the empirical variance of the member predictions at the query point.",
+    "Suppose two shifts Q1 and Q2 induce shared biases with norms β1 and β2 and identical member variance v.",
+    "Calibration under Qi requires the reported variance αv to equal the true error under that shift.",
+    "The true error is the squared bias norm plus the member term v/M , so α is pinned by βi and v.",
+    "Solving for α gives a distinct value for each i, and since the norms differ the two values differ.",
+    "Hence no single scalar calibrates both shifts, which proves the claim.",
+    "The true squared error of the ensemble prediction at a point is given below, whereas the ensemble variance estimates only the second term.",
+    "The first term is invisible to the ensemble no matter how many members we add to it.",
+    "This is the whole of the problem, and it can be stated in a single line of text.",
+    "A temperature fitted on one shift will be wrong on the next by a factor that grows with the bias gap.",
+    "We measured the effect on three benchmarks and found the reported variance short by a factor of four.",
+    "The gap widens as M grows, because the member noise shrinks while the bias does not.",
+    "Reporting the ensemble spread alone is therefore misleading under shift, and we recommend against it.",
+    "We close by noting that the argument is not specific to deep networks.",
+    "Any procedure whose members share a systematic error has the same obstruction.",
+    "Assume the two calibration conditions hold at the same scalar and subtract them.",
+    "The member variance cancels because it is identical under both shifts by assumption.",
+    "What remains is an equality between the two squared bias norms, contradicting the assumption that they differ.",
+    "The argument uses only the calibration conditions and no property of the predictor class."
+  ],
+  "expectedNonBody": [
+    "Ensemble Variance Does Not Calibrate Under Shift",
+    "Jane Q. Doe",
+    "Reported versus true error for three shifts.",
+    "Preprint. Under review.",
+    "[1]",
+    "[2]"
+  ]
+}

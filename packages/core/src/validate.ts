@@ -237,9 +237,16 @@ function sanitizeQuality(value: unknown): StructureQuality | undefined {
   if (!isRecord(value)) return undefined;
   const reason = str(value['reason'], 500);
   if (reason === null) return undefined;
+  const coverage = finiteNumber(value['coverage']);
+  const coverageReason = str(value['coverageReason'], 500);
   return {
     readingOrderRisk: value['readingOrderRisk'] === 'high' ? 'high' : 'low',
     reason,
+    ...(coverage === null ? {} : { coverage: Math.min(1, Math.max(0, coverage)) }),
+    ...(value['coverageRisk'] === 'high' || value['coverageRisk'] === 'low'
+      ? { coverageRisk: value['coverageRisk'] }
+      : {}),
+    ...(coverageReason === null ? {} : { coverageReason }),
   };
 }
 

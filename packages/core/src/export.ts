@@ -185,10 +185,14 @@ export function buildExportHtml(input: BuildExportInput): string {
   });
   // 読み順が崩れている疑いは、受け取った側がいちばん先に知るべきこと。
   // 訳が正しくても、その訳が付いている原文が壊れていることがある。
+  const quality = input.document.structure.quality;
   const riskLine =
-    input.document.structure.quality?.readingOrderRisk === 'high'
-      ? `<p class="lx-banner lx-risk">読み順に崩れの疑い: ${escapeHtml(input.document.structure.quality.reason)}</p>`
-      : '';
+    (quality?.readingOrderRisk === 'high'
+      ? `<p class="lx-banner lx-risk">読み順に崩れの疑い: ${escapeHtml(quality.reason)}</p>`
+      : '') +
+    (quality?.coverageRisk === 'high'
+      ? `<p class="lx-banner lx-risk">本文の欠落の疑い: ${escapeHtml(quality.coverageReason ?? '')}</p>`
+      : '');
   const progressLine = escapeHtml(
     `${stats.uniqueSentences} 文中 ${stats.translated} 文訳済み` +
       (stats.skipped > 0 ? `・${stats.skipped} 文は訳さない判断` : '') +

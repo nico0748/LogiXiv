@@ -88,7 +88,15 @@ export interface PaperDocument {
      * 解析結果の確からしさ。`high` は「読み順が壊れている痕跡が実際に見つかった」。
      * `low` は痕跡が無かっただけで、崩れが無いことの保証ではない。
      */
-    quality?: { readingOrderRisk: 'low' | 'high'; reason: string };
+    quality?: {
+      readingOrderRisk: 'low' | 'high';
+      reason: string;
+      /** 行になった文字のうち、行き先の説明が付いた割合（0〜1）。 */
+      coverage?: number;
+      /** 本文が黙って落ちている疑い。読み順とは別建て（消えた行は読み順の検査に入らない）。 */
+      coverageRisk?: 'low' | 'high';
+      coverageReason?: string;
+    };
   };
   annotations: {
     translations: Record<string, Translation>;

@@ -112,6 +112,28 @@ function toPlainText(input: string, citeNumber: (key: string) => number): string
   text = text.replace(/\\cite\{([^}]*)\}/g, (_all, keys: string) =>
     `[${keys.split(',').map((k) => citeNumber(k.trim())).join(', ')}]`);
 
+  /**
+   * `\m{組版する TeX}{PDF に出る字面}` … インライン数式。
+   *
+   * ML・統計・物理の論文は技術的な段落のほぼ全行にギリシャ文字か添字が入る。
+   * 標本にそれが無いと、いちばん重い壊れ方（数式を含む本文行を丸ごと落とす）が
+   * 計測の網から漏れる。かといって `$\beta_1$` から字面を機械的に導くのは無理なので、
+   * **原稿の側に「紙面にはこう出る」と書いてもらう**。
+   *
+   * 第 2 引数は解析器の出力から写してはいけない（写すと解析器のバグが正解に写る）。
+   * build-real-papers.ts が pdftotext（poppler。この道具とは独立した実装）で
+   * 照合するので、食い違えば組版の時点で落ちる。
+   */
+  for (let guard = 0; guard < 200; guard++) {
+    const at = text.indexOf('\\m{');
+    if (at === -1) break;
+    const first = braced(text, at + 2);
+    if (first === null) break;
+    const second = braced(text, first.end);
+    if (second === null) throw new Error(`\\m{...}{...} の 2 つ目の引数がありません: ${input}`);
+    text = text.slice(0, at) + second.body + text.slice(second.end);
+  }
+
   // 単一の記号だけのインライン数式（$d$ など）。中身をそのまま出す。
   // 添字や上付きを含む形は PDF 上の字面が自明でないので、ここでは受け付けない。
   text = text.replace(/\$([A-Za-z0-9 ]+)\$/g, '$1');

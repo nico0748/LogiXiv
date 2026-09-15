@@ -670,6 +670,15 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
             読み順に崩れの疑い
           </span>
         )}
+        {/* 読み順の検査は「生き残った行」しか見ないので、消えた本文は原理的に映らない。
+            消えたことが分かるだけで読み方は変えられる（PDF を見に行く、GROBID を立てる）。
+            黙って落ちるのがいちばん危ない — 残骸が文法の通る英文に癒着すると、
+            Claude はもっともらしい日本語に訳し、読者には「そう書いてある」としか見えない。 */}
+        {paper.structure.quality?.coverageRisk === 'high' && (
+          <span className="badge is-danger" title={paper.structure.quality.coverageReason}>
+            本文の欠落の疑い
+          </span>
+        )}
         {/* 訳は「異なり文」に付くので分母はその数。ところがサイドバーには
             延べで並ぶので、数が合わないように見える（202 文と言いながら 273 行）。
             食い違うときだけ、延べの数も一緒に出して種明かしをする。 */}

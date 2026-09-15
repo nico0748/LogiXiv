@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildLines, classifyLines, detectColumns } from '../src/layout.ts';
+import { assessCoverage, buildLines, classifyLines, detectColumns } from '../src/layout.ts';
 import { buildSentencesFromChunks, splitIntoSentences, type TextChunk } from '../src/sentences.ts';
 import type { PageSize } from '../src/types.ts';
 
@@ -697,4 +697,262 @@ test('付物にした行を 1 行も取りこぼさない', () => {
   for (const line of dropped) {
     assert.ok(kept.includes(line.text.trim().slice(0, 12)), `落とした行が行方不明: ${JSON.stringify(line.text)}`);
   }
+});
+
+// --- インライン数式を含む本文 -------------------------------------------
+
+/**
+ * 添字つきの本文行を作る。
+ *
+ * pdf.js は `Q_1` を「Q」（10pt）と「1」（7.4pt、4pt ほど下）の 2 つの文字片で返す。
+ * この「小さくて少し下にある文字片」が本文の行から外れると、短くて字下げされた
+ * 独立した行に見えるので、別行立ての数式・表として落ちる。
+ */
+function withSubscript(y: number, head: string, base: string, sub: string, tail: string): TextChunk[] {
+  const headChunk = chunk(1, 50, y, head);
+  const baseChunk = chunk(1, headChunk.x + headChunk.w, y, base);
+  const subChunk: TextChunk = {
+    page: 1,
+    text: sub,
+    x: baseChunk.x + baseChunk.w,
+    // 下がり幅と文字高は実測値（pdflatex の 10pt 本文、Computer Modern）。
+    // 小さい方の文字高で測った許容量（7.0 × 0.6 = 4.2pt）をわずかに超えるので、
+    // 何もしなければ独立した行になる。
+    y: y + 4.5,
+    w: sub.length * 4,
+    h: 7.0,
+  };
+  const tailChunk = chunk(1, subChunk.x + subChunk.w, y, tail);
+  return [headChunk, baseChunk, subChunk, tailChunk];
+}
+
+test('添字は同じ行にまとめる（独立した行にしない）', () => {
+  const chunks = withSubscript(100, 'We compare ', 'Q', '1', ' against the dense baseline here.');
+  const lines = buildLines(chunks);
+  assert.equal(lines.length, 1, `添字が別の行になった: ${JSON.stringify(lines.map((l) => l.text))}`);
+  assert.equal(lines[0]!.text, 'We compare Q1 against the dense baseline here.');
+});
+
+test('インライン数式を含む本文行を、数式や表として落とさない', () => {
+  // 実測（pdflatex の 2 段組）で、同じ文章にインライン数式を入れただけで
+  // 本文 4 文がすべて消え、残骸が文法の通る英文に癒着した。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 8; i++) chunks.push(measureLine(i, 100 + i * 13));
+  const body = [
+    ['Suppose two shifts ', 'Q', '1', ' and two more induce shared biases.'],
+    ['We write the norms as ', 'β', '1', ' and take the member variance.'],
+    ['Calibration under ', 'Q', 'i', ' requires the reported variance to match.'],
+  ];
+  body.forEach((parts, i) => chunks.push(...withSubscript(210 + i * 13, parts[0]!, parts[1]!, parts[2]!, parts[3]!)));
+  for (let i = 0; i < 8; i++) chunks.push(measureLine(i + 20, 260 + i * 13));
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const texts = sentences.map((s) => s.text);
+  for (const expected of [
+    'Suppose two shifts Q1 and two more induce shared biases.',
+    'We write the norms as β1 and take the member variance.',
+    'Calibration under Qi requires the reported variance to match.',
+  ]) {
+    assert.ok(texts.includes(expected), `本文が消えた: ${expected} / ${JSON.stringify(texts.slice(7, 13))}`);
+  }
+});
+
+test('本文を数式として落とすと、採録率が下がって自分で申告する', () => {
+  const lines = classifyLines(buildLines([]), pages(1));
+  assert.equal(assessCoverage(lines).coverage, 1, '行が無いときは 1');
+
+  // 正しく落としているもの（中央寄せの数式・表のセル）では下がらない。
+  const clean: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) clean.push(measureLine(i, 100 + i * 13));
+  clean.push(chunk(1, 120, 230, 'y = softmax(QK^T/d)V'));
+  clean.push(chunk(1, 280, 230, '(1)'));
+  clean.push(chunk(1, 120, 243, 'Model     Acc     F1'));
+  for (let i = 0; i < 10; i++) clean.push(measureLine(i + 20, 270 + i * 13));
+  const cleanQuality = assessCoverage(classifyLines(buildLines(clean), pages(1)));
+  assert.equal(cleanQuality.coverageRisk, 'low', `正しく落としているのに鳴った: ${cleanQuality.coverageReason}`);
+  assert.equal(cleanQuality.coverage, 1);
+
+  // 本文の行を無理やり数式として落とすと下がる（人の手で role を書き換えて再現）。
+  const broken = classifyLines(buildLines(clean), pages(1)).map((line, i) =>
+    i >= 2 && i <= 6 ? { ...line, role: 'furniture' as const, kind: 'formula' as const } : line,
+  );
+  const brokenQuality = assessCoverage(broken);
+  assert.equal(brokenQuality.coverageRisk, 'high', '本文が落ちているのに申告が low');
+  assert.ok(brokenQuality.coverage < 0.98, `採録率が下がっていない: ${brokenQuality.coverage}`);
+  assert.match(brokenQuality.coverageReason, /本文/, '理由が人に読める形になっていない');
+});
+
+test('付録の見出しは見出しとして扱う（中身と 1 文に癒着させない）', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 8; i++) chunks.push(measureLine(i, 100 + i * 13));
+  // \appendix の後ろの \section は "A" で始まる。段幅いっぱいまで伸びることもある。
+  chunks.push(chunk(1, 50, 230, 'A Proof of the Obstruction'.padEnd(49, ' '), 14));
+  chunks.push(chunk(1, 50, 256, 'Assume the two calibration conditions hold here.'));
+
+  const texts = buildSentencesFromChunks(chunks, pages(1)).sentences.map((s) => s.text);
+  assert.ok(
+    texts.includes('Assume the two calibration conditions hold here.'),
+    `付録の見出しが本文に癒着した: ${JSON.stringify(texts.slice(-2))}`,
+  );
+});
+
+// --- 段抜きの多い 2 段組 -------------------------------------------------
+
+test('どのページも段抜きだらけでも、文書全体で段を見つける', () => {
+  // 実測: アブストラクトに 2 文足しただけ（段抜きが許容 11 行に対して 11 行）で
+  // 再現率 100% → 34%。1 ページでも自力で見つかれば借りられるが、
+  // どのページにも段抜きがあると借り元が無く、文書全体が 1 段扱いになる。
+  const chunks: TextChunk[] = [];
+  for (const page of [1, 2]) {
+    // 段抜きが行数の 15%（ページ単位の許容）を超えるだけ置く。
+    for (let i = 0; i < 14; i++) {
+      chunks.push(chunk(page, 50, 80 + i * 13, `A full width abstract line ${i} spanning both columns.`));
+    }
+    chunks.push(...twoColumnPage(page, 22, 280));
+  }
+
+  // ページ単位ではどちらも段を見つけられない（段抜きが 15% を超えている）。
+  const page1 = chunks.filter((c) => c.page === 1);
+  assert.equal(detectColumns(page1).length, 1, 'この入力ではページ単位で段が見つかってしまう（前提が崩れている）');
+
+  // 行が連結していないこと。文で見ると、左右がどちらも文末記号で終わるせいで
+  // 「連結したのに文としては 2 つに割れる」ため、連結を見落とす。
+  const lines = buildLines(chunks);
+  const merged = lines.filter((l) => l.text.includes('Left body') && l.text.includes('Right body'));
+  assert.equal(merged.length, 0, `左右の段が 1 行に連結された: ${JSON.stringify(merged.slice(0, 2).map((l) => l.text))}`);
+
+  // 読み順も見る。連結すると左右が交互になり、段を読み切る順にならない。
+  const texts = buildSentencesFromChunks(chunks, pages(2)).sentences.map((s) => s.text);
+  const lastLeft = texts.findIndex((t) => t.includes('Left body line 21 on page 1'));
+  const firstRight = texts.findIndex((t) => t.includes('Right body line 0 on page 1'));
+  assert.ok(lastLeft >= 0 && firstRight >= 0, JSON.stringify(texts.slice(0, 4)));
+  assert.ok(lastLeft < firstRight, '左段を読み切る前に右段が来ている（段が連結している）');
+});
+
+test('1 段組を、重ね合わせでも 2 段と誤検出しない', () => {
+  // 全ページを重ねて探す経路は許容を緩めるので、ここが歯止めになる。
+  // 1 段組は全ての行が段間をまたぐので、どれだけ緩めても段組にはならない。
+  const chunks: TextChunk[] = [];
+  for (const page of [1, 2, 3]) {
+    for (let i = 0; i < 30; i++) {
+      chunks.push(chunk(page, 50, 100 + i * 13, `Body line ${i} on page ${page} runs the full measure here.`));
+    }
+  }
+  const { sentences } = buildSentencesFromChunks(chunks, pages(3));
+  assert.equal(sentences.length, 90, `1 段組が割れた: ${sentences.length} 文`);
+});
+
+// --- 和文の版面 ---------------------------------------------------------
+
+/**
+ * 和文の文字片。**1 文字がほぼ 1em 進む**のが欧文との決定的な違いで、
+ * 段の切れ目や見出しの判定を「字送りの何倍」で決めていると、そこが全部ずれる。
+ */
+function cjkChunk(page: number, x: number, y: number, text: string, size = 10): TextChunk {
+  return { page, text, x, y, w: text.length * size, h: size };
+}
+
+/** 24 文字（＝段幅 240pt）の和文本文行。段の代表値を決めるために要る。 */
+const cjkBody = (page: number, x: number, y: number, n: number): TextChunk => {
+  const head = `本文の行${String(n).padStart(2, '０')}は`;
+  // 句点まで入れて 24 文字ちょうどにする（句点が切れると全部 1 文に繋がる）。
+  return cjkChunk(page, x, y, `${`${head}段の幅いっぱいまで文字が詰まる要素`.slice(0, 23)}。`);
+};
+
+test('和文の 2 段組を、柱間が既定の 10pt でも見つける', () => {
+  // 和文は 1 文字がほぼ 1em なので、下限を「字送りの 1.5 倍」で決めると
+  // 10pt 本文で 14.9pt になり、\columnsep の既定 10pt がそのまま下回る。
+  // 実測（xelatex の和文 2 段組）で再現率 9%、左右の段が 1 行に混ざっていた。
+  // 段は x=50..290 と x=300..540。柱間はちょうど 10pt（\columnsep の既定）。
+  // 1 行は 24 文字＝240pt にそろえる（和文は 1 文字が 1em 進む）。
+  const side = (label: string, n: number): string =>
+    `${`${label}の段の${String(n).padStart(2, '０')}行目はここから本文が続いていきます`.slice(0, 23)}。`;
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 20; i++) {
+    chunks.push(cjkChunk(1, 50, 100 + i * 17, side('左', i)));
+    chunks.push(cjkChunk(1, 300, 100 + i * 17, side('右', i)));
+  }
+  // 前提の確認。1 文字 10pt なので、24 文字ちょうどでないと柱間が 10pt にならない。
+  assert.equal([...chunks[0]!.text].length, 24, `行の長さが 24 文字でない: ${chunks[0]!.text}`);
+  assert.equal(detectColumns(chunks).length, 2, '和文の柱間 10pt で段を見落とした');
+
+  const lines = buildLines(chunks);
+  const merged = lines.filter((l) => l.text.includes('左の段') && l.text.includes('右の段'));
+  assert.equal(merged.length, 0, `左右の段が 1 行に連結された: ${JSON.stringify(merged.slice(0, 2).map((l) => l.text))}`);
+});
+
+test('和文の参考文献を本文に混ぜない', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) chunks.push(cjkBody(1, 50, 100 + i * 17, i));
+  chunks.push(cjkChunk(1, 50, 280, '段落はここで終わる。'));
+  chunks.push(cjkChunk(1, 50, 300, '参考文献', 12));
+  chunks.push(cjkChunk(1, 50, 330, '[1] 佐藤 花子. 日本語文書における文境界推定. 情報処理学会論文誌, 62(3):512-523, 2021.'));
+  chunks.push(cjkChunk(1, 50, 347, '[2] 田中 明. 学術文書の構造解析. 人工知能学会誌, 34(2):88-97, 2019.'));
+
+  const { sentences, nonBody } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(!sentences.some((s) => s.text.includes('佐藤 花子')), `和文の参考文献が本文に混ざった: ${JSON.stringify(sentences.slice(-3).map((s) => s.text))}`);
+  assert.ok(
+    nonBody.some((n) => n.kind === 'reference' && n.text.includes('佐藤 花子')),
+    `参考文献として残っていない: ${JSON.stringify(nonBody.map((n) => `${n.kind}:${n.text.slice(0, 20)}`))}`,
+  );
+});
+
+test('和文の番号つき見出しを、直後の文と癒着させない', () => {
+  // headingNumber が「番号の後ろは欧文の大文字」しか見ていなかったとき、
+  // `4 実装` が本文に落ちて `4 実装実装は…` という 1 文になっていた。
+  // 和文誌の小見出しは本文とほとんど同じ大きさで、上の余白も 1 行ぶん程度しかない。
+  // 文字の大きさと行間だけでは拾えないので、見出しの語そのものを知る必要がある。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) chunks.push(cjkBody(1, 50, 100 + i * 17, i));
+  chunks.push(cjkChunk(1, 50, 290, '4 実装', 11));
+  chunks.push(cjkChunk(1, 50, 310, '実装は外部の依存を持たない。'));
+  for (let i = 0; i < 6; i++) chunks.push(cjkBody(1, 50, 327 + i * 17, i + 20));
+
+  const { sentences, sections } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    sentences.some((s) => s.text === '実装は外部の依存を持たない。'),
+    `見出しが本文と癒着した: ${JSON.stringify(sentences.map((s) => s.text).filter((t) => t.includes('実装')))}`,
+  );
+  assert.ok(sections.some((s) => s.title.includes('実装')), `和文の見出しを節として拾えていない: ${JSON.stringify(sections.map((s) => s.title))}`);
+});
+
+test('和文の表題を前付として落とす（要旨の 1 文目と癒着させない）', () => {
+  // 「概要」は本文と同じ大きさで、上の余白も 1 行ぶんしかない。見出しの語を
+  // 知らないと本文になり、その手前の表題も前付にならずに要旨と 1 文へ癒着する。
+  const chunks: TextChunk[] = [];
+  chunks.push(cjkChunk(1, 120, 80, '日本語の本文を含む論文における文境界の推定', 17));
+  chunks.push(cjkChunk(1, 200, 115, '坂比賀 悠真', 12));
+  chunks.push(cjkChunk(1, 50, 135, '概要'));
+  chunks.push(cjkChunk(1, 50, 152, '本稿では、日本語の本文に英語の術語が混ざる論文を対象とする。'));
+  for (let i = 0; i < 10; i++) chunks.push(cjkBody(1, 50, 169 + i * 17, i));
+
+  const { sentences, nonBody } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    sentences.some((s) => s.text === '本稿では、日本語の本文に英語の術語が混ざる論文を対象とする。'),
+    `表題が要旨の 1 文目と癒着した: ${JSON.stringify(sentences.slice(0, 2).map((s) => s.text))}`,
+  );
+  assert.ok(
+    nonBody.some((n) => n.kind === 'frontMatter' && n.text.includes('文境界の推定')),
+    `表題が前付として残っていない: ${JSON.stringify(nonBody.map((n) => `${n.kind}:${n.text.slice(0, 16)}`))}`,
+  );
+});
+
+test('1 回しか出ない柱を、本文の文の途中に挟まない', () => {
+  // 1 ページ目が plain（柱なし）の 2 ページ論文では柱が 1 回しか現れない。
+  // 「複数ページに出ていること」だけを条件にしていると落とせず、ページをまたぐ
+  // 文の真ん中に柱が入る（実測: `ページの変` ＋ `情報処理学会論文誌` ＋ `わり目で…`）。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 12; i++) chunks.push(cjkBody(1, 50, 100 + i * 17, i));
+  chunks.push(cjkChunk(1, 50, 304, 'ページをまたぐ文はここで終'));
+  // 2 ページ目。柱は本文の塊から 3 行ぶん以上離れた天の余白にある。
+  chunks.push(cjkChunk(2, 50, 18, '情報処理学会論文誌'));
+  chunks.push(cjkChunk(2, 50, 100, 'わらずに続く。'));
+  for (let i = 0; i < 12; i++) chunks.push(cjkBody(2, 50, 117 + i * 17, i + 20));
+
+  const { sentences, nonBody } = buildSentencesFromChunks(chunks, pages(2));
+  assert.ok(
+    sentences.some((s) => s.text === 'ページをまたぐ文はここで終わらずに続く。'),
+    `柱が文の途中に挟まった: ${JSON.stringify(sentences.filter((s) => s.text.includes('ページをまたぐ')).map((s) => s.text))}`,
+  );
+  assert.ok(nonBody.some((n) => n.kind === 'runningHead'), `柱が柱として残っていない: ${JSON.stringify(nonBody.map((n) => `${n.kind}:${n.text}`))}`);
 });

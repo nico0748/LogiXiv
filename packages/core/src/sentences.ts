@@ -83,8 +83,9 @@ export function splitIntoSentences(text: string): string[] {
     if (!TERMINATORS.has(ch)) continue;
 
     // 終端記号の直後に続く閉じ括弧・引用符は前の文に含める。
+    // 和文の閉じ括弧も同じ（「…である。」の「」」が次の文の頭になっていた）。
     let end = i + 1;
-    while (end < text.length && /[)\]}"'’”]/.test(text[end]!)) end++;
+    while (end < text.length && /[)\]}"'’”」』〉》】〕）］｝]/.test(text[end]!)) end++;
 
     if (ch === '.' && !isSentenceEndingPeriod(text, i)) continue;
 
@@ -112,9 +113,21 @@ function wordBefore(text: string, index: number): string {
 }
 
 function isSentenceEndingPeriod(text: string, index: number): boolean {
-  // 小数点・バージョン番号・省略記号。
+  // 小数点・バージョン番号。
   if (/\d/.test(text[index - 1] ?? '') && /\d/.test(text[index + 1] ?? '')) return false;
-  if (text[index + 1] === '.' || text[index - 1] === '.') return false;
+
+  /**
+   * 省略記号。`\dots` / `\ldots` は点の**間に細い空き**を入れて組むので、PDF から
+   * 取り出すと ". . ." のように空白を挟んだ点の並びになる。連続した ".." だけを
+   * 見ていた頃は、"f1, . . . , fM" の点がそれぞれ文末と判定され、1 文が
+   * "… collection f1, ." と ", fM of predictors …" に割れていた。しかも点だけの
+   * 断片は文字を含まないので最後に黙って捨てられ、本文が消えていた。
+   *
+   * 空白は 2 つまでに絞る。離れた位置の点まで省略記号と見ると、"end. . Next" のような
+   * 普通の並びで文が切れなくなる。
+   */
+  if (/^ {0,2}\./.test(text.slice(index + 1, index + 4))) return false;
+  if (/\. {0,2}$/.test(text.slice(Math.max(0, index - 3), index))) return false;
 
   const word = wordBefore(text, index);
 
@@ -126,8 +139,18 @@ function isSentenceEndingPeriod(text: string, index: number): boolean {
   // 続く語が大文字始まりなら、そこで文が終わっている方が自然なので通常の判定に落とす。
   if (DOTTED_ACRONYM.test(word) && !/^\s*\p{Lu}/u.test(text.slice(index + 1))) return false;
 
-  // 単一大文字。"J. Doe" のイニシャルか、"we sweep the temperature T." の記号か。
-  if (/^[A-Z]$/.test(text[index - 1] ?? '') && !/\p{L}/u.test(text[index - 2] ?? ' ')) {
+  /**
+   * 単一大文字。"J. Doe" のイニシャルか、"we sweep the temperature T." の記号か。
+   *
+   * 大文字の**手前は空白か行頭に限る**。「文字でなければよい」としていた頃は、
+   * 数式の一部が人名のイニシャルに化けていた: 文末の `$v/M$.` が "v/M." と組まれると、
+   * M の手前が '/'（文字ではない）なので単一大文字と見なされ、次の文が
+   * SENTENCE_OPENERS に無い語で始まると 1 文に繋がっていた
+   * （実測: "… + v/M. Solving for the scalar gives …" が 1 枚のカードに同居）。
+   * 人名のイニシャルは必ず語の頭に立つので、この絞り込みで落ちるものは無い。
+   */
+  const beforeCapital = text[index - 2];
+  if (/^[A-Z]$/.test(text[index - 1] ?? '') && (beforeCapital === undefined || /\s/.test(beforeCapital))) {
     const head = wordBefore(text, index - 1);
     if (LABEL_HEADS.has(head)) return true; // ラベルなので文末
     // もう 1 つイニシャルが続くなら人名で確定（"J. R. R. Tolkien"）。
@@ -138,6 +161,278 @@ function isSentenceEndingPeriod(text: string, index: number): boolean {
   }
 
   return true;
+}
+
+/**
+ * 空白を入れずに続けてよい文字（漢字・かな・全角の約物）。
+ *
+ * 和文には語の切れ目に空白が無いので、行の折り返しは**語の途中**で起きる。
+ * 継ぎ目に空白を入れると、折り返すたびに語が割れる
+ * （実測: xelatex で組んだ和文論文で「切り 出し」「境 界」。折り返す文は例外なく壊れた）。
+ *
+ * ハングルはここに入れない。同じ「CJK」でも朝鮮語は分かち書きをするので、
+ * 行の継ぎ目には欧文と同じく空白が要る。
+ * U+3000（全角空白）も入れない。あれは空白そのものなので、空白として扱ってよい。
+ *
+ * Script ではなく **Script_Extensions**（`scx`）で引く。長音符「ー」（U+30FC）や
+ * 中黒「・」（U+30FB）、繰り返し記号「々」（U+3005）は Script=Common なので、
+ * `Script=Katakana` では拾えない。実測: これを取り逃がしていたとき、
+ * 「コーパス」「データ」「パーセント」の長音符が**和文と欧文の境目**に数えられ、
+ * 和文の文書が「空白を置かない流儀」に倒れていた（境目 30 件中 16 件が長音符）。
+ */
+const CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\u3001-\u303F\uFF01-\uFF9F\uFFE0-\uFFE6]/u;
+
+function isCjk(ch: string | undefined): boolean {
+  return ch !== undefined && CJK_CHAR.test(ch);
+}
+
+/**
+ * 和文と欧文の境目に空白を置く文書か。
+ *
+ * 行の継ぎ目からは「元が空白付きだったか」を知る手立てが無い（行末の空白は組版で消える）。
+ * しかも正解は流儀で割れる:
+ *
+ *   - LaTeX の和文原稿は `たとえば attention や` と**空白を置く**ことが多い。
+ *     この流儀では、境目で折り返したら空白を入れるのが正しい。
+ *   - xeCJK・LuaTeX-ja を使う原稿は `\texttt{attention}機構` と**置かない**。
+ *     和欧文間の空き（xkanjiskip）は組版が入れる見た目の空きで、文字としての空白は無い。
+ *     この流儀では、入れると字面が書き換わる。
+ *
+ * どちらが正しいかは文書ごとに違うので、**同じ文書の行の途中**の書き方に合わせる。
+ * 行の途中なら折り返しが絡まないので、紙面に出ている空白がそのまま書き手の流儀になる。
+ * 行末ハイフンを文書内の用例で決めている（collectHyphenEvidence）のと同じ考え方。
+ */
+interface ScriptSpacing {
+  /** 行の途中に現れた「和文と欧文の境目」のうち、空白があったもの。 */
+  spaced: number;
+  /** 同じく、空白が無かったもの。 */
+  tight: number;
+}
+
+/**
+ * 片側だけが和文の境目か。
+ *
+ * 欧文側は**文字**に限る（数字・括弧・記号は数えない）。流儀が分かれるのは
+ * 欧文の術語をどう置くかだけで、それ以外は和文の論文でもまず空白を置く
+ * （「費用がかかる [2]。」「図 1 に示す」）。混ぜて数えると、どちらの流儀も測れない。
+ */
+function isScriptBoundary(left: string, right: string): boolean {
+  const leftCjk = isCjk(left);
+  if (leftCjk === isCjk(right)) return false;
+  return /\p{L}/u.test(leftCjk ? right : left);
+}
+
+function collectScriptSpacing(lines: readonly ClassifiedLine[]): ScriptSpacing {
+  let spaced = 0;
+  let tight = 0;
+  for (const line of lines) {
+    // 本文だけを数える。見出しの "1 はじめに" の空白は LaTeX が節番号の後ろに入れたもので、
+    // 書き手の流儀ではない（これを数えると、空白を置かない文書まで「置く流儀」に倒れる）。
+    if (line.role !== 'body') continue;
+    const text = line.text;
+    for (let i = 1; i < text.length; i++) {
+      if (text[i] === ' ') {
+        const after = text[i + 1];
+        if (after !== undefined && isScriptBoundary(text[i - 1]!, after)) spaced++;
+        i++;
+        continue;
+      }
+      if (isScriptBoundary(text[i - 1]!, text[i]!)) tight++;
+    }
+  }
+  return { spaced, tight };
+}
+
+/**
+ * 継ぎ目に空白が入る文書か（行の継ぎ目・文字片の継ぎ目のどちらでも使う）。
+ *
+ * 両側が欧文なら入る（語の切れ目で折り返すので、元は空白だった）。
+ * 両側が和文なら入らない（語の切れ目に空白が無いので、折り返しは語の途中で起きる）。
+ * 片側だけ和文なら、その文書の流儀に合わせる（ScriptSpacing 参照）。
+ * どちらかが分からないときは入る側に倒す — 欧文の挙動をここで変えないため。
+ */
+function spacesAtBoundary(
+  left: string | undefined,
+  right: string | undefined,
+  spacing: ScriptSpacing,
+): boolean {
+  if (left === undefined || right === undefined) return true;
+  const leftCjk = isCjk(left);
+  const rightCjk = isCjk(right);
+  if (!leftCjk && !rightCjk) return true;
+  if (leftCjk && rightCjk) return false;
+  // 和文と欧文の境目。欧文側が**文字**のときだけ、その文書の流儀に合わせる。
+  // 数字・括弧・記号との境目は空白を入れる側に倒す — 術語を詰めて書く和文の論文でも、
+  // 引用番号や図表番号の前には空白を置く（「費用がかかる [2]。」「表 2 の形」）。
+  if (!/\p{L}/u.test(leftCjk ? right : left)) return true;
+  return spacing.spaced >= spacing.tight;
+}
+
+/**
+ * その行の「和文どうしの間の空白」が、pdf.js が字間から作った偽物か。
+ *
+ * pdf.js は字送りが 0.102em（TRACKING_SPACE_FACTOR）を超えると、PDF に空白文字が
+ * 無くても空白を差し込む。両端揃えの和文は行の伸縮を字間に配るので、狭い段では
+ * 1 行のほぼ全部の字間がこれを超える。実測（和文 2 段組）:
+ *   「和 文 の 学 会 誌 で は、 本 文 を 日 本 語 で 書 き、 術」
+ * これは文字片の**中**に入るので、継ぎ目の判断（spacesAtBoundary）では取れない。
+ *
+ * ただし和文にも本物の空白はある（著者名「坂比賀 悠真」、参考文献の姓と名）。
+ * 偽物は行の字間に**軒並み**入るのが特徴なので、個数と割合の両方で見る。
+ * 本物は 1 行に 1〜2 個で、空白の無い字間が周りに何十個も並ぶ。
+ */
+function hasTrackingSpaces(text: string): boolean {
+  let spaced = 0;
+  let tight = 0;
+  for (let i = 1; i < text.length; i++) {
+    if (!isCjk(text[i - 1])) continue;
+    if (text[i] === ' ') {
+      if (isCjk(text[i + 1])) spaced++;
+    } else if (isCjk(text[i])) {
+      tight++;
+    }
+  }
+  return spaced >= 3 && spaced >= (spaced + tight) * 0.25;
+}
+
+/**
+ * 数式の二項演算子・関係子。
+ *
+ * TeX は被演算子に挟まれたこれらの前後を medmuskip / thickmuskip で組む。
+ * ASCII の '-' は入れない（複合語のハイフンに当たってしまう）。数式の負号は
+ * PDF では U+2212 で出てくるので、そちらだけを見る。
+ */
+const MATH_BINARY =
+  /[+−±∓×÷⋅∘⊕⊖⊗⊙=≠≈≡∼≃≅≺≻<>≤≥∈∉⊂⊃⊆⊇∪∩∧∨→←↔⇒⇐⇔↦]/u;
+
+/**
+ * 被演算子として立ちうる文字か（左側・右側）。
+ *
+ * 英数字に限れない。`$f^\star + b$` の左側は上付きの「⋆」で終わるし、
+ * 添字・記号で終わる式はいくらでもある。逆に、演算子そのもの・空白・句読点・
+ * 開き括弧の直後に立つ演算子は**単項**なので（TeX の mathbin と同じ規則）、
+ * そこは除く。これで "$-1$" の負号には空白を入れない。
+ */
+const NOT_OPERAND_END = /[\s([{,;:.!?]/u;
+const NOT_OPERAND_START = /[\s)\]},;:.!?]/u;
+
+function isOperandEnd(ch: string | undefined): boolean {
+  return ch !== undefined && !NOT_OPERAND_END.test(ch) && !MATH_BINARY.test(ch);
+}
+
+function isOperandStart(ch: string | undefined): boolean {
+  return ch !== undefined && !NOT_OPERAND_START.test(ch) && !MATH_BINARY.test(ch);
+}
+
+/**
+ * 文字片の継ぎ目が、数式の二項演算子のすぐ隣か。
+ *
+ * TeX の medmuskip は `4mu plus 2mu minus 4mu` で、**縮む**。行を詰めて組んだ行では
+ * 0.03em まで潰れ、隙間の閾値（字高の 0.22 倍）に届かない。実測: 同じ
+ * `$f^\star + b + \varepsilon_m$` が、行によって "f ⋆ + b + εm" にも
+ * "f ⋆ +b+εm" にもなっていた（Computer Modern で 22 行中 4 行）。
+ * 同じ式が組み方しだいで違う字面になると、ハッシュも変わって訳が付かない。
+ * だから隙間の大きさではなく**文字の種類**で決める。組み方に依らず同じ字面になり、
+ * pdftotext（poppler。この道具とは独立した実装）とも一致する。
+ *
+ * 二項か単項かは TeX と同じ規則で見る — 演算子の手前に被演算子があれば二項。
+ * 手前が語間の空白なら、そこで散文が終わって数式が始まっているので単項
+ * （実測: "the interval is $-1$ for every" が "is − 1 for every" になっていた）。
+ */
+function isBinaryOperatorBoundary(segment: Segment, next: string): boolean {
+  const buffer = segment.buffer;
+  const last = buffer[buffer.length - 1];
+  const head = next[0];
+  if (last === undefined || head === undefined) return false;
+  // 被演算子 → 演算子。手前の被演算子は `last` そのもの。
+  if (isOperandEnd(last) && MATH_BINARY.test(head)) return true;
+  // 演算子 → 被演算子。演算子の手前に被演算子があるかを見る。
+  if (MATH_BINARY.test(last) && isOperandStart(head)) {
+    // 空白の幅は**演算子の字高**で測る。空白の側の字高は上付き・下付きだと小さく
+    // 出るので（実測: 上付きの直後の空き 1.26pt は、自分の字高 6.97 では 0.18 em に
+    // 見えるが、本文の 9.96 では 0.13 em）、そのままでは語間と区別がつかない。
+    const em = segment.owners[buffer.length - 1]?.chunk.h ?? 0;
+    let i = buffer.length - 2;
+    if (i >= 0 && buffer[i] === ' ' && isThinSpace(segment.owners[i], em)) i--;
+    return i >= 0 && isOperandEnd(buffer[i]);
+  }
+  return false;
+}
+
+/**
+ * 連結後のその 1 文字が、**語間ではない**細い空白か。
+ *
+ * 演算子の手前の空白を読み飛ばしてよいかの判断に使う。読み飛ばす相手は 2 つ:
+ * 自分で入れた空白（継ぎ目の空白。位置を持たないので offset が負）と、
+ * 数式の空き。語間の空白まで読み飛ばすと、散文の直後に来る負号が二項演算子に化ける。
+ *
+ * 数式の空きと語間は**幅**で見分く。TeX の語間は詰めても 0.17em を下回らない
+ * （Times で 0.25em plus 0.15 minus 0.0833、Computer Modern はもっと広い）。
+ * 一方 medmuskip は 4mu plus 2mu minus 4mu で、詰まった行では 0.08em まで潰れる。
+ * 実測: 語間 0.222em に対し、詰まった行の medmuskip は 0.119em だった。
+ */
+function isThinSpace(owner: CharOwner | undefined, em: number): boolean {
+  if (owner === undefined) return false;
+  if (owner.offset < 0) return true; // 自分で入れた継ぎ目の空白
+  const { chunk } = owner;
+  return chunk.text === ' ' && em > 0 && chunk.w < em * 0.15;
+}
+
+/**
+ * 紙面が空いていない空白の文字片。
+ *
+ * pdf.js は italic correction のような小さな送りも空白文字として返す。多くの場合は
+ * それで正しい（"f ⋆" は紙面でも空いて見える）が、**下付きと上付きを重ねて組む**形
+ * （`$\beta_i^2$`）では話が変わる。italic correction が効くのは上付きだけで、
+ * 下付きはその空白の位置に重ねて置かれる。空白として残すと、下付きと上付きの
+ * どちらが先に並ぶかで "β i2" にも "βi 2" にも転ぶ
+ * （実測: Times の同じ式 22 回で 13 回が "βi 2"、9 回が "β i2"）。
+ * pdftotext（poppler。この道具とは独立した実装）は "βi2" を返す。
+ *
+ * 見分けるのは**積んであるかどうか**。空白のすぐ右から始まる文字片の中に、
+ * 高さ（ベースライン）が違うのに x 範囲が重なる組があれば、それが下付きと上付きで、
+ * 手前の空白は上付きのぶんの送りでしかない。上付きだけの `$f^\star$` には
+ * 積まれた組が無いので、"f ⋆" の空白はそのまま残る。
+ */
+function stackedScriptSpaces(chunks: readonly TextChunk[]): Set<TextChunk> {
+  const out = new Set<TextChunk>();
+  for (const space of chunks) {
+    if (space.w <= 0 || space.text.trim().length > 0) continue;
+    // 空白の右端から始まる（か、その中に食い込む）文字片だけを見る。
+    const at: TextChunk[] = [];
+    for (const other of chunks) {
+      if (other === space || other.w <= 0 || other.text.trim().length === 0) continue;
+      if (other.x <= space.x + space.w + 0.5 && other.x + other.w > space.x) at.push(other);
+    }
+    for (let a = 0; a < at.length && !out.has(space); a++) {
+      for (let b = a + 1; b < at.length; b++) {
+        const first = at[a]!;
+        const second = at[b]!;
+        // 同じ高さに並んでいるだけなら積んでいない。
+        if (Math.abs(first.y - second.y) < 0.5) continue;
+        const overlap =
+          Math.min(first.x + first.w, second.x + second.w) - Math.max(first.x, second.x);
+        if (overlap > 0) {
+          out.add(space);
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** 次の行の最初の文字。行の継ぎ目に空白が要るかの判断に使う。 */
+function firstCharOf(line: ClassifiedLine | undefined): string | undefined {
+  if (line === undefined) return undefined;
+  const text = line.text.trimStart();
+  if (text.length > 0) return text[0];
+  // line.text は空白を畳んだ後の字面。空になる行（記号だけの行）は文字片から拾う。
+  for (const chunk of line.chunks) {
+    const trimmed = chunk.text.trimStart();
+    if (trimmed.length > 0) return trimmed[0];
+  }
+  return undefined;
 }
 
 /**
@@ -271,16 +566,33 @@ interface HyphenEvidence {
 /** 語の切り出し。アポストロフィを含む形（don't）も 1 語として拾う。 */
 const WORD_TOKEN = /\p{L}+(?:['’]\p{L}+)*/gu;
 
+/**
+ * ハイフンとして扱う文字。
+ *
+ * ASCII の '-' だけを見ていると、和文書体で組んだ欧文が取り逃がされる。
+ * 実測: Noto Serif CJK JP で英文要旨を組むと、行末のハイフンは U+2011
+ * （non-breaking hyphen）として取り出され、"pa‑ pers" が画面にそのまま残っていた。
+ * normalizeSentence は U+2010/U+2011 を '-' に寄せるのでハッシュは合うが、
+ * 画面に出る字面は壊れたままになる。
+ */
+const HYPHEN_CHARS = /[\u2010\u2011]/g;
+
+/** 行末のハイフン（と、その手前のハイフン付き複合語）。末尾の空白まで含めて照合する。 */
+const HYPHEN_AT_LINE_END = /((?:\p{L}+[-\u2010\u2011])*\p{L}+)[-\u2010\u2011]\s$/u;
+
 function collectHyphenEvidence(lines: ClassifiedLine[]): HyphenEvidence {
   const hyphenated = new Set<string>();
   const compoundPrefixes = new Set<string>();
   const words = new Set<string>();
   let previousBroke = false;
   for (const line of lines) {
-    const broken = /-\s*$/.test(line.text);
+    // ハイフンの種類は先に畳む。用例の照合は ASCII の '-' でしか行わないので、
+    // ここで寄せておかないと「行末で割れた語」の検出そのものが外れる。
+    const flattened = line.text.replace(HYPHEN_CHARS, '-');
+    const broken = /-\s*$/.test(flattened);
     // 行末のハイフンは「割れた語」なので用例として数えない。数えると
     // 「割れた語は必ず用例あり」になり、ハイフンが永久に残る。
-    const text = line.text.replace(/-\s*$/, '');
+    const text = flattened.replace(/-\s*$/, '');
     for (const match of text.matchAll(/\p{L}+(?:-\p{L}+)+/gu)) {
       const compound = match[0].toLowerCase();
       hyphenated.add(compound);
@@ -388,6 +700,9 @@ function decideLineEndHyphen(left: string, right: string, evidence: HyphenEviden
 export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[]): FallbackResult {
   const lines = classifyLines(buildLines(chunks), pages);
   const hyphenEvidence = collectHyphenEvidence(lines);
+  // 和文と欧文の境目に空白を置く文書かどうかは、文書ごとに違う。
+  // 行を繋ぐ前に、その文書自身の書き方を数えておく。
+  const spacing = collectScriptSpacing(lines);
 
   const sections: Section[] = [];
   const sectionIds = new Set<string>();
@@ -441,7 +756,7 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
   const lastLineOf: number[] = [];
 
   for (const block of blocks) {
-    const { buffer, owners } = joinLines(block.lines, hyphenEvidence);
+    const { buffer, owners } = joinLines(block.lines, hyphenEvidence, spacing);
     let cursor = 0;
     for (const raw of splitIntoSentences(buffer)) {
       const at = buffer.indexOf(raw, cursor);
@@ -471,7 +786,7 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
   return {
     sentences,
     sections,
-    nonBody: buildNonBody(lines, hyphenEvidence, sentences, lastLineOf),
+    nonBody: buildNonBody(lines, hyphenEvidence, spacing, sentences, lastLineOf),
     quality: assessReadingOrder(lines),
   };
 }
@@ -489,6 +804,7 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
 function buildNonBody(
   lines: readonly ClassifiedLine[],
   evidence: HyphenEvidence,
+  spacing: ScriptSpacing,
   sentences: readonly Sentence[],
   lastLineOf: readonly number[],
 ): NonBodySentence[] {
@@ -519,7 +835,7 @@ function buildNonBody(
   // かたまりは行番号の順に並ぶので、本文側の走査位置も前へ戻らない。
   let cursor = 0;
   for (const group of groups) {
-    const { buffer, owners } = joinLines(group, evidence);
+    const { buffer, owners } = joinLines(group, evidence, spacing);
     const text = buffer.replace(/\s+/g, ' ').trim();
     if (text.length === 0) continue;
     const firstLine = group[0]!.index;
@@ -553,7 +869,11 @@ function buildNonBody(
  * 本文の塊にも付物の塊にも使う。行の組み立て方（文字片の継ぎ目に空白を入れるか、
  * 行末のハイフンを残すか）は、本文でも図表キャプションでも同じでよい。
  */
-function joinLines(lines: readonly ClassifiedLine[], evidence: HyphenEvidence): Segment {
+function joinLines(
+  lines: readonly ClassifiedLine[],
+  evidence: HyphenEvidence,
+  spacing: ScriptSpacing,
+): Segment {
   const segment: Segment = { buffer: '', owners: [] };
   /**
    * 連結後の文字と、その出どころ（文字片・行）を対応づける。
@@ -567,44 +887,94 @@ function joinLines(lines: readonly ClassifiedLine[], evidence: HyphenEvidence): 
     }
   };
 
+  /**
+   * 文字片の本文を押し込む。`tracking` が立っている行では、和文どうしの間の空白を
+   * 落とす（pdf.js が字間から作った偽物なので、残すと語の途中が割れる）。
+   */
+  const pushChunkText = (chunk: TextChunk, line: number, tracking: boolean): void => {
+    if (!tracking) {
+      push(chunk.text, chunk, line, 0);
+      return;
+    }
+    let from = 0;
+    for (let i = 0; i < chunk.text.length; i++) {
+      if (chunk.text[i] !== ' ') continue;
+      if (!isCjk(chunk.text[i - 1]) || !isCjk(chunk.text[i + 1])) continue;
+      push(chunk.text.slice(from, i), chunk, line, from);
+      from = i + 1;
+    }
+    push(chunk.text.slice(from), chunk, line, from);
+  };
+
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li]!;
+    const trackingSpaces = hasTrackingSpaces(line.text);
+    const stacked = stackedScriptSpaces(line.chunks);
 
     let previousRight: number | null = null;
     for (const chunk of line.chunks) {
       if (chunk.text.length === 0) continue;
+      // 下付きと上付きを重ねて組んだ位置の空白。紙面は空いていないので字面にも出さない。
+      // previousRight は進めない（この空白の幅は下付きが占めている）。
+      if (stacked.has(chunk)) continue;
       // 文字片の境目に無条件で空白を入れると、書体が変わるだけの箇所（斜体・合字・
       // カーニング）で語が割れる。実際に隙間があるときだけ空白を入れる。
+      //
+      // 和文どうしの境目では閾値を上げる。和文は 1 文字ぶん（ほぼ 1em）進むので、
+      // 約物の詰め（句読点は半角ぶん空く）や字間の伸縮だけで欧文の空白 1 個ぶんを超える。
+      // 実測した和文 PDF では、本物の空白は pdf.js が空白文字として返してくるので、
+      // 隙間から推測する必要がそもそも無い。
       const gap = previousRight === null ? Infinity : chunk.x - previousRight;
-      if (previousRight !== null && gap > chunk.h * 0.22 && !segment.buffer.endsWith(' ')) {
+      const ratio = spacesAtBoundary(segment.buffer[segment.buffer.length - 1], chunk.text[0], spacing)
+        ? 0.22
+        : 0.75;
+      const separated =
+        gap > chunk.h * ratio ||
+        // 数式の二項演算子の隣は、隙間が潰れていても空白として読む（理由は関数の説明）。
+        isBinaryOperatorBoundary(segment, chunk.text);
+      if (previousRight !== null && separated && !segment.buffer.endsWith(' ')) {
         push(' ', chunk, line.index, -1);
       }
-      push(chunk.text, chunk, line.index, 0);
+      pushChunkText(chunk, line.index, trackingSpaces);
       previousRight = chunk.x + chunk.w;
     }
-    if (segment.buffer.length > 0 && !segment.buffer.endsWith(' ')) {
+    // 行の継ぎ目。欧文は語の切れ目でしか折り返さないので空白が要るが、和文には
+    // 語の切れ目が無いので、入れると折り返すたびに語の途中が割れる。
+    // どちらかは継ぎ目の**両側の文字の種類**で決まる（spacesAtBoundary）。
+    const next = lines[li + 1];
+    if (
+      segment.buffer.length > 0 &&
+      !segment.buffer.endsWith(' ') &&
+      spacesAtBoundary(segment.buffer[segment.buffer.length - 1], firstCharOf(next), spacing)
+    ) {
       push(' ', line.chunks[line.chunks.length - 1]!, line.index, -1);
     }
 
     // 行末ハイフンの処理。読み順で次に来る行が続きなので、段やページを跨いでいても
     // 結合を検討する（跨いだときだけ "informa- tion" が画面に残る、という妙な
     // 非対称が起きていた）。
-    const next = lines[li + 1];
     if (!next) continue;
     // ハイフンを含む語全体を取る。"state-of-the-" の末尾から "the" だけを見ると、
     // 文書内の用例 "state-of-the-art" と照合できない。
-    const hyphen = /((?:\p{L}+-)*\p{L}+)-\s$/u.exec(segment.buffer);
+    const hyphen = HYPHEN_AT_LINE_END.exec(segment.buffer);
     if (!hyphen) continue;
     const nextWord = /^(\p{L}+)/u.exec(next.text)?.[1];
     if (!nextWord) continue;
+    // 和文には行末ハイフネーションが無い（語の途中で折り返すときに記号を足さない）。
+    // `\p{L}` は漢字・かなにも当たるので、ここで明示的に降りないと、
+    // 和文の隣に立った欧文の複合語を勝手に繋いだり落としたりしてしまう。
+    const left = hyphen[1]!;
+    if (isCjk(left[left.length - 1]) || isCjk(nextWord[0])) continue;
 
-    if (decideLineEndHyphen(hyphen[1]!, nextWord, evidence)) {
+    if (decideLineEndHyphen(left.replace(HYPHEN_CHARS, '-'), nextWord, evidence)) {
       // 本来ハイフンを含む複合語。ハイフンを残したまま行を直結する（空白だけ落とす）。
       segment.buffer = segment.buffer.slice(0, -1);
       segment.owners.length = segment.buffer.length;
     } else {
       // 真のハイフネーション。ハイフンごと落とす。
-      const cut = segment.buffer.lastIndexOf('-');
+      // 末尾は正規表現が保証する「ハイフン + 空白」なので、位置は必ず length - 2。
+      // （lastIndexOf('-') では U+2010/U+2011 のハイフンを取り逃がす。）
+      const cut = segment.buffer.length - 2;
       segment.buffer = segment.buffer.slice(0, cut);
       segment.owners.length = cut;
     }

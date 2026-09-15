@@ -130,6 +130,10 @@ export async function parseWithPdfJs(
   // 崩れの疑いは、節の件数より先に出す。ここが「簡易解析」の一言で終わっていたせいで、
   // 完璧に取れた文書と 3 分の 1 しか取れていない文書が同じ顔で並んでいた。
   if (quality.readingOrderRisk === 'high') warnings.push(`読み順に崩れの疑い: ${quality.reason}`);
+  // 欠落は読み順の崩れとは別に出す。読み順の検出器は**生き残った本文行**しか見ないので、
+  // 落とされた行は入力に一度も入らない（消去は原理的に検出できない）。
+  // 実測で、本文が丸ごと消えているのに readingOrderRisk は low のままだった。
+  if (quality.coverageRisk === 'high') warnings.push(`本文の欠落の疑い: ${quality.coverageReason}`);
   if (sections.length > 0) warnings.push(`節 ${sections.length} 件を検出`);
   if (output.truncatedPages > 0) warnings.push(`先頭 ${limits.maxPages} ページだけを解析（残り ${output.truncatedPages} ページは未処理）`);
   if (output.truncatedChunks) warnings.push('文字数の上限に達したため途中で打ち切り');

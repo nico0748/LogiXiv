@@ -1,0 +1,332 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { buildSentencesFromChunks, splitIntoSentences, type TextChunk } from '../src/sentences.ts';
+import type { PageSize } from '../src/types.ts';
+
+/**
+ * 行と文字片の**継ぎ目に空白を入れるか**の回帰テスト。
+ *
+ * 和文には語の切れ目に空白が無いので、行の折り返しは語の途中で起きる。
+ * 継ぎ目に無条件で空白を入れていた頃は、折り返す文が例外なく壊れていた
+ * （実測: xelatex で組んだ和文論文で 27 文中 19 文。画面には
+ * 「段落と文の切り 出しを検 討する。」と出ていた）。
+ *
+ * PDF は要らない。pdf.js が返す文字片の並びを直接組み立てて渡す。
+ */
+
+const A4: PageSize = { page: 1, width: 595, height: 842 };
+const pages = (count: number): PageSize[] =>
+  Array.from({ length: count }, (_, i) => ({ ...A4, page: i + 1 }));
+
+/** 和文の行。1 文字が 1em 進む（和文の字送りはほぼ正方形）。 */
+function ja(y: number, text: string, size = 10): TextChunk {
+  return { page: 1, text, x: 68, y, w: text.length * size, h: size };
+}
+
+/** 欧文の行。字送りは字高の半分ほど。 */
+function en(y: number, text: string, size = 10): TextChunk {
+  return { page: 1, text, x: 68, y, w: text.length * size * 0.5, h: size };
+}
+
+/** 行の並びを文にして、本文の字面だけを返す。 */
+function bodyTexts(chunks: TextChunk[]): string[] {
+  return buildSentencesFromChunks(chunks, pages(1)).sentences.map((s) => s.text);
+}
+
+/** 本文が 1 本の文字列として見えるようにしたもの（どこで割れたかに依存せず中身を見る）。 */
+function joined(chunks: TextChunk[]): string {
+  return bodyTexts(chunks).join('');
+}
+
+test('和文の行折り返しでは、継ぎ目に空白が入らない', () => {
+  // 実際に壊れていた版面。1 行 46 文字で折り返し、語の途中で行が変わる。
+  const text = joined([
+    ja(100, '本稿では、日本語の本文に英語の術語が混ざる論文を対象に、段落と文の切り'),
+    ja(114, '出しを検討する。既存の手法は空白で語を区切ることを前提としており、文の境'),
+    ja(128, '界を見失う。我々は句点と括弧の対応を手掛かりとする規則を提案した。'),
+  ]);
+
+  assert.ok(text.includes('切り出しを検討する。'), `語が割れている: ${text}`);
+  assert.ok(text.includes('文の境界を見失う。'), `語が割れている: ${text}`);
+  assert.ok(!/[ぁ-んァ-ヶ一-龥、。] [ぁ-んァ-ヶ一-龥、。]/u.test(text), `和文の中に空白が残っている: ${text}`);
+});
+
+test('欧文の行折り返しでは、これまでどおり継ぎ目に空白が入る', () => {
+  const text = joined([
+    en(100, 'We study sentence segmentation for papers whose body text is'),
+    en(114, 'written in Japanese, and we report the error rate of the rule'),
+    en(128, 'based segmenter on three different Japanese corpora.'),
+  ]);
+
+  assert.ok(text.includes('body text is written in Japanese'), `語が繋がってしまった: ${text}`);
+  assert.ok(text.includes('the rule based segmenter'), `語が繋がってしまった: ${text}`);
+});
+
+test('和文と欧文の境目は、その文書が行の途中で空白を置いているかに合わせる', () => {
+  // 空白を置く流儀（LaTeX の和文原稿でいちばん多い書き方）。
+  // 行の途中に「たとえば attention や」と空白があるので、境目の折り返しでも空白が要る。
+  const spaced = joined([
+    ja(100, 'そうした論文では、術語だけが英語のまま残される。たとえば attention や'),
+    ja(114, 'transformer といった語は、訳さずにそのまま使われることが普通である。'),
+    ja(128, '英語の部分では空白が語の区切りになるが、日本語の部分では現れない。'),
+  ]);
+  assert.ok(
+    spaced.includes('attention や transformer といった語'),
+    `空白を置く流儀の文書で境目が詰まった: ${spaced}`,
+  );
+
+  // 空白を置かない流儀（xeCJK・LuaTeX-ja を使う原稿）。
+  // 行の途中が「attention機構」と詰まっているので、境目の折り返しでも詰めるのが正しい。
+  const tight = joined([
+    ja(100, 'そうした論文では、術語だけが英語のまま残される。たとえばattention機'),
+    ja(114, '構やtransformer系の模型はそのまま表記され、和文と欧文の間に空白は無い。'),
+    ja(128, '空白を手掛かりに語を区切る解析器は、この版面では必ず誤ってしまう。'),
+  ]);
+  assert.ok(
+    tight.includes('たとえばattention機構やtransformer系'),
+    `空白を置かない流儀の文書で境目に空白が入った: ${tight}`,
+  );
+});
+
+test('和文と欧文が同じ文書にあっても、欧文の段落の折り返しは空白で繋がる', () => {
+  // 和文誌の英文要旨。同じ文書の中で、和文は詰めて、欧文は空けて繋ぐ必要がある。
+  const text = joined([
+    en(100, 'This paper studies sentence segmentation for papers whose'),
+    en(114, 'body text is written in Japanese, and reports the error rate.'),
+    ja(140, '和文の学会誌では、本文を日本語で書き、術語だけを欧文のまま残すことが多'),
+    ja(154, 'い。空白を手掛かりに語を区切る解析器は、この版面では必ず誤ってしまう。'),
+  ]);
+
+  assert.ok(text.includes('papers whose body text is written'), `欧文の継ぎ目が詰まった: ${text}`);
+  assert.ok(text.includes('残すことが多い。'), `和文の継ぎ目に空白が入った: ${text}`);
+});
+
+test('和文の文字片の継ぎ目は、約物の詰めぶんの隙間では空白にならない', () => {
+  // 句読点は半角ぶん空くので、文字片がそこで割れると 0.5em の隙間が開く。
+  // 欧文と同じ閾値（字高の 0.22 倍）で見ると、ここが空白に化けて語が割れる。
+  const text = joined([
+    // 「、」の直後で文字片が割れ、0.5em ぶん空いている。
+    { page: 1, text: '本稿では、', x: 68, y: 100, w: 50, h: 10 },
+    { page: 1, text: '日本語の本文に英語の術語が混ざる論文を対象とする。', x: 123, y: 100, w: 250, h: 10 },
+    ja(114, '既存の手法は空白で語を区切ることを前提としており、文の境界を見失う。'),
+    ja(128, '我々は句点と括弧の対応を手掛かりとする単純な規則を提案し、評価した。'),
+  ]);
+
+  assert.ok(text.includes('本稿では、日本語の本文に'), `文字片の継ぎ目に空白が入った: ${text}`);
+});
+
+test('和文の行末では、行末ハイフンの処理が働かない', () => {
+  // `\p{L}` は漢字・かなにも当たるので、守りを入れないと和文の行末で
+  // ハイフンが「割れた語のしるし」と読まれ、黙って消える
+  // （実測: 「ハイフン-」＋「結合子」→「ハイフン結合子」）。
+  const text = joined([
+    ja(100, 'この記号は、欧文の複合語をつなぐために使うもので、名前を ハイフン-'),
+    ja(114, '結合子と呼ぶ。和文の行末では、語の途中で折り返しても記号は足されない。'),
+    ja(128, '我々の実装は、継ぎ目の両側が和文であるときには何も足さず、何も消さない。'),
+  ]);
+
+  assert.match(text, /ハイフン-\s?結合子/u, `和文の行末でハイフンが消えた: ${text}`);
+});
+
+test('欧文の行末ハイフンは、和文書体の U+2011 でも結合される', () => {
+  // 和文書体（Noto Serif CJK JP など）で英文を組むと、行末のハイフンが
+  // ASCII の '-' ではなく U+2011（non-breaking hyphen）として取り出される。
+  // 和文誌の英文要旨でそのまま起きるので、ここを見ないと "pa‑ pers" が画面に残る。
+  const text = joined([
+    en(100, 'This paper studies sentence segmentation for scholarly pa‑'),
+    en(114, 'pers whose body text is written in Japanese, and it reports'),
+    en(128, 'the error rate of a rule based segmenter on three corpora.'),
+  ]);
+
+  assert.ok(text.includes('scholarly papers whose'), `行末ハイフンが残っている: ${text}`);
+});
+
+test('両端揃えの和文で字間に撒かれた空白（pdf.js の推測）を落とす', () => {
+  // pdf.js は字送りが 0.102em を超えると、版面に空白が無くても空白文字を差し込む。
+  // 両端揃えの和文は行の伸縮を字間に配るので、狭い段では 1 行の字間すべてが該当する。
+  const text = joined([
+    { page: 1, text: '和 文 の 学 会 誌 で は、 本 文 を 日 本 語 で 書 き、 術', x: 68, y: 100, w: 236, h: 10 },
+    { page: 1, text: '語 だ け を 欧 文 の ま ま 残 す こ と が 多 い。 た と え', x: 68, y: 114, w: 236, h: 10 },
+    ja(128, 'ば欧文の術語はそのまま表記され、和文と欧文の間に空白は入らない。'),
+    ja(142, '空白を手掛かりに語を区切る解析器は、この版面では必ず誤ってしまう。'),
+  ]);
+
+  assert.ok(
+    text.includes('和文の学会誌では、本文を日本語で書き、術語だけを欧文のまま残すことが多い。'),
+    `字間の空白が残っている: ${text}`,
+  );
+});
+
+test('和文の本物の空白（著者名や姓と名の区切り）は落とさない', () => {
+  // 字間に撒かれた空白と違い、本物の空白は 1 行に 1〜2 個しか現れない。
+  // 数と割合の両方で見ているので、ここは残る。
+  const text = joined([
+    ja(100, 'この規則は、佐藤 花子 と 鈴木 一郎 が二千二十一年に提案したものである。'),
+    ja(114, '我々はその規則を、和文と欧文が混ざる版面へ広げることを目的としている。'),
+    ja(128, '対象とするのは、学習データも辞書も用意できない場面に限られる。'),
+  ]);
+
+  assert.ok(text.includes('佐藤 花子 と 鈴木 一郎'), `本物の空白まで落ちた: ${text}`);
+});
+
+/**
+ * 数式を含む本文の回帰テスト。
+ *
+ * どれも `scripts/real-papers/mathheavy.tex` が「この構文は書けない」と避けていた形。
+ * ML・統計・物理の論文では普通の書き方なので、避けたままだと計測の網から漏れる。
+ * 実測は pdflatex で組んだ標本（Computer Modern と Times の両方）で取った。
+ */
+
+/**
+ * 数式まじりの 1 行。`x` は**実測値**（pdflatex + mathptmx の PDF から取った座標）を
+ * そのまま使う。添字と上付きが重なる位置関係は、この値でしか再現しない。
+ */
+function measured(y: number, pieces: Array<[string, number, number, number?, number?]>): TextChunk[] {
+  return pieces.map(([text, x, w, h, dy]) => ({
+    page: 1,
+    text,
+    x,
+    y: y + (dy ?? 0),
+    w,
+    h: h ?? 9.96,
+  }));
+}
+
+test('行内の省略記号（. . .）を文の区切りに取らない', () => {
+  // `$f_1,\dots,f_M$` は点の**間に細い空き**が入るので、PDF からは ". . ." で出てくる。
+  // 連続した ".." だけを見ていた頃は、1 文が "… collection f1, ." と
+  // ", fM of predictors …" に割れ、点だけの断片は黙って捨てられていた。
+  const split = splitIntoSentences(
+    'An ensemble is a collection f1, . . . , fM of predictors fit independently. The next sentence follows.',
+  );
+  assert.equal(split.length, 2, `文が余計に割れた: ${JSON.stringify(split)}`);
+  assert.ok(split[0]!.includes('f1, . . . , fM of predictors'), `本文が欠けた: ${split[0]}`);
+});
+
+test('普通の文末の直後に文が続く形は、これまでどおり切れる', () => {
+  // 省略記号の守りが広がりすぎて、普通の文が切れなくなっていないことの確認。
+  const split = splitIntoSentences('This ends here. Next one starts. A third one closes.');
+  assert.equal(split.length, 3, `文が切れなくなった: ${JSON.stringify(split)}`);
+});
+
+test('数式の一部の大文字を人名のイニシャルと取り違えない', () => {
+  // 文末が `$v/M$.` の形。M の手前が '/' なので「文字ではない＝語の頭」と見なされ、
+  // 次の文が SENTENCE_OPENERS に無い語で始まると 1 文に繋がっていた。
+  const split = splitIntoSentences(
+    'The true error is the squared bias norm plus the member term v/M. Solving for the scalar gives a distinct value.',
+  );
+  assert.equal(split.length, 2, `文が繋がった: ${JSON.stringify(split)}`);
+});
+
+test('人名のイニシャルは、これまでどおり文末にしない', () => {
+  // 上の絞り込みで人名が巻き添えになっていないことの確認。
+  assert.equal(
+    splitIntoSentences('The lead author is J. Doe and the second is M. Tanaka.').length,
+    1,
+  );
+  // 記号としての単一大文字は、次が文頭に立つ語なら文末。
+  assert.equal(
+    splitIntoSentences('We sweep the temperature T. The results are stable.').length,
+    2,
+  );
+});
+
+test('和文の閉じ括弧は、直前の文に含める', () => {
+  // 終端記号の直後の閉じ括弧は前の文に付ける、という既存の規則が欧文の記号しか
+  // 知らず、「これは正しい。」の「」」が**次の文の頭**に回っていた。
+  //
+  // 括弧の中の句点でそもそも切らない（対応を数える）のは別の話で、ここでは直していない。
+  // 欧文の引用符 ("He said 'yes.' Then he left.") も同じ挙動なので、揃えてある。
+  const split = splitIntoSentences('著者は「これは正しい。」と述べている。');
+  assert.equal(split.length, 2, `文の数が変わった: ${JSON.stringify(split)}`);
+  assert.equal(split[0], '著者は「これは正しい。」', `閉じ括弧が次の文へ流れた: ${JSON.stringify(split)}`);
+  assert.equal(split[1], 'と述べている。');
+});
+
+test('添字と上付きを重ねた数式に、余計な空白が入らない', () => {
+  // `$\beta_j^2$`。pdf.js は base の italic correction を空白文字として返すが、
+  // その位置には下付きが重ねて組まれている。残すと "β j2" になる（pdftotext は "βj2"）。
+  const text = joined([
+    en(100, 'We first fix the notation that the rest of the argument uses.'),
+    ...measured(112, [
+      ['Suppose the shared biases have squared norms', 54.0, 202.81],
+      [' ', 256.81, 2.69],
+      ['β', 259.5, 5.47],
+      [' ', 264.97, 1.22],
+      ['j', 266.08, 2.05, 7.37, 5.3],
+      ['2', 266.19, 3.69, 7.37, -1.0],
+      [' ', 269.88, 6.05, 7.37, 5.3],
+      ['under the two shifts.', 275.93, 90.0],
+    ]),
+    en(124, 'The two norms differ, and that is the whole of the obstruction.'),
+  ]);
+
+  assert.ok(text.includes('squared norms βj2 under'), `添字のまわりに空白が入った: ${text}`);
+});
+
+test('上付きだけの数式では、紙面どおりの空白を残す', () => {
+  // `$f^\star$` は紙面でも "f ⋆" と空いて見える（pdftotext も同じ）。
+  // 重なった添字が無いので、ここの空白を落としてはいけない。
+  const text = joined([
+    en(100, 'We first fix the notation that the rest of the argument uses.'),
+    ...measured(112, [
+      ['Each member decomposes into the Bayes predictor', 54.0, 200.0],
+      [' ', 254.0, 3.3],
+      ['f', 257.3, 4.88],
+      [' ', 262.18, 1.07],
+      ['⋆', 263.25, 4.08, 6.97, -0.6],
+      [' ', 267.33, 2.7, 6.97, -0.6],
+      ['and a shared bias term.', 270.03, 95.0],
+    ]),
+    en(124, 'The shared bias is what the ensemble spread never sees at all.'),
+  ]);
+
+  assert.ok(text.includes('predictor f ⋆ and a shared'), `紙面にある空白まで落ちた: ${text}`);
+});
+
+test('二項演算子の前後は、行が詰まっていても空白として読む', () => {
+  // TeX の medmuskip は縮むので、詰めて組まれた行では隙間が 0.03em まで潰れ、
+  // 隙間の閾値（字高の 0.22 倍）に届かない。同じ式が行によって
+  // "f ⋆ + b + εm" にも "f ⋆ +b+εm" にもなっていた。
+  const text = joined([
+    en(100, 'We first fix the notation that the rest of the argument uses.'),
+    ...measured(112, [
+      ['Each member decomposes into the sum', 54.0, 160.0],
+      [' ', 214.0, 3.3],
+      ['f', 217.3, 4.88],
+      [' ', 222.18, 0.83],
+      ['⋆', 223.01, 4.08, 6.97, -0.6],
+      [' ', 227.09, 0.83, 6.97, -0.6],
+      // ここから先は、行を詰めたぶん medmuskip が潰れて隙間が 0.33pt しかない。
+      ['+', 227.92, 7.75],
+      ['b', 236.0, 4.28],
+      ['+', 240.61, 7.75],
+      ['ε', 248.69, 4.65],
+      ['m', 253.34, 7.07, 6.97, 4.5],
+      [' ', 260.41, 2.88, 6.97, 4.5],
+      ['of three parts.', 263.29, 60.0],
+    ]),
+    en(124, 'The shared bias is what the ensemble spread never sees at all.'),
+  ]);
+
+  assert.ok(text.includes('the sum f ⋆ + b + εm of three parts.'), `演算子の前後が詰まった: ${text}`);
+});
+
+test('単項の負号には空白を入れない', () => {
+  // 二項演算子の守りが広がりすぎて、"$-1$" の負号まで空けていないことの確認。
+  const text = joined([
+    en(100, 'We first fix the notation that the rest of the argument uses.'),
+    ...measured(112, [
+      ['The lower bound of the interval is', 54.0, 150.0],
+      [' ', 204.0, 3.3],
+      ['−', 207.3, 7.75],
+      ['1', 215.38, 4.28],
+      [' ', 219.66, 3.3],
+      ['for every member of the family.', 222.96, 120.0],
+    ]),
+    en(124, 'The shared bias is what the ensemble spread never sees at all.'),
+  ]);
+
+  assert.ok(text.includes('interval is −1 for every'), `負号のあとに空白が入った: ${text}`);
+});

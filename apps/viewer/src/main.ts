@@ -194,7 +194,8 @@ function boot(): void {
       ` · ${paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}` +
       // 受け取った側にも、原文が信用できるかどうかは要る。
       // 崩れを直せなくても、崩れていると分かれば読み方を変えられる。
-      (paper.structure.quality?.readingOrderRisk === 'high' ? ' · 読み順に崩れの疑い' : ''),
+      (paper.structure.quality?.readingOrderRisk === 'high' ? ' · 読み順に崩れの疑い' : '') +
+      (paper.structure.quality?.coverageRisk === 'high' ? ' · 本文の欠落の疑い' : ''),
   );
   header.append(title, search, meta);
 

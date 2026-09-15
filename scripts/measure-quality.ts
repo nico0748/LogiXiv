@@ -6,7 +6,7 @@
  * こちらは正解が分かっている PDF を突き合わせる。入力は 2 系統ある:
  *
  *   - 合成 PDF（make-paper-pdf.ts）… 回帰の網。壊れ方を狙って作れる。
- *   - 実物の論文（scripts/real-papers/）… pdflatex で組んだ本物。PDF と正解を
+ *   - 実物の論文（scripts/real-papers/）… pdflatex / xelatex で組んだ本物。PDF と正解を
  *     リポジトリに入れてあるので、pdflatex が無い環境でも測れる。
  *     組み直しは `node --experimental-strip-types scripts/build-real-papers.ts`。
  *
@@ -73,6 +73,14 @@ interface Result {
   ms: number;
   /** core が自己申告した読み順の危うさ。high なら「怪しい」と自分で言えている。 */
   readingOrderRisk: 'low' | 'high';
+  /**
+   * 行になった文字のうち、行き先の説明が付いた割合（core の自己申告）。
+   *
+   * 読み順の申告は**生き残った本文行**しか見ないので、落とされた行は検出器の
+   * 入力に一度も入らない。消去は原理的に検出できない。だから別の列で持つ。
+   */
+  coverage: number;
+  coverageRisk: 'low' | 'high';
 }
 
 /** 多重集合の一致数。同じ文が n 回出るなら n 回数える。 */
@@ -134,7 +142,18 @@ async function score(label: string, pdf: Uint8Array, paper: PaperTruth): Promise
   const found = multisetOverlap(expected, got);
 
   const nonBody = paper.expectedNonBody.map(normalizeSentence).filter((text) => text.length >= 3);
-  const leaks = got.filter((g) => nonBody.some((n) => g.includes(n.slice(0, 20)))).length;
+  /**
+   * 混入は「本文でないものが本文の文に混ざったか」。
+   *
+   * **正解の本文そのものは、何を含んでいても混入ではない。** 照合は
+   * 「付物の先頭 20 文字を含むか」という緩い当たり方をするので、和文のように
+   * 1 文字あたりの情報量が多い書記系では、付物の文字列そのものが本文に出てくる
+   * （実測: 柱の `情報処理学会論文誌` が、本文の `三つのコーパスは情報処理学会論文誌、
+   * 人工知能学会誌、…` に含まれて混入 1 件と数えられていた）。
+   * この除外を入れないと、偽の混入が本物の混入 1 件ぶんの枠を食い潰す。
+   */
+  const wanted = new Set(expected);
+  const leaks = got.filter((g) => !wanted.has(g) && nonBody.some((n) => g.includes(n.slice(0, 20)))).length;
 
   // 画面に出る文字列の検査。行末ハイフンが残っていると "Sma- ller" のまま表示される。
   const hyphenated = structure.sentences.filter((s) => /\p{L}-\s+\p{L}/u.test(s.text)).length;
@@ -158,6 +177,8 @@ async function score(label: string, pdf: Uint8Array, paper: PaperTruth): Promise
     sections: structure.sections.length,
     ms,
     readingOrderRisk: structure.quality?.readingOrderRisk ?? 'low',
+    coverage: structure.quality?.coverage ?? 1,
+    coverageRisk: structure.quality?.coverageRisk ?? 'low',
   };
 }
 
@@ -175,7 +196,8 @@ async function measure(label: string, spec: PaperSpec): Promise<Result> {
  *
  * PDF と正解はリポジトリに入れてある（scripts/real-papers/）。正解は .tex の `\s{...}` から
  * 機械的に作ったもので、PDF から取り出した結果ではない。組み直しは
- * `node --experimental-strip-types scripts/build-real-papers.ts`（pdflatex が要る）。
+ * `node --experimental-strip-types scripts/build-real-papers.ts`
+ * （欧文は pdflatex、和文は xelatex。どちらを使うかは .tex の fontspec の有無で決まる）。
  */
 async function measureRealPapers(): Promise<Result[]> {
   const dir = join(fileURLToPath(new URL('.', import.meta.url)), 'real-papers');
@@ -217,8 +239,8 @@ const realResults = await measureRealPapers();
 
 function table(title: string, rows: Result[]): void {
   console.log(`\n${title}`);
-  console.log('レイアウト             再現率   読順  余分  混入  ハイフン  書換  文数  節  申告   解析');
-  console.log('-----------------------------------------------------------------------------------------');
+  console.log('レイアウト             再現率   読順  余分  混入  ハイフン  書換  文数  節  申告  採録   解析');
+  console.log('------------------------------------------------------------------------------------------------');
   for (const r of rows) {
     console.log(
       `${r.label.padEnd(20)} ${`${Math.round(r.recall * 100)}%`.padStart(5)} (${r.found}/${r.expected})  ` +
@@ -226,13 +248,15 @@ function table(title: string, rows: Result[]): void {
         `${String(r.spurious).padStart(4)} ${String(r.leaks).padStart(5)} ` +
         `${String(r.hyphenated).padStart(7)} ${String(r.rewritten).padStart(5)} ` +
         `${String(r.sentences).padStart(5)} ` +
-        `${String(r.sections).padStart(3)} ${r.readingOrderRisk.padStart(5)} ${String(r.ms).padStart(6)}ms`,
+        `${String(r.sections).padStart(3)} ${r.readingOrderRisk.padStart(5)} ` +
+        `${`${(r.coverage * 100).toFixed(1)}%${r.coverageRisk === 'high' ? '!' : ' '}`.padStart(7)} ` +
+        `${String(r.ms).padStart(6)}ms`,
     );
   }
 }
 
 table('合成 PDF（回帰の網）', results);
-table('実物の論文（pdflatex で組んだもの）', realResults);
+table('実物の論文（pdflatex / xelatex で組んだもの）', realResults);
 
 const all = [...results, ...realResults];
 
@@ -255,7 +279,20 @@ const failures = all.filter(
  */
 const falseAlarms = all.filter((r) => r.readingOrderRisk === 'high' && r.recall >= MIN_RECALL);
 
-if (failures.length > 0 || falseAlarms.length > 0) {
+/**
+ * 欠落の自己申告（採録率）の門。
+ *
+ * 1. 取れているのに high が出たら誤検出。読み順の申告と同じ理由で、誤って鳴る方が害が大きい。
+ * 2. 採録率そのものにも下限を置く。ここが落ちているということは、本文として読める行を
+ *    数式や表として落としているということで、**再現率が 100% でも**起きうる
+ *    （正解に無い形で消えるのではなく、正解の文が丸ごと消えるため再現率にも出るが、
+ *    片方だけ見ていると「消えた理由」が分からない）。
+ */
+const MIN_MEASURED_COVERAGE = 0.98;
+const coverageAlarms = all.filter((r) => r.coverageRisk === 'high' && r.recall >= MIN_RECALL);
+const coverageFailures = all.filter((r) => r.coverage < MIN_MEASURED_COVERAGE);
+
+if (failures.length > 0 || falseAlarms.length > 0 || coverageAlarms.length > 0 || coverageFailures.length > 0) {
   if (failures.length > 0) {
     console.error(
       `\n品質が基準を下回りました（再現率 >= ${MIN_RECALL * 100}% / 読順 >= ${MIN_ORDER * 100}% / ` +
@@ -274,6 +311,21 @@ if (failures.length > 0 || falseAlarms.length > 0) {
     console.error(
       '\n読み順の自己申告が誤って鳴っています（十分に取れている文書に high）:\n' +
         falseAlarms.map((f) => `  ${f.label}: 再現率 ${Math.round(f.recall * 100)}%`).join('\n'),
+    );
+  }
+  if (coverageAlarms.length > 0) {
+    console.error(
+      '\n欠落の自己申告が誤って鳴っています（十分に取れている文書に high）:\n' +
+        coverageAlarms
+          .map((f) => `  ${f.label}: 再現率 ${Math.round(f.recall * 100)}% / 採録率 ${(f.coverage * 100).toFixed(1)}%`)
+          .join('\n'),
+    );
+  }
+  if (coverageFailures.length > 0) {
+    console.error(
+      `\n採録率が基準（${MIN_MEASURED_COVERAGE * 100}%）を下回りました` +
+        '（本文として読める行を数式や表として落としています）:\n' +
+        coverageFailures.map((f) => `  ${f.label}: 採録率 ${(f.coverage * 100).toFixed(1)}%`).join('\n'),
     );
   }
   process.exit(1);
