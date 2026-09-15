@@ -20,6 +20,12 @@ import { LogiXivClient } from './client.ts';
  *    人間向けの文章に混ぜない。
  */
 
+/**
+ * 検索語の上限（本体の http.ts と同じ値）。
+ * 手前で断るのは、往復 1 回ぶん早く、しかも**理由を確実に日本語で返せる**ため。
+ */
+const MAX_QUERY_CHARS = 4_000;
+
 function jsonResult(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
 }
@@ -118,6 +124,19 @@ function sentenceView(document: PaperDocument, sentence: Sentence) {
     order: sentence.order,
     page: sentence.page,
     source: sentence.text,
+    // 原文そのものが壊れているおそれのある文。落とした行がこの文の中に重なっていた。
+    // 記号が落ちて**文法の通る英文**になることがあるので、訳す側からは見分けが付かない。
+    // 付いていない文は「検出できなかった」であって無傷の保証ではない。
+    ...(sentence.seam
+      ? {
+          seam: {
+            kinds: sentence.seam.kinds,
+            warning:
+              '本文として取り出せなかった行がこの文の中に挟まっています。記号や語が抜けているおそれがあります。' +
+              '訳さずに add_note で「原文が壊れている可能性」を残すか、skip_sentences に reason="unreadable" で回してください。',
+          },
+        }
+      : {}),
   };
   // 常に同じ値・常に空のフィールドは落とす。Claude が読むトークンをそのぶん節約する。
   const section = document.structure.sections.find((s) => s.id === sentence.sectionId)?.title;
@@ -412,6 +431,22 @@ export function createMcpServer(baseUrl: string): McpServer {
           duplicateOf: duplicateOf.size > 0 ? Object.fromEntries(duplicateOf) : undefined,
           // メモが付いている文（保留の理由などを書いた場所）。
           withNotes: withNotes.length > 0 ? withNotes : undefined,
+          // 原文が壊れているおそれのある文の order。
+          // 記号が落ちて文法の通る英文になることがあるので、読んだだけでは見分けが付かない。
+          // 「分からないところをそれらしい日本語で埋めるな」という手順が効くのは、
+          // 壊れていることが分かっている場合だけなので、必ず名指しで渡す。
+          damaged: (() => {
+            const orders = window.filter((sentence) => sentence.seam).map((sentence) => sentence.order);
+            return orders.length > 0
+              ? {
+                  orders,
+                  warning:
+                    'これらの文は、本文として取り出せなかった行を挟んで組み立てられています。' +
+                    '記号や語が抜けているおそれがあるので、訳す前に get_sentences で seam を確かめ、' +
+                    '自信が持てなければ add_note に理由を残すか skip_sentences に reason="unreadable" で回してください。',
+                }
+              : undefined;
+          })(),
         });
       } catch (error) {
         return errorResult(error);
@@ -558,6 +593,19 @@ export function createMcpServer(baseUrl: string): McpServer {
     },
     async ({ document_id, query, limit, from }) => {
       try {
+        // 長すぎる検索語はここで断る。本体まで運ぶと、経路によっては
+        // 理由の書かれていない失敗（本文なしの 431）になって戻ってくる。
+        // 断るときは「何文字だったか」まで言う。言わないと切り詰め方が決まらない。
+        if (query.length > MAX_QUERY_CHARS) {
+          return errorResult(
+            new Error(
+              `検索語が長すぎます（${query.length} 文字 / 上限 ${MAX_QUERY_CHARS} 文字）。` +
+                'この検索は「文書の中から語や 1 文を探す」ためのものなので、' +
+                '段落まるごとではなく、探したい語・固有名詞・1 文だけを渡してください。' +
+                '原文全体を見たいときは get_document を使ってください。',
+            ),
+          );
+        }
         const result = await client.search(document_id, query, limit, from);
         // 本文でないヒット（参考文献・キャプションなど）は訳せない。件数を添えておかないと、
         // 一致したのだからと set_translations に渡され、「該当する文がありません」で弾かれる。

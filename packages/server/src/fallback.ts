@@ -1,14 +1,7 @@
 import { Worker } from 'node:worker_threads';
-import {
-  buildSentencesFromChunks,
-  guessTitleFromChunks,
-  sanitizeTitle,
-  STRUCTURE_VERSION,
-  type DocumentStructure,
-  type TextChunk,
-} from '@logixiv/core';
+import { sanitizeTitle, STRUCTURE_VERSION, type DocumentStructure } from '@logixiv/core';
 import type { FallbackWorkerInput, FallbackWorkerOutput } from './fallback-worker.ts';
-import { describePdfFailure, type RawPdfFailure } from './pdf-failure.ts';
+import { describePdfFailure, pdfParseTimeout, type RawPdfFailure } from './pdf-failure.ts';
 
 /**
  * GROBID が無い環境向けのフォールバック解析。
@@ -17,9 +10,16 @@ import { describePdfFailure, type RawPdfFailure } from './pdf-failure.ts';
  * 2 段組では読み順が崩れ、数式や脚注が本文に混ざる。精度は GROBID に明確に劣るので、
  * ここを通ったことは structure.parserNote に必ず書いて UI に出す。
  *
- * pdf.js 本体はワーカースレッドで回す（理由は fallback-worker.ts の先頭に書いた）。
+ * **重い処理はひとつ残らずワーカースレッドで回す**（理由は fallback-worker.ts の先頭）。
+ * ここ（メインスレッド）に残っているのは、上限の管理と、返ってきた材料を
+ * DocumentStructure の形に詰め直すところだけ。以前は pdf.js だけをワーカーに出し、
+ * 文の組み立てはメインスレッドでやっていたが、実測では所要時間の 99% が後者で、
+ * 「逃がしていない方」でサーバーが止まっていた。
+ *
  * そのうえで「ページ数・文字片数・実時間」の 3 つに上限を置く。上限が無いと、
  * アップロード上限の 100MB に対して解析が時間オーダーで伸び、サーバーが実質停止する。
+ * 実時間の上限が本当に効くのは、打ち切りの setTimeout が動くイベントループと
+ * 重い処理が別スレッドに分かれている今の形だから。
  */
 
 export class FallbackParseError extends Error {}
@@ -46,7 +46,7 @@ function runWorker(
   input: FallbackWorkerInput,
   timeoutMs: number,
   /** pdf.js 由来の失敗を日本語に翻訳するための情報（何のファイルか・中身は何か）。 */
-  context: { fileName: string | null; pdf: Uint8Array },
+  context: { fileName: string | null; pdf: Uint8Array; signal?: AbortSignal },
 ): Promise<FallbackWorkerOutput> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(workerUrl(), { workerData: input });
@@ -56,20 +56,35 @@ function runWorker(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      context.signal?.removeEventListener('abort', onAbort);
+      // 同期実行の最中でも止まる（terminate は V8 の実行そのものを打ち切る）。
+      // ここが効かないと、諦めたはずの解析がスレッドの中で走り続けて CPU を食い、
+      // 次の取り込みまで巻き添えにする。
       void worker.terminate();
       fn();
     };
 
+    /**
+     * 取り込みを頼んだ側が居なくなったら、その場で解析をやめる。
+     *
+     * 以前は誰も待っていない解析が最後まで走り切り、**クライアントが諦めた後**に
+     * 文書が黙って一覧に現れていた（実測: 450 ページで 11 分後）。
+     */
+    const onAbort = (): void => {
+      finish(() => reject(context.signal?.reason ?? new FallbackParseError('解析を中止しました')));
+    };
+
     const timer = setTimeout(() => {
       finish(() =>
-        reject(
-          new FallbackParseError(
-            `PDF の解析が ${Math.round(timeoutMs / 1000)} 秒を超えたため中断しました。ページ数が多い PDF は GROBID を使ってください。`,
-          ),
-        ),
+        reject(pdfParseTimeout({ fileName: context.fileName, timeoutMs, maxPages: input.maxPages })),
       );
     }, timeoutMs);
     timer.unref();
+    context.signal?.addEventListener('abort', onAbort, { once: true });
+    if (context.signal?.aborted === true) {
+      onAbort();
+      return;
+    }
 
     worker.on(
       'message',
@@ -92,22 +107,24 @@ function runWorker(
  *
  * メタデータの Title は当たれば一番正確だが、`untitled.dvi`・`Microsoft Word - …`・
  * ファイル名そのものが入っていることが多いので、そういうものは捨てる。
- * 捨てたときは版面から推測する。どちらも駄目なら null を返し、
+ * 捨てたときは版面から推測する（推測そのものは文字片を舐めるのでワーカー側で済ませ、
+ * ここには「どれを採るか」の判断だけを残す）。どちらも駄目なら null を返し、
  * 従来どおり本文 1 文目とファイル名へ落ちる。
  */
-function pickTitle(metadataTitle: string | null, chunks: TextChunk[]): string | null {
+function pickTitle(metadataTitle: string | null, guessedTitle: string | null): string | null {
   const meta = metadataTitle === null ? '' : sanitizeTitle(metadataTitle);
   const looksLikeFileName = /\.(pdf|dvi|tex|docx?|ps)$/i.test(meta) || /^Microsoft Word\b/i.test(meta);
   if (meta.length >= 8 && meta.length <= 300 && !looksLikeFileName) return meta;
 
-  const guessed = guessTitleFromChunks(chunks);
-  return guessed === null ? null : sanitizeTitle(guessed);
+  return guessedTitle === null ? null : sanitizeTitle(guessedTitle);
 }
 
 export interface FallbackParseOptions {
   /** 取り込もうとしているファイルの名前。失敗を「どのファイルの話か」と一緒に伝えるために要る。 */
   fileName?: string | null;
   limits?: FallbackLimits;
+  /** 頼んだ側が居なくなったら解析も捨てる。 */
+  signal?: AbortSignal;
 }
 
 export async function parseWithPdfJs(
@@ -118,13 +135,13 @@ export async function parseWithPdfJs(
   const output = await runWorker(
     { pdf, maxPages: limits.maxPages, maxChunks: limits.maxChunks },
     limits.timeoutMs,
-    { fileName: options.fileName ?? null, pdf },
+    { fileName: options.fileName ?? null, pdf, signal: options.signal },
   );
 
   // nonBody は「PDF には見えているのに右に出てこない行」（参考文献・表・柱・著者行など）。
   // 落とすこと自体は正しいが、落としたことが見えないと
   // 「まだ訳が来ていないのか、自分が見落としたのか」が区別できない。
-  const { sentences, sections, nonBody, quality } = buildSentencesFromChunks(output.chunks, output.pageSizes);
+  const { sentences, sections, nonBody, quality } = output;
 
   const warnings: string[] = [];
   // 崩れの疑いは、節の件数より先に出す。ここが「簡易解析」の一言で終わっていたせいで、
@@ -147,7 +164,7 @@ export async function parseWithPdfJs(
       ...warnings,
     ].join(' / '),
     parsedAt: new Date().toISOString(),
-    title: pickTitle(output.metadataTitle, output.chunks),
+    title: pickTitle(output.metadataTitle, output.guessedTitle),
     abstract: null,
     pageSizes: output.pageSizes,
     sections,

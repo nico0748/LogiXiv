@@ -29,6 +29,12 @@ export interface NonBodySentence extends Sentence {
   afterHash: string | null;
 }
 
+/** 文の中に、本文として採らなかった行が重なっていたことの印。 */
+export interface SentenceSeam {
+  kinds: NonBodySentence['kind'][];
+  rects: Rect[];
+}
+
 export interface Sentence {
   id: string;
   hash: string;
@@ -37,6 +43,13 @@ export interface Sentence {
   text: string;
   rects: Rect[];
   sectionId: string | null;
+  /**
+   * この文を組み立てるとき、本文として採らなかった行が中に重なっていた。
+   *
+   * ＝ **原文と食い違っているおそれがある文**。付いていない文は「この経路では
+   * 検出できなかった」であって、無傷の保証ではない。
+   */
+  seam?: SentenceSeam;
 }
 
 export interface Section {

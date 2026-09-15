@@ -10,6 +10,7 @@ import type {
   Section,
   Sentence,
   SentenceEdit,
+  SentenceSeam,
   StructureQuality,
   SkippedSentence,
   Translation,
@@ -180,9 +181,40 @@ function sanitizeSentences(value: unknown, report: SanitizeReport, remap?: HashR
       text,
       rects,
       sectionId: str(raw['sectionId'], 200),
+      // 継ぎ目の印は、受け取った側にこそ要る。原文が壊れているおそれのある文を
+      // 「そう書いてある」として読ませないための、いちばん最後の歯止めなので、
+      // 書き出し → 取り込みの往復で落としてはいけない。
+      ...(() => {
+        const seam = sanitizeSeam(raw['seam']);
+        return seam === undefined ? {} : { seam };
+      })(),
     });
   }
   return sentences;
+}
+
+const NON_BODY_KINDS: ReadonlySet<string> = new Set([
+  'frontMatter',
+  'runningHead',
+  'pageNumber',
+  'caption',
+  'reference',
+  'footnote',
+  'formula',
+  'table',
+  'other',
+]);
+
+function sanitizeSeam(value: unknown): SentenceSeam | undefined {
+  if (!isRecord(value)) return undefined;
+  const rawKinds = Array.isArray(value['kinds']) ? value['kinds'] : [];
+  const kinds = rawKinds.filter((kind): kind is NonBodySentence['kind'] =>
+    typeof kind === 'string' && NON_BODY_KINDS.has(kind),
+  );
+  const rawRects = Array.isArray(value['rects']) ? value['rects'] : [];
+  const rects = rawRects.map(sanitizeRect).filter((rect): rect is Rect => rect !== null);
+  if (kinds.length === 0 && rects.length === 0) return undefined;
+  return { kinds, rects };
 }
 
 /**

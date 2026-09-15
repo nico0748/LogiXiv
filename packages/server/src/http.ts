@@ -16,7 +16,7 @@ import {
 import { ViewerNotBuiltError } from './exporter.ts';
 import { GrobidParseError, GrobidUnavailableError } from './grobid.ts';
 import { FallbackParseError } from './fallback.ts';
-import { PdfUnreadableError } from './pdf-failure.ts';
+import { pdfIngestAbandoned, PdfUnreadableError } from './pdf-failure.ts';
 
 /**
  * ローカル専用の HTTP 層。
@@ -37,6 +37,19 @@ import { PdfUnreadableError } from './pdf-failure.ts';
 const MAX_UPLOAD_BYTES = MAX_PDF_BYTES;
 const MAX_JSON_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_FIELD = 20_000;
+/**
+ * 検索語の上限。
+ *
+ * 上限が無いのではなく、**Node の既定ヘッダ上限（16KB）が事実上の上限になっていた**のが
+ * 問題だった。URL に載せた検索語が 17KB 付近を越えると、この層に届く前に Node が
+ * 431 を**本文なしで**返し、呼び出し側には理由が一文字も残らない。
+ * 段落まるごとを検索語にする使い方（MCP から来る）で普通に踏む。
+ *
+ * そこで検索語は本文でも受け取れるようにし（POST /search）、そのうえで
+ * 「長すぎる」は**日本語で断る**。4000 文字は論文の 1 段落より長く、
+ * 実用の検索語としては十分に余裕がある。
+ */
+const MAX_QUERY_CHARS = 4_000;
 const MAX_NOTE_FIELD = 50_000;
 
 const MIME: Record<string, string> = {
@@ -104,6 +117,21 @@ function requireString(value: unknown, field: string, maxLength: number): string
   return value;
 }
 
+/**
+ * 検索語を受け取る。断るときは「何文字だったか」まで言う。
+ * 言わないと、渡した側はどこまで削ればいいのかを決められない。
+ */
+function readQuery(value: unknown): string {
+  if (typeof value !== 'string') throw new BadRequestError('q は文字列である必要があります');
+  if (value.length > MAX_QUERY_CHARS) {
+    throw new BadRequestError(
+      `検索語が長すぎます（${value.length} 文字 / 上限 ${MAX_QUERY_CHARS} 文字）。` +
+        '段落まるごとではなく、探したい語や 1 文だけを渡してください。',
+    );
+  }
+  return value;
+}
+
 function optionalString(value: unknown, field: string, maxLength: number): string | null {
   if (value === undefined || value === null) return null;
   return requireString(value, field, maxLength);
@@ -147,7 +175,11 @@ function errorStatus(error: unknown): number {
   //   それ以外 … PDF ではあるが解析できない（暗号化・途中で切れた・壊れている）→ 422
   if (error instanceof PdfUnreadableError) {
     if (error.reason === 'missing') return 404;
-    return error.reason === 'not-pdf' ? 400 : 422;
+    if (error.reason === 'not-pdf') return 400;
+    // 打ち切りは「この PDF はこの経路では読み切れない」という入力側の話なので 422、
+    // 中止は「頼んだ側が消えた」ので 499（受け取り手が居ないので番号は記録用）。
+    if (error.reason === 'abandoned') return 499;
+    return 422;
   }
   if (error instanceof BadRequestError || error instanceof ImportError) return 400;
   if (error instanceof TooLargeError) return 413;
@@ -208,11 +240,40 @@ async function serveStatic(root: string, pathname: string, response: ServerRespo
   return true;
 }
 
+/**
+ * 「この応答を受け取る人がもう居ない」ことを伝える合図を作る。
+ *
+ * 取り込みは分単位かかることがあり、その間にタブが閉じられたり、待ちきれずに
+ * 再読み込みされたりする。以前はそれを見ていなかったので、**誰も待っていない解析が
+ * 最後まで走り切り、クライアントが諦めた後に文書が黙って一覧に現れていた**。
+ *
+ * 見るのは `response` の close。`request` の close は本文を読み終えた時点でも上がるので、
+ * それを合図にすると正常な取り込みまで中止してしまう。`writableEnded` を確認するのは、
+ * 正常に返し終えた後の close と、途中で切られた close を区別するため。
+ */
+function clientGoneSignal(
+  request: IncomingMessage,
+  response: ServerResponse,
+  fileName: string,
+): AbortSignal {
+  const controller = new AbortController();
+  const onClose = (): void => {
+    if (response.writableEnded) return;
+    controller.abort(pdfIngestAbandoned(fileName));
+  };
+  response.once('close', onClose);
+  request.once('aborted', onClose);
+  return controller.signal;
+}
+
 export function createHttpServer(config: Config, api: LogiXivApi): Server {
-  return createServer((request, response) => {
+  const server = createServer((request, response) => {
     handle(config, api, request, response).catch((error: unknown) => {
       const status = errorStatus(error);
       if (status === 500) console.error('[logixiv]', error);
+      // 相手が居なくなって中止したときは、書く先がもう無い。書こうとすると
+      // ERR_STREAM_WRITE_AFTER_END が上がり、本当の失敗のように見えてしまう。
+      if (response.writableEnded || response.destroyed) return;
       if (!response.headersSent) {
         sendJson(response, status, errorBody(error));
       } else {
@@ -220,6 +281,37 @@ export function createHttpServer(config: Config, api: LogiXivApi): Server {
       }
     });
   });
+
+  /**
+   * Node 自身が撥ねたリクエストにも、必ず日本語の 1 文を持たせる。
+   *
+   * ヘッダが既定の 16KB を越えると、リクエストは上のハンドラに**一度も届かず**、
+   * Node が `431` を本文なしで返して切る。受け取った側（MCP 経由の Claude）には
+   * 理由が一文字も残らないので、何が悪かったのか分からないまま再試行を繰り返す。
+   * 実測: search_document に 20000 文字の検索語を渡すと、isError なのに本文が空だった。
+   */
+  server.on('clientError', (error: NodeJS.ErrnoException, socket) => {
+    if (socket.destroyed || socket.writableEnded) return;
+    const overflow = error.code === 'HPE_HEADER_OVERFLOW';
+    const payload = JSON.stringify({
+      error: overflow
+        ? 'リクエストのヘッダ（URL を含む）が大きすぎます。長い検索語を URL に載せると ' +
+          'Node の上限（16KB）に当たります。検索は本文で渡す経路（POST /api/documents/:id/search）を使うか、' +
+          '検索語を短くしてください。'
+        : `リクエストを解釈できませんでした（${error.code ?? error.message}）。`,
+      code: overflow ? 'header_too_large' : 'bad_request',
+    });
+    const status = overflow ? '431 Request Header Fields Too Large' : '400 Bad Request';
+    socket.end(
+      `HTTP/1.1 ${status}\r\n` +
+        'Content-Type: application/json; charset=utf-8\r\n' +
+        `Content-Length: ${Buffer.byteLength(payload)}\r\n` +
+        'Connection: close\r\n\r\n' +
+        payload,
+    );
+  });
+
+  return server;
 }
 
 async function handle(
@@ -288,7 +380,9 @@ async function handle(
     const preference: ParserPreference =
       requested === 'grobid' || requested === 'fallback' ? requested : 'auto';
     const pdf = await readBody(request);
-    const result = await api.ingestPdf(pdf, fileName, preference);
+    const result = await api.ingestPdf(pdf, fileName, preference, {
+      signal: clientGoneSignal(request, response, fileName),
+    });
     sendJson(response, 201, {
       documentId: result.document.id,
       usedFallback: result.usedFallback,
@@ -411,10 +505,19 @@ async function handle(
       sendJson(response, 200, await api.removeGlossaryEntry(id, term));
       return;
     }
-    if (rest === '/search' && method === 'GET') {
-      const query = url.searchParams.get('q') ?? '';
-      const limit = Number.parseInt(url.searchParams.get('limit') ?? '30', 10);
-      const from = Number.parseInt(url.searchParams.get('from') ?? '0', 10);
+    if (rest === '/search' && (method === 'GET' || method === 'POST')) {
+      // GET は画面から（短い語）、POST は検索語を本文で受け取る経路。
+      // 長い検索語を URL に載せると Node のヘッダ上限に当たって 431 が本文なしで返り、
+      // 呼び出し側に理由が一切残らないので、長さに不安がある側は POST を使う。
+      const body =
+        method === 'POST'
+          ? await readJson<{ q?: unknown; limit?: unknown; from?: unknown }>(request)
+          : {};
+      const query = readQuery(method === 'POST' ? (body.q ?? '') : (url.searchParams.get('q') ?? ''));
+      const rawLimit = method === 'POST' ? body.limit : url.searchParams.get('limit');
+      const rawFrom = method === 'POST' ? body.from : url.searchParams.get('from');
+      const limit = Number.parseInt(String(rawLimit ?? '30'), 10);
+      const from = Number.parseInt(String(rawFrom ?? '0'), 10);
       sendJson(
         response,
         200,

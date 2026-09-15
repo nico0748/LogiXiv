@@ -96,6 +96,13 @@ function countLabel(
   return `${translated} / ${hashes.size} 文${notTranslated}${repeats}`;
 }
 
+function seamLabel(kinds: NonBodySentence['kind'][]): string {
+  const names = kinds.map((kind) => NON_BODY_LABELS[kind] ?? '行');
+  if (names.length === 0) return '行';
+  if (names.length <= 2) return names.join('と');
+  return `${names.slice(0, 2).join('と')}など`;
+}
+
 const NON_BODY_LABELS: Record<NonBodySentence['kind'], string> = {
   frontMatter: '表題・著者',
   runningHead: '柱',
@@ -289,6 +296,18 @@ function boot(): void {
       card.append(el('p', 'lxv-untranslated', '（未訳）'));
     }
     card.append(el('p', 'lxv-source', sentence.text));
+
+    // 受け取った側にも、どの文の原文が怪しいかは要る。訳文だけを読むと
+    // 記号が落ちた文も「そう書いてある」としか見えない。
+    if (sentence.seam) {
+      card.append(
+        el(
+          'p',
+          'lxv-seam',
+          `この文には、本文として取り出せなかった${seamLabel(sentence.seam.kinds)}が挟まっています（記号や語が抜けているおそれ）。`,
+        ),
+      );
+    }
 
     for (const note of notesByHash.get(sentence.hash) ?? []) {
       const noteElement = el('p', 'lxv-note', note.body);

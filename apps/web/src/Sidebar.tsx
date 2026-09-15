@@ -254,6 +254,14 @@ export function Sidebar(props: Props): React.JSX.Element {
   );
 }
 
+/** 継ぎ目に挟まっていたものの呼び方。並べても長くならないよう 2 つまで。 */
+function seamLabel(kinds: NonBodySentence['kind'][]): string {
+  const names = kinds.map((kind) => KIND_LABELS[kind] ?? '行');
+  if (names.length === 0) return '行';
+  if (names.length <= 2) return names.join('と');
+  return `${names.slice(0, 2).join('と')}など`;
+}
+
 const KIND_LABELS: Record<NonBodySentence['kind'], string> = {
   frontMatter: '表題・著者',
   runningHead: '柱',
@@ -496,6 +504,18 @@ function SentenceCardView(props: CardProps): React.JSX.Element {
       ) : (
         <p className="card-source" lang="en">
           {sentence.text}
+        </p>
+      )}
+
+      {/* 文書単位のバッジでは足りない。52 文のうち 46 文が正しいとき、
+          読み手が知る必要があるのは「どの 6 文か」なので、その文の中で言う。
+          ここが無いと、記号が落ちて**文法の通る英文**になった文を、
+          Claude がもっともらしい日本語に訳し、読者には「そう書いてある」
+          としか見えない（定理の不等式から係数が消えた例が実際にあった）。 */}
+      {sentence.seam && (
+        <p className="card-seam">
+          この文には、本文として取り出せなかった{seamLabel(sentence.seam.kinds)}が挟まっています。
+          記号や語が抜けているおそれがあるので、訳す前に PDF を確かめてください。
         </p>
       )}
 

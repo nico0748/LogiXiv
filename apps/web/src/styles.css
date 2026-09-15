@@ -797,6 +797,17 @@ textarea {
   color: var(--muted);
 }
 
+/* 継ぎ目の印。文書単位のバッジでは「どの文か」が分からないので、その文に出す。 */
+.card-seam {
+  margin: 0.25rem 0 0;
+  padding: 0.25rem 0.5rem;
+  border-left: 3px solid var(--warn);
+  border-radius: 0 4px 4px 0;
+  background: rgba(180, 83, 9, 0.08);
+  font-size: 0.75rem;
+  color: var(--ink);
+}
+
 /* 同じ本文のくり返しは、訳が勝手に入ったように見える。理由をその場に置く。 */
 .card-repeat {
   margin: 0.15rem 0 0;

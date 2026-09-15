@@ -207,6 +207,15 @@
   font-size: 0.82rem;
 }
 
+/* 継ぎ目の印。どの文の原文が怪しいかは、文書単位では伝わらない。 */
+.lxv-seam {
+  margin: 0.3rem 0 0;
+  padding: 0.25rem 0.5rem;
+  border-left: 3px solid var(--lxv-note);
+  font-size: 0.78rem;
+  opacity: 0.9;
+}
+
 /* 本文として扱わなかった行。在ることだけ示す。訳の対象と見分けが付く見た目にする。 */
 .lxv-card.lxv-nonbody {
   opacity: 0.6;

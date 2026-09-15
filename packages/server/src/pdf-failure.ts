@@ -22,6 +22,10 @@ export type PdfFailureReason =
   | 'corrupt'
   | 'not-pdf'
   | 'missing'
+  /** 読めなかったのではなく、時間の上限で**こちらが**打ち切った。 */
+  | 'timeout'
+  /** 読めなかったのではなく、頼んだ本人が居なくなったので捨てた。 */
+  | 'abandoned'
   | 'unknown';
 
 export class PdfUnreadableError extends Error {
@@ -139,5 +143,50 @@ export function missingStoredPdf(documentId: string, path: string, detail: strin
       '元の PDF をもう一度取り込み直すか、この文書を削除してください。' +
       `（置き場: ${path}）`,
     { fileName: 'source.pdf', detail: `${detail} [document=${documentId}]` },
+  );
+}
+
+/**
+ * 時間の上限で解析を打ち切った、というときの言い方。
+ *
+ * 「読めない PDF」ではなく「読むのに時間がかかりすぎた PDF」なので、言うべきことが違う。
+ * ファイルを取り直しても直らないし、壊れてもいない。だから
+ * 「どこまでやって」「なぜ止めて」「代わりに何ができるか」を全部書く。
+ *
+ * 打ち切りは黙って起きてはいけない。実測で、上限を超えた取り込みは
+ * （上限が効かないまま）11 分走り続け、その間ブラウザは真っ白のままだった。
+ */
+export function pdfParseTimeout(options: {
+  fileName: string | null;
+  timeoutMs: number;
+  /** 解析しようとしていたページ数の上限。人が「多すぎた」を判断する材料になる。 */
+  maxPages: number;
+}): PdfUnreadableError {
+  const seconds = Math.round(options.timeoutMs / 1000);
+  return new PdfUnreadableError(
+    'timeout',
+    `${subject(options.fileName, `解析しようとしましたが、${seconds} 秒を超えたので打ち切りました。`)}` +
+      'ファイルが壊れているわけではありません。GROBID を使わない簡易解析は、' +
+      'ページ数が増えるほど急に時間がかかるので、付録込みの長い原稿や博士論文では上限に当たります。' +
+      'GROBID を起動して取り込み直す（精度も上がります）か、' +
+      '必要な範囲だけを抜き出した PDF にしてから取り込んでください。' +
+      `（この取り込みでは ${seconds} 秒・先頭 ${options.maxPages} ページを上限にしています）`,
+    { fileName: options.fileName, detail: `fallback parse exceeded ${options.timeoutMs}ms` },
+  );
+}
+
+/**
+ * 頼んだ側が居なくなったので取り込みを捨てた、というときの言い方。
+ *
+ * 誰も受け取らない応答になるので、人がこの文を読むのは稀（ログと、切断を検知する前に
+ * 終わっていた場合だけ）。それでも黙って捨てない: 捨てたことが分かる形にしておかないと、
+ * 「途中で消えた」のか「そもそも始まっていなかった」のかを後から誰も言えなくなる。
+ */
+export function pdfIngestAbandoned(fileName: string | null): PdfUnreadableError {
+  return new PdfUnreadableError(
+    'abandoned',
+    `${subject(fileName, '取り込もうとしましたが、解析の途中で接続が切れたので取り込みを取り消しました。')}` +
+      '文書は作られていません（中途半端な文書を一覧に残さないため）。もう一度取り込んでください。',
+    { fileName, detail: 'client disconnected during ingest' },
   );
 }

@@ -956,3 +956,120 @@ test('1 回しか出ない柱を、本文の文の途中に挟まない', () => 
   );
   assert.ok(nonBody.some((n) => n.kind === 'runningHead'), `柱が柱として残っていない: ${JSON.stringify(nonBody.map((n) => `${n.kind}:${n.text}`))}`);
 });
+
+// --- 文ごとの継ぎ目の印 --------------------------------------------------
+
+/**
+ * 落とした行と重なる位置で組み立てた文に印を付ける。
+ *
+ * 文書単位の申告では足りない。実測（ML 理論の論文、本文 52 文）で、正しく取れた
+ * 46 文と、原文と内容が違う 6 文が同じ顔で並んだ。しかも壊れた文は**文法的に完璧で
+ * 数学だけが間違っている**ので、訳す側にも読む側にも気付けない。
+ */
+test('落とした行が文の内側にあるとき、その文に印を付ける', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 8; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 204, 'There exists a constant such that the averaged'));
+  chunks.push(chunk(1, 50, 217, 'deviation is bounded by the same constant.'));
+  // 総和の添字。本文の行と同じ帯の中に、字下げされて入り込む。
+  chunks.push({ page: 1, text: 'm=1', x: 120, y: 226, w: 20, h: 7 });
+  for (let i = 0; i < 8; i++) chunks.push(measureLine(i + 20, 240 + i * 13));
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const target = sentences.find((s) => s.text.includes('There exists a constant'));
+  assert.ok(target !== undefined, JSON.stringify(sentences.map((s) => s.text).slice(7, 11)));
+  assert.ok(target!.seam !== undefined, '落とした行が内側にあるのに印が付いていない');
+  assert.deepEqual(target!.seam!.kinds, ['formula']);
+  assert.equal(target!.seam!.rects.length, 1, '抜けている場所を指す矩形が無い');
+});
+
+test('正しく落とした別行立ての表をまたいだだけの文には、印を付けない', () => {
+  // 印は「この文だけは原文と食い違っているおそれがある」という強い主張なので、
+  // 正しく取れている文に 1 件でも付いたら、以後まとめて無視されるようになる。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 230, 'Information retrieval benefits from'));
+  chunks.push(chunk(1, 120, 243, 'Model     Acc     F1'));
+  chunks.push(chunk(1, 120, 256, 'Dense     81.2    79.4'));
+  chunks.push(chunk(1, 50, 269, 'the same sparsity pattern at every depth.'));
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i + 20, 282 + i * 13));
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const target = sentences.find((s) => s.text.startsWith('Information retrieval'));
+  assert.ok(target !== undefined, JSON.stringify(sentences.map((s) => s.text).slice(9, 13)));
+  assert.equal(target!.seam, undefined, `正しく取れている文に印が付いた: ${target!.text}`);
+  assert.equal(sentences.filter((s) => s.seam !== undefined).length, 0, '誤爆がある');
+});
+
+// --- 行番号つきの投稿稿 --------------------------------------------------
+
+test('左余白の行番号を本文に混ぜない', () => {
+  // 査読稿・投稿稿・校正刷りは \usepackage{lineno} で組まれる。行番号が本文に
+  // 割り込むと、行末ハイフンの結合も効かず `stan- 4 dard` が画面に残る。
+  // 本文には数字を入れない（入れると「行番号が混ざったか」の判定が付かない）。
+  const plain = (n: number): TextChunk =>
+    chunk(1, 50, 100 + n * 13, `${'Body text that fills the whole measure here and now'.slice(0, 48)}.`);
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 12; i++) {
+    chunks.push(plain(i));
+    // 版面の左外（x=40）に、本文より小さい数字。
+    chunks.push({ page: 1, text: String(i + 1), x: 40, y: 105 + i * 13, w: 3, h: 5 });
+  }
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(!sentences.some((s) => /\d/.test(s.text)), `行番号が本文に混ざった: ${JSON.stringify(sentences.slice(0, 2).map((s) => s.text))}`);
+  assert.equal(sentences.length, 12, `本文の文数が合わない: ${sentences.length}`);
+});
+
+test('版面の中にあるノンブルは行番号と間違えない', () => {
+  // 行番号との違いは「本文の x 範囲の外か中か」。ノンブルは中央なので中。
+  const chunks: TextChunk[] = [];
+  for (const page of [1, 2]) {
+    for (let i = 0; i < 12; i++) chunks.push({ ...measureLine(i, 100 + i * 13), page });
+    chunks.push(chunk(page, 160, 400, String(page), 9));
+  }
+  const { sentences, nonBody } = buildSentencesFromChunks(chunks, pages(2));
+  assert.equal(sentences.length, 24, `本文の文数が合わない: ${sentences.length}`);
+  assert.ok(nonBody.some((n) => n.kind === 'pageNumber'), 'ノンブルが残っていない');
+});
+
+// --- 段に収まる幅の表題 --------------------------------------------------
+
+test('段に収まる幅の表題でも、段より先に読む', () => {
+  // 段が細いほど中央寄せの表題は中の段にすっぽり収まる。幅だけを見ると段抜きだと
+  // 分からず、左の段を読み終えた後に現れて本文の文の途中に刺さる。
+  const chunks: TextChunk[] = [];
+  // 3 段。左 50..195、中 230..375、右 410..555。表題は中の段に収まる幅。
+  chunks.push(chunk(1, 255, 60, 'Narrow Columns', 16));
+  for (let i = 0; i < 12; i++) {
+    // 左段の最終行は文を閉じない。中の段の 1 行目へ文が続くので、表題がそこへ
+    // 割り込むと**文の途中**に刺さる（段の切れ目に挟まるだけでは症状が出ない）。
+    const left = i === 11 ? 'Left line eleven runs on' : `Left line ${i} of the page here.`;
+    const mid = i === 0 ? 'and finishes in the middle.' : `Mid line ${i} of the page here.`;
+    chunks.push(chunk(1, 50, 120 + i * 13, left));
+    chunks.push(chunk(1, 230, 120 + i * 13, mid));
+    chunks.push(chunk(1, 410, 120 + i * 13, `Right line ${i} of the page.`));
+  }
+
+  const texts = buildSentencesFromChunks(chunks, pages(1)).sentences.map((s) => s.text);
+  assert.ok(
+    texts.includes('Left line eleven runs on and finishes in the middle.'),
+    `表題が本文の文の途中に刺さった: ${JSON.stringify(texts.filter((t) => t.includes('runs on')))}`,
+  );
+});
+
+test('1 文字の語の直後の行末ハイフンは落とさない', () => {
+  // TeX は語の頭から 1 文字だけ残して割らない（\lefthyphenmin >= 2）ので、
+  // こう見えたら本物のハイフン。実測（multicol の 3 段組）で `x-ray` が `xray` に。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) chunks.push(measureLine(i, 100 + i * 13));
+  // 詰め物で伸ばさない。文字片の末尾に空白が残ると、行末ハイフンの判定が空白に当たる。
+  chunks.push(chunk(1, 50, 178, 'The crystals here were all characterised by x-'));
+  chunks.push(chunk(1, 50, 191, 'ray diffraction at room temperature.'));
+
+  const texts = buildSentencesFromChunks(chunks, pages(1)).sentences.map((s) => s.text);
+  assert.ok(
+    texts.some((t) => t.includes('x-ray diffraction')),
+    `本来のハイフンが消えた: ${JSON.stringify(texts.slice(-2))}`,
+  );
+});

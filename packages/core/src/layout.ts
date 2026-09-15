@@ -436,6 +436,60 @@ function resolveColumns(byPage: Map<number, TextChunk[]>): Map<number, ColumnRan
 }
 
 /** 段ごと・y ごとに文字片をまとめて行にする。 */
+/** その文字片がどの段に属するか。重なりが最大の段へ必ず割り当てる（段の外を作らない）。 */
+function columnOf(chunk: TextChunk, columns: readonly ColumnRange[]): number {
+  let bestIndex = 0;
+  let bestOverlap = -Infinity;
+  for (let i = 0; i < columns.length; i++) {
+    const range = columns[i]!;
+    const overlap = Math.min(range.to, chunk.x + chunk.w) - Math.max(range.from, chunk.x);
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
+}
+
+/** 行番号の帯と認めるための、1 ページあたりの最小個数。 */
+const MIN_MARGIN_NUMBERS = 5;
+
+/**
+ * 版面の外の余白に振られた行番号を見つける。
+ *
+ * 査読稿・投稿稿・校正刷り（NeurIPS / ICLR / ACL の投稿稿、学術誌のゲラ）は
+ * `\usepackage{lineno}` + `\linenumbers` で組まれる。この道具がいちばん読まれる
+ * 対象そのものなのに、行番号が**本文の中に入り込んで全文が壊れていた**。実測:
+ *   `We evaluate three configurations on the stan- 4 dard benchmark suite …`
+ * 行番号が割り込むので行末ハイフンの結合も効かず、`stan- 4 dard` が画面に残る。
+ * さらに、左外の細い帯が段の切れ目に見えて段組の検出そのものが狂っていた。
+ *
+ * 見分け方は版面だけで足りる。行番号は
+ *   - 数字だけの短い文字片で、
+ *   - **本文の x 範囲の外**（左または右の余白）にあり、
+ *   - 1 ページに何本も並ぶ。
+ * ノンブルは本文の x 範囲の**中**（中央や端）に 1 つだけなので、これで外れる。
+ */
+function findMarginNumbers(byPage: ReadonlyMap<number, TextChunk[]>): Set<TextChunk> {
+  const found = new Set<TextChunk>();
+  for (const pageChunks of byPage.values()) {
+    const numeric = pageChunks.filter((chunk) => /^\d{1,4}$/.test(chunk.text.trim()));
+    if (numeric.length < MIN_MARGIN_NUMBERS) continue;
+    const rest = pageChunks.filter((chunk) => !/^\d{1,4}$/.test(chunk.text.trim()));
+    if (rest.length === 0) continue;
+    const textLeft = Math.min(...rest.map((chunk) => chunk.x));
+    const textRight = Math.max(...rest.map((chunk) => chunk.x + chunk.w));
+    // 余白との隔たりは文字高で測る（版面の寸法に依らない）。
+    const gap = median(rest.map((chunk) => chunk.h)) * 0.5;
+    const outside = numeric.filter(
+      (chunk) => chunk.x + chunk.w <= textLeft - gap || chunk.x >= textRight + gap,
+    );
+    if (outside.length < MIN_MARGIN_NUMBERS) continue;
+    for (const chunk of outside) found.add(chunk);
+  }
+  return found;
+}
+
 export function buildLines(chunks: TextChunk[]): Line[] {
   const byPage = new Map<number, TextChunk[]>();
   for (const chunk of chunks) {
@@ -443,6 +497,21 @@ export function buildLines(chunks: TextChunk[]): Line[] {
     const list = byPage.get(chunk.page);
     if (list) list.push(chunk);
     else byPage.set(chunk.page, [chunk]);
+  }
+
+  /**
+   * 行番号の帯は、行を組み立てる前に**丸ごと外す**。
+   *
+   * 版面に印刷された座標の目盛りであって、読む対象ではない（ノンブルと違って
+   * 1 ページに何十個も並ぶので、付物として並べても画面が埋まるだけ）。
+   * 残すと、左外の細い帯が段の切れ目に見えて段組の検出が狂い、さらに番号が
+   * 本文の行の中に割り込んで全文が壊れる。詳細は findMarginNumbers。
+   */
+  const marginNumbers = findMarginNumbers(byPage);
+  if (marginNumbers.size > 0) {
+    for (const [page, pageChunks] of byPage) {
+      byPage.set(page, pageChunks.filter((chunk) => !marginNumbers.has(chunk)));
+    }
   }
 
   const columnsByPage = resolveColumns(byPage);
@@ -490,6 +559,52 @@ export function buildLines(chunks: TextChunk[]): Line[] {
      */
     const fullWidthRows = new Set<number>();
     for (const chunk of pageChunks) if (crossesGutter(chunk)) fullWidthRows.add(rowKey(chunk));
+
+    /**
+     * 幅で段間をまたいでいなくても、**他のどの段の先頭よりも上にある**行は前付。
+     *
+     * 段が細いほど、中央寄せの表題は中の段にすっぽり収まってしまう。実測
+     * （multicol の 3 段組）で `Three Narrow Columns` が段 1 の中に収まり、
+     * 段 0 を読み終えた後に現れて**本文の文の途中に刺さった**:
+     *   `… which we determine independently Three Narrow Columns from inelastic …`
+     * 紙の上では誰が見てもページの頭にあるので、読み順は「どの段より上か」で決まる。
+     *
+     * 他の段に本文がある場合だけ見る（1 段しかなければ帯に分ける意味が無い）。
+     * 行 1 本ぶん以上の隔たりを求めるのは、段の頭がわずかに揃わない版面で
+     * 本文の 1 行目を前付に取られないため。
+     */
+    const banner = new Set<TextChunk>();
+    const gap = median(pageChunks.map((chunk) => chunk.h));
+    // 上から順に剥がす。柱を 1 本剥がすと、その下にあった表題が「どの段よりも上」に
+    // なる、という具合に段階的に決まるので、変化が止まるまで繰り返す。
+    // （柱・表題・著者・所属で 4 段が上限。それ以上は前付ではない。）
+    for (let pass = 0; pass < 4; pass++) {
+      const columnTop = new Map<number, number>();
+      for (const chunk of pageChunks) {
+        if (crossesGutter(chunk) || banner.has(chunk)) continue;
+        const index = columnOf(chunk, columns);
+        const top = columnTop.get(index);
+        if (top === undefined || chunk.y < top) columnTop.set(index, chunk.y);
+      }
+      if (columnTop.size <= 1) break;
+      let changed = false;
+      for (const chunk of pageChunks) {
+        if (crossesGutter(chunk) || banner.has(chunk)) continue;
+        const own = columnOf(chunk, columns);
+        let aboveAll = true;
+        for (const [index, top] of columnTop) {
+          if (index === own) continue;
+          if (chunk.y + chunk.h > top - gap) aboveAll = false;
+        }
+        if (aboveAll) {
+          banner.add(chunk);
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    for (const chunk of banner) fullWidthRows.add(rowKey(chunk));
+
     const spansGutter = (chunk: TextChunk): boolean => fullWidthRows.has(rowKey(chunk));
 
     const fullWidth = pageChunks.filter(spansGutter).sort((a, b) => a.y - b.y || a.x - b.x);
@@ -566,19 +681,7 @@ export function buildLines(chunks: TextChunk[]): Line[] {
 
     // どの段にも入らない文字片を作らない。重なりが最大の段へ必ず割り当てる。
     const buckets: TextChunk[][] = columns.map(() => []);
-    for (const chunk of inColumns) {
-      let bestIndex = 0;
-      let bestOverlap = -Infinity;
-      for (let i = 0; i < columns.length; i++) {
-        const range = columns[i]!;
-        const overlap = Math.min(range.to, chunk.x + chunk.w) - Math.max(range.from, chunk.x);
-        if (overlap > bestOverlap) {
-          bestOverlap = overlap;
-          bestIndex = i;
-        }
-      }
-      buckets[bestIndex]!.push(chunk);
-    }
+    for (const chunk of inColumns) buckets[columnOf(chunk, columns)]!.push(chunk);
 
     for (let band = 0; band <= bandBreaks.length; band++) {
       if (band > 0) {
@@ -1540,6 +1643,18 @@ const MIN_COVERAGE = 0.98;
  * 数式・表・擬似コードは版面の見え方だけで決めているので、外れることがある。
  */
 const UNCERTAIN_KINDS = new Set<NonBodyKind>(['formula', 'table', 'other']);
+
+/**
+ * その種類は「版面の規則だけで落とした」ものか。
+ *
+ * 柱・ノンブル・キャプション・参考文献・脚注・前付は、位置や書き出しの形という
+ * 構造の手掛かりで決めているので、落としたことに確信がある。数式・表・擬似コードは
+ * 版面の見え方だけで決めているので外れることがあり、**本文の一部**だったかもしれない。
+ * 文に印を付けるかどうかの判断でも同じ線引きを使う（sentences.ts から参照）。
+ */
+export function isUncertainKind(kind: NonBodyKind | undefined): boolean {
+  return UNCERTAIN_KINDS.has(kind ?? 'other');
+}
 
 /**
  * 「何が失われたかを数える」物差し。

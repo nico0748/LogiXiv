@@ -62,6 +62,30 @@ export interface SentenceView {
   notes: string[];
 }
 
+/**
+ * 本文が空の失敗応答を、それでも意味のある日本語にする。
+ *
+ * 状態番号しか手掛かりが無い場面なので、番号の意味と「次に何ができるか」を書く。
+ * 「HTTP 431」とだけ返すのは、空文字を返すのとほとんど変わらない。
+ */
+function describeEmptyFailure(status: number, path: string): string {
+  if (status === 431) {
+    return (
+      `LogiXiv 本体が ${status}（リクエストが大きすぎる）を本文なしで返しました。` +
+      'URL に載せた値が Node の既定ヘッダ上限（16KB）を越えています。' +
+      '検索語のような長い値は本文で渡すか、短くしてから渡し直してください。' +
+      `（要求: ${path.slice(0, 120)}）`
+    );
+  }
+  if (status === 413) {
+    return `LogiXiv 本体が ${status}（本文が大きすぎる）を本文なしで返しました。渡す量を減らしてください。`;
+  }
+  return (
+    `LogiXiv 本体が HTTP ${status} を本文なしで返しました（理由の説明が付いていません）。` +
+    `本体のログに手掛かりが出ているはずです。（要求: ${path.slice(0, 120)}）`
+  );
+}
+
 export class LogiXivClient {
   private readonly baseUrl: string;
 
@@ -88,13 +112,19 @@ export class LogiXivClient {
     }
     const text = await response.text();
     if (!response.ok) {
-      let message = text.slice(0, 400);
+      let message = text.slice(0, 400).trim();
       try {
         const parsed = JSON.parse(text) as { error?: string };
         if (parsed.error) message = parsed.error;
       } catch {
         // JSON でなければ本文をそのまま見せる。
       }
+      // **本文が空でも、必ず理由の分かる 1 文にする。**
+      // 本体に届く前に Node が撥ねた応答（431 など）には本文が無く、
+      // これをそのまま投げていたので Error('') になり、MCP の
+      // `content[0].text` が空文字のまま Claude に返っていた。
+      // 何が悪かったのか一文字も届かないので、同じ呼び出しが延々と繰り返される。
+      if (message.length === 0) message = describeEmptyFailure(response.status, path);
       throw new Error(message);
     }
     return (text.length > 0 ? JSON.parse(text) : null) as T;
@@ -114,9 +144,21 @@ export class LogiXivClient {
     return this.request<PaperDocument>(`/api/documents/${encodeURIComponent(id)}`);
   }
 
+  /**
+   * 検索語は**本文**で送る。
+   *
+   * クエリ文字列に載せていたときは、17KB 付近から Node の既定ヘッダ上限に当たり、
+   * 本体のコードに一度も届かないまま 431 が本文なしで返っていた。
+   * 段落まるごとを検索語にする使い方では普通に起きる長さなので、経路ごと変える。
+   */
   search(id: string, query: string, limit = 30, from = 0) {
     return this.request<{ total: number; truncated: boolean; hits: SearchHit[] }>(
-      `/api/documents/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}&limit=${limit}&from=${from}`,
+      `/api/documents/${encodeURIComponent(id)}/search`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: query, limit, from }),
+      },
     );
   }
 

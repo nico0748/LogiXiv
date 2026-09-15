@@ -330,3 +330,100 @@ test('単項の負号には空白を入れない', () => {
 
   assert.ok(text.includes('interval is −1 for every'), `負号のあとに空白が入った: ${text}`);
 });
+
+/**
+ * 計算量の回帰テスト。
+ *
+ * `joinLines` は塊（見出しで切れる本文のかたまり）の全文を 1 本の文字列に育てながら、
+ * 行ごとに末尾を調べる。ここで**塊の全文**に正規表現を当てたり `slice` したりすると、
+ * 1 行あたり O(それまでの全文字数) になり、塊全体では O(n²) になる。
+ * 見出しは何十行かに 1 つしか無いので、長い原稿ほど 1 本の塊が文書全体まで育つ。
+ * 実測（合成 PDF・2 段組）: 60 ページ 21.6 秒、120 ページ 87.9 秒、200 ページ 250 秒。
+ * 入力 2 倍で 4 倍＝きれいな二乗だった。
+ *
+ * 時間そのものを閾値にすると機械の速さでぶれるので、**同じ行数を「1 つの塊」と
+ * 「見出しで細かく切った塊」で組ませて比べる**。行数も文字片の数も同じなので、
+ * 行の組み立て（layout.ts）にかかる時間は両方から同じだけ引かれて消える。
+ * 残るのは「塊が長いこと自体の代償」だけ。二乗なら比が跳ね上がり、線形なら 1 に近づく。
+ * 実測: 直す前 20.3 倍 → 直した後 1.1 倍。
+ */
+
+const BENCH_WORDS =
+  'the ensemble variance under distribution shift never calibrates because a shared bias term remains fixed and the spread never sees it at all'.split(
+    ' ',
+  );
+
+/**
+ * 本文だけの版面を組み立てる。`headingEvery` を指定すると、その行数ごとに見出しを挟む
+ * （＝塊がそこで切れる）。行数・文字片の数は挟んでも変わらない。
+ */
+function benchChunks(lines: number, headingEvery: number): { chunks: TextChunk[]; pages: PageSize[] } {
+  const chunks: TextChunk[] = [];
+  const out: PageSize[] = [];
+  const perPage = 40;
+  for (let i = 0; i < lines; i++) {
+    const page = Math.floor(i / perPage) + 1;
+    if (out.length < page) out.push({ page, width: 595, height: 842 });
+    const y = 60 + (i % perPage) * 18;
+    if (headingEvery > 0 && i % headingEvery === headingEvery - 1) {
+      chunks.push({ page, text: `${Math.floor(i / headingEvery) + 1} Section Heading Here`, x: 68, y, w: 120, h: 14 });
+      continue;
+    }
+    const words: string[] = [];
+    for (let w = 0; w < 11; w++) words.push(BENCH_WORDS[(i * 7 + w) % BENCH_WORDS.length]!);
+    // 3 行に 1 行は行末ハイフンで終わらせる（末尾の切り詰めを通す道）。
+    words[words.length - 1] = i % 3 === 2 ? 'informa-' : `${words[words.length - 1]!}.`;
+    let x = 68;
+    for (const word of words) {
+      const w = word.length * 4.6;
+      chunks.push({ page, text: word, x, y, w, h: 10 });
+      x += w + 2.4;
+    }
+  }
+  return { chunks, pages: out };
+}
+
+/** 2 回まわして速いほうを採る（他のプロセスに邪魔された回を捨てるため）。 */
+function fastest(chunks: TextChunk[], pages: PageSize[]): number {
+  let best = Infinity;
+  for (let run = 0; run < 2; run++) {
+    const started = process.hrtime.bigint();
+    buildSentencesFromChunks(chunks, pages);
+    best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6);
+  }
+  return best;
+}
+
+test('見出しの無い長い塊でも、塊の長さに二乗で効かない', () => {
+  const LINES = 1500;
+  const single = benchChunks(LINES, 0);
+  const split = benchChunks(LINES, 20);
+
+  // 交互に測る。片方だけが冷えた状態で測られないように。
+  const warm = fastest(split.chunks, split.pages);
+  const one = fastest(single.chunks, single.pages);
+  const many = Math.min(warm, fastest(split.chunks, split.pages));
+
+  // 二乗だと、塊が 20 倍長いぶんそのまま効く（実測 20.3 倍）。線形なら 1 倍前後。
+  assert.ok(
+    one < many * 3,
+    `塊を 1 つにしただけで ${(one / many).toFixed(1)} 倍に伸びた（1 つ: ${one.toFixed(0)}ms / 分割: ${many.toFixed(0)}ms）`,
+  );
+});
+
+test('64 文字を超える複合語が行末で割れても、全文に当てたときと同じ結果になる', () => {
+  // 行末ハイフンの照合は塊の末尾だけを切り出して当てている。切り出す窓は 64 文字から
+  // 倍々に広げるので、窓より長い複合語でちゃんと広がることを固定しておく。
+  const compound = 'extremely-long-hyphenated-compound-that-exceeds-the-initial-window-size-';
+  assert.ok(compound.length > 64, '窓を広げる必要がある長さになっていない');
+
+  const text = joined([
+    en(100, 'We first fix the notation that the rest of the argument uses here.'),
+    en(114, `The parameter is named ${compound}`),
+    en(128, 'value in the configuration file that ships with the reference code.'),
+    en(142, 'The shared bias is what the ensemble spread never sees at all here.'),
+  ]);
+
+  // 元からハイフンを含む複合語なので、ハイフンは残したまま直結する。
+  assert.ok(text.includes(`${compound}value in the configuration`), `複合語の繋ぎ方が変わった: ${text}`);
+});

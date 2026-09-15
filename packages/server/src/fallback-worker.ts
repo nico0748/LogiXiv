@@ -1,19 +1,36 @@
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { parentPort, workerData } from 'node:worker_threads';
-import type { PageSize, TextChunk } from '@logixiv/core';
+import {
+  buildSentencesFromChunks,
+  guessTitleFromChunks,
+  type FallbackResult,
+  type PageSize,
+  type TextChunk,
+} from '@logixiv/core';
 
 /**
- * pdf.js を回すワーカー。
+ * pdf.js を回し、**文の組み立てまで済ませて**返すワーカー。
  *
  * ここを別スレッドに出しているのは、pdf.js を Node で使うと「fake worker」として
  * 同一スレッドで動き、解析中は HTTP も SSE ハートビートも一切進まなくなるため。
  * 900 ページの PDF 1 本でイベントループが 68 秒止まり、その間の keep-alive 接続が
  * 切られて他のクライアントが ECONNRESET を受ける、という状態だった。
  *
- * 出力は「文字片と用紙サイズ」だけ。文の組み立ては core 側（メインスレッド）で行う。
- * ワーカーに持たせる責務を pdf.js の呼び出しだけに絞ると、失敗したときに
- * 何が壊れているかが一目で分かる。
+ * かつては「文字片と用紙サイズ」だけを返し、文の組み立て（buildSentencesFromChunks）は
+ * 呼び出し側＝**メインスレッド**でやっていた。これが逆に効いていた。実測（合成 PDF・
+ * 2 段組）で、ワーカー側の pdf.js は 60 ページ 0.9 秒／120 ページ 1.0 秒とほぼ一定なのに、
+ * メインスレッドの組み立ては 30 ページ 3.3 秒 → 60 ページ 11.4 秒 → 120 ページ 37.8 秒と
+ * ページ数の**二乗**で伸びていた。つまり所要時間の 99% が「上限の効かない側」にあり、
+ * fallback.ts が置いた timeoutMs も、打ち切りの setTimeout が動くべきイベントループごと
+ * 止まっているので一度も発火しなかった（200 ページで 120 秒の上限に対し実測 227 秒）。
+ *
+ * なので責務を「pdf.js の呼び出しだけ」から「DocumentStructure の材料を作るところまで」に
+ * 広げた。重い処理が丸ごとこちら側に来ることで、
+ *   - 取り込み中でも /api/health も SSE もそのまま返る、
+ *   - 呼び出し側の timeoutMs が本当に効く（terminate() は同期実行中の JS も止められる）、
+ *   - 文字片（400k 件になりうる）をスレッド間で複製しなくて済む、
+ * の 3 つが同時に成り立つ。二乗そのものは core 側の話なので、ここでは直せない。
  */
 
 export interface FallbackWorkerInput {
@@ -22,8 +39,7 @@ export interface FallbackWorkerInput {
   maxChunks: number;
 }
 
-export interface FallbackWorkerOutput {
-  chunks: TextChunk[];
+export interface FallbackWorkerOutput extends FallbackResult {
   pageSizes: PageSize[];
   /** ページ数の上限で打ち切ったか。 */
   truncatedPages: number;
@@ -31,6 +47,10 @@ export interface FallbackWorkerOutput {
   truncatedChunks: boolean;
   /** PDF のメタデータに入っていた題名。無いことも、ファイル名が入っていることも多い。 */
   metadataTitle: string | null;
+  /** 版面から推測した題名。選別は呼び出し側（fallback.ts の pickTitle）でやる。 */
+  guessedTitle: string | null;
+  /** 内訳の実測値。どちらが重いかを人が確かめられるように返す（打ち切りの調整に要る）。 */
+  timings: { extractMs: number; buildMs: number };
 }
 
 interface PdfJsTextItem {
@@ -40,7 +60,15 @@ interface PdfJsTextItem {
   height: number;
 }
 
-async function run(input: FallbackWorkerInput): Promise<FallbackWorkerOutput> {
+interface Extracted {
+  chunks: TextChunk[];
+  pageSizes: PageSize[];
+  truncatedPages: number;
+  truncatedChunks: boolean;
+  metadataTitle: string | null;
+}
+
+async function extract(input: FallbackWorkerInput): Promise<Extracted> {
   const require = createRequire(import.meta.url);
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   (pdfjs.GlobalWorkerOptions as { workerSrc: string }).workerSrc = pathToFileURL(
@@ -92,16 +120,22 @@ async function run(input: FallbackWorkerInput): Promise<FallbackWorkerOutput> {
           truncatedChunks = true;
           break;
         }
-        const transform = item.transform;
-        const x = transform[4] ?? 0;
-        // pdf.js は左下原点。GROBID に合わせて左上原点へ直す。
-        const baseline = transform[5] ?? 0;
-        const height = item.height > 0 ? item.height : Math.abs(transform[3] ?? 10);
+        // 回転したページ（\begin{landscape} の付録など）では、pdf.js が返す
+        // 文字片の座標は**回転前の座標系のまま**で、viewport だけが回っている。
+        // そのまま使うと、そのページの行がすべて同じ y を持ち（行送りは x 方向に出る）、
+        // 行のまとめが y で行われるのでページ中の全行が 1 行に潰れる。
+        // 3 つの文の断片が織り込まれ、`text.corresponds` `sizeone` と語がくっつく。
+        // 回転の有無は抽出のこの時点でしか確実に分からないので、ここで直す。
+        // viewport の変換を掛けると左上原点・y 下向き（＝GROBID と同じ向き）になり、
+        // 回転ページでも文字が横に流れる座標系に揃う。pdf.js 自身のテキストレイヤーと
+        // 同じ求め方（左端 = tx[4]、字高 = hypot(tx[2], tx[3])、上端 = ベースライン - 字高）。
+        const tx = pdfjs.Util.transform(viewport.transform, item.transform);
+        const height = Math.hypot(tx[2] ?? 0, tx[3] ?? 0) || (item.height > 0 ? item.height : 10);
         chunks.push({
           page: pageNumber,
           text: item.str,
-          x,
-          y: viewport.height - baseline - height,
+          x: tx[4] ?? 0,
+          y: (tx[5] ?? 0) - height,
           w: item.width,
           h: height,
         });
@@ -120,6 +154,30 @@ async function run(input: FallbackWorkerInput): Promise<FallbackWorkerOutput> {
   } finally {
     await task.destroy();
   }
+}
+
+async function run(input: FallbackWorkerInput): Promise<FallbackWorkerOutput> {
+  const startedAt = Date.now();
+  const extracted = await extract(input);
+  const extractedAt = Date.now();
+
+  // 組み立てもここでやる（＝メインスレッドには重い処理を一切残さない）。
+  // このスレッドが何秒回ろうと、HTTP を捌くイベントループは別なので止まらない。
+  const built = buildSentencesFromChunks(extracted.chunks, extracted.pageSizes);
+  // 題名の推測も文字片を舐めるので、こちら側で済ませる。
+  // 「どれを採るか」の判断は fallback.ts に残す（版面の話ではなく方針の話なので）。
+  const guessedTitle = guessTitleFromChunks(extracted.chunks);
+  const builtAt = Date.now();
+
+  return {
+    ...built,
+    pageSizes: extracted.pageSizes,
+    truncatedPages: extracted.truncatedPages,
+    truncatedChunks: extracted.truncatedChunks,
+    metadataTitle: extracted.metadataTitle,
+    guessedTitle,
+    timings: { extractMs: extractedAt - startedAt, buildMs: builtAt - extractedAt },
+  };
 }
 
 if (parentPort) {

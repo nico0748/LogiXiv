@@ -1,0 +1,20 @@
+{
+  "expectedSentences": [
+    "Each worker m holds a local dataset and computes a stochastic gradient with bounded variance.",
+    "The aggregation step averages the compressed residuals across the M workers at every round.",
+    "Each Fm is L-smooth, that is ∥∇Fm(x) − ∇Fm(y)∥ ≤ L∥x − y∥ for all x.",
+    "The averaged squared deviation of the local gradients from the global gradient is bounded by a constant.",
+    "Our main result bounds the residual error of the aggregation rule under the two assumptions above.",
+    "Under Assumptions 1 and 2, the iterates of the method satisfy the bound stated below.",
+    "Here c > 0 is an absolute constant that does not depend on T.",
+    "For all t larger than t0 = ⌈2/δ⌉ we have the lower bound stated below.",
+    "The proof is deferred to Appendix A, and the constants are not optimised.",
+    "The bound degrades gracefully as the compression ratio grows towards one half of the coordinates.",
+    "Collecting the surviving terms gives the claimed lower bound on the expected residual norm.",
+    "We expect the same argument to apply to the momentum variant without further modification."
+  ],
+  "expectedNonBody": [
+    "Sparse Gradient Aggregation",
+    "Anonymous"
+  ]
+}

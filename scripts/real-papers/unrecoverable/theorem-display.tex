@@ -1,0 +1,88 @@
+% 直せない壊れ方の標本。**再現率 100% には決してならない**。
+%
+% ML・統計・最適化の論文は、仮定・補題・定理の主張そのものが別行立ての数式で書かれる。
+% pdf.js は \frac の分子と分母、\sum の上下の添字を**別々の行**として返すので、
+% それらは版面の規則で「数式」として落ちる。落ちた断片をまたいで前後の本文行が
+% 繋がると、出来上がるのは**文法の通る英文**で、数学だけが間違っている:
+%
+%   `We minimise F (x) = Fm(x) where each Fm is L-smooth …`   ← 平均 1/M と Σ が消えた
+%   `… such that 1M∥∇F(x) − ∇F (x)∥2 ≤ ζ2 for all x.`         ← ∇F_m が ∇F になった
+%   `For all t larger than t0 = ⌈2/δ⌉ we have The proof is …`  ← 補題の主張が消えて次の段落と癒着
+%
+% 訳す側にも読む側にも「原文がそう書いてある」ようにしか見えない。実測（本文 52 文の
+% 論文）で 8 文の内容が原文と違い、文書単位の申告は全部 low だった。
+%
+% **直せないので、測るのは「直ったか」ではなく「印を付けられたか」**:
+%   - 継ぎ目の印（Sentence.seam）が付いているか
+%   - 正しく取れている文には 1 件も付いていないか（誤爆 0）
+% 閾値は measure-quality.ts の measureUnrecoverable() を参照。
+%
+% 正解の規約は scripts/real-papers/*.tex と同じ（本文 1 文 = \s{...} を 1 行、
+% インライン数式は \m{組版する TeX}{PDF に出る字面}）。ここには**紙面で人が読む通りの文**を
+% 書く。取れないことは分かっているので、そのぶん再現率が落ちる。
+% 落ちた量が「直せていない量」そのもの。
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\newtheorem{assumption}{Assumption}
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+
+\newcommand{\s}[1]{#1}
+\newcommand{\m}[2]{#1}
+
+\title{Sparse Gradient Aggregation}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setting}
+% 次の 3 文は \s{...} で包まない。**取れないことが分かっている**ので、正解に
+% 書いても「直っていない量」を水増しするだけになる。ここで測りたいのは
+% 「印が付くか」なので、印の数（measureUnrecoverable の MIN_SEAMS）で押さえる。
+% どれも「背の高いインライン数式が本文の行の中に入る」形で、pdf.js は分子・分母や
+% 総和の上下の添字を別の行として返す。落ちると、残った本文は文法の通る英文になり、
+% 数学だけが静かに違う（1/M と Σ が消える、∇F_m が ∇F になる）。
+We minimise the average $\frac{1}{M}\sum_{m=1}^{M} F_m(x)$ of the local objectives over the workers.
+The dispersion term $\frac{1}{M}\sum_{m=1}^{M}\|\nabla F_m(x) - \nabla F(x)\|^2$ controls the aggregation error.
+The step size is set to $\eta = \frac{1}{L}\sqrt{\frac{\sigma^2}{T}}$ in every experiment we report.
+
+\s{Each worker \m{$m$}{m} holds a local dataset and computes a stochastic gradient with bounded variance.}
+\s{The aggregation step averages the compressed residuals across the \m{$M$}{M} workers at every round.}
+
+\begin{assumption}[Smoothness]
+\s{Each \m{$F_m$}{Fm} is \m{$L$}{L}-smooth, that is \m{$\|\nabla F_m(x) - \nabla F_m(y)\| \le L\|x-y\|$}{∥∇Fm(x) − ∇Fm(y)∥ ≤ L∥x − y∥} for all \m{$x$}{x}.}
+\end{assumption}
+
+\begin{assumption}[Bounded variance]
+\s{The averaged squared deviation of the local gradients from the global gradient is bounded by a constant.}
+\end{assumption}
+
+\section{Main result}
+\s{Our main result bounds the residual error of the aggregation rule under the two assumptions above.}
+
+\begin{theorem}
+\s{Under Assumptions 1 and 2, the iterates of the method satisfy the bound stated below.}
+\begin{equation}
+\frac{1}{T}\sum_{t=0}^{T-1}\mathbb{E}\|\nabla F(x_t)\|^2 \le \frac{c\,(F(x_0)-F^\star)}{\eta T} + c\,\eta L \sigma^2 ,
+\end{equation}
+\s{Here \m{$c > 0$}{c > 0} is an absolute constant that does not depend on \m{$T$}{T}.}
+\end{theorem}
+
+\begin{lemma}
+\s{For all \m{$t$}{t} larger than \m{$t_0 = \lceil 2/\delta \rceil$}{t0 = ⌈2/δ⌉} we have the lower bound stated below.}
+\begin{equation}
+\mathbb{E}\|\bar{e}_t\|^2 \ge \frac{\eta^2 (1-\delta)}{4}\,\zeta^2 .
+\end{equation}
+\end{lemma}
+
+\s{The proof is deferred to Appendix A, and the constants are not optimised.}
+
+\section{Discussion}
+\s{The bound degrades gracefully as the compression ratio grows towards one half of the coordinates.}
+\s{Collecting the surviving terms gives the claimed lower bound on the expected residual norm.}
+\s{We expect the same argument to apply to the momentum variant without further modification.}
+
+\end{document}

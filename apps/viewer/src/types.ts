@@ -22,6 +22,8 @@ export interface Sentence {
   text: string;
   rects: Rect[];
   sectionId: string | null;
+  /** 本文として採らなかった行がこの文の中に重なっていた＝原文が壊れているおそれ。 */
+  seam?: SentenceSeam;
 }
 
 export interface Section {
@@ -44,6 +46,11 @@ export interface Note {
   body: string;
   author: string | null;
   createdAt: string;
+}
+
+export interface SentenceSeam {
+  kinds: NonBodySentence['kind'][];
+  rects: Rect[];
 }
 
 export interface NonBodySentence extends Sentence {

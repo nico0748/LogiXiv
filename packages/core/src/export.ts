@@ -103,6 +103,14 @@ function renderNonBody(item: NonBodySentence): string {
   );
 }
 
+/** 継ぎ目に挟まっていたものの呼び方。 */
+function seamLabel(kinds: NonBodySentence['kind'][]): string {
+  const names = kinds.map((kind) => NON_BODY_LABELS[kind] ?? '行');
+  if (names.length === 0) return '行';
+  if (names.length <= 2) return names.join('と');
+  return `${names.slice(0, 2).join('と')}など`;
+}
+
 function renderSentence(sentence: Sentence, document: PaperDocument, notes: string[]): string {
   const translation = document.annotations.translations[sentence.hash];
   const parts = [
@@ -118,6 +126,14 @@ function renderSentence(sentence: Sentence, document: PaperDocument, notes: stri
     parts.push('<p class="lx-target lx-skipped">（訳さない）</p>');
   } else {
     parts.push('<p class="lx-target lx-untranslated">（未訳）</p>');
+  }
+  if (sentence.seam) {
+    // 訳文だけを読むと、記号が落ちた文も「そう書いてある」としか見えない。
+    parts.push(
+      `<p class="lx-seam">この文には、本文として取り出せなかった${escapeHtml(
+        seamLabel(sentence.seam.kinds),
+      )}が挟まっています（記号や語が抜けているおそれ）。</p>`,
+    );
   }
   for (const note of notes) {
     parts.push(`<p class="lx-note">${escapeHtml(note)}</p>`);
@@ -170,6 +186,7 @@ const STATIC_STYLE = `
   .lx-nonbody { opacity: .6; }
   .lx-nonbody-kind { margin: 0 0 .1rem; font-size: .72rem; color: #6b7280; }
   .lx-banner.lx-risk { border-left: 3px solid #b3261e; font-weight: 600; }
+  .lx-seam { margin: .3rem 0 0; padding-left: .7rem; border-left: 3px solid #b45309; font-size: .82rem; }
 `;
 
 export function buildExportHtml(input: BuildExportInput): string {

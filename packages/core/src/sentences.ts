@@ -1,6 +1,15 @@
-import type { NonBodySentence, PageSize, Rect, Sentence, Section, StructureQuality } from './types.ts';
+import type {
+  NonBodyKind,
+  NonBodySentence,
+  PageSize,
+  Rect,
+  Sentence,
+  SentenceSeam,
+  Section,
+  StructureQuality,
+} from './types.ts';
 import { sentenceHash, sentenceId, stableId } from './hash.ts';
-import { assessReadingOrder, buildLines, classifyLines, type ClassifiedLine } from './layout.ts';
+import { assessReadingOrder, buildLines, classifyLines, isUncertainKind, type ClassifiedLine } from './layout.ts';
 
 /**
  * GROBID が使えないときのフォールバック経路。
@@ -339,9 +348,12 @@ function isOperandStart(ch: string | undefined): boolean {
  * 手前が語間の空白なら、そこで散文が終わって数式が始まっているので単項
  * （実測: "the interval is $-1$ for every" が "is − 1 for every" になっていた）。
  */
-function isBinaryOperatorBoundary(segment: Segment, next: string): boolean {
-  const buffer = segment.buffer;
-  const last = buffer[buffer.length - 1];
+function isBinaryOperatorBoundary(
+  builder: TextBuilder,
+  owners: readonly CharOwner[],
+  next: string,
+): boolean {
+  const last = charFromEnd(builder, 0);
   const head = next[0];
   if (last === undefined || head === undefined) return false;
   // 被演算子 → 演算子。手前の被演算子は `last` そのもの。
@@ -351,10 +363,12 @@ function isBinaryOperatorBoundary(segment: Segment, next: string): boolean {
     // 空白の幅は**演算子の字高**で測る。空白の側の字高は上付き・下付きだと小さく
     // 出るので（実測: 上付きの直後の空き 1.26pt は、自分の字高 6.97 では 0.18 em に
     // 見えるが、本文の 9.96 では 0.13 em）、そのままでは語間と区別がつかない。
-    const em = segment.owners[buffer.length - 1]?.chunk.h ?? 0;
-    let i = buffer.length - 2;
-    if (i >= 0 && buffer[i] === ' ' && isThinSpace(segment.owners[i], em)) i--;
-    return i >= 0 && isOperandEnd(buffer[i]);
+    const em = owners[builder.length - 1]?.chunk.h ?? 0;
+    let back = 1;
+    if (charFromEnd(builder, back) === ' ' && isThinSpace(owners[builder.length - 1 - back], em)) {
+      back++;
+    }
+    return isOperandEnd(charFromEnd(builder, back));
   }
   return false;
 }
@@ -544,6 +558,108 @@ interface Segment {
 }
 
 /**
+ * 連結中の文字列。**末尾しか触らない**ので、1 本の文字列ではなく断片の配列で持つ。
+ *
+ * なぜ配列か。`buffer += text` で伸ばしながら `buffer.slice(0, -1)` で末尾を削ると、
+ * V8 は繋いだだけの文字列（rope）を毎回**平坦化**するので、1 回の削りが
+ * O(塊の長さ) になる。行末ハイフンは何十行かに 1 回出るから、塊全体では O(n²)。
+ * 実測（合成 PDF・2 段組）: joinLines の自分の時間が 60 ページで 372ms、
+ * 120 ページで 2023ms（入力 2 倍で 5.4 倍）。
+ *
+ * 断片の配列にすると、末尾の削りも末尾の読み取りも触る量が定数で済む。
+ * 1 本の文字列に直すのは、塊を組み終えた最後の 1 回だけ。
+ */
+interface TextBuilder {
+  parts: string[];
+  length: number;
+}
+
+function appendText(builder: TextBuilder, text: string): void {
+  if (text.length === 0) return;
+  builder.parts.push(text);
+  builder.length += text.length;
+}
+
+/** 末尾から `back` 文字目（0 が最後の 1 文字）。範囲外なら undefined。 */
+function charFromEnd(builder: TextBuilder, back: number): string | undefined {
+  let remaining = back;
+  for (let i = builder.parts.length - 1; i >= 0; i--) {
+    const part = builder.parts[i]!;
+    if (remaining < part.length) return part[part.length - 1 - remaining];
+    remaining -= part.length;
+  }
+  return undefined;
+}
+
+/** 末尾から `count` 文字を落とす。 */
+function truncateText(builder: TextBuilder, count: number): void {
+  let remaining = count;
+  while (remaining > 0 && builder.parts.length > 0) {
+    const last = builder.parts[builder.parts.length - 1]!;
+    if (last.length <= remaining) {
+      builder.parts.pop();
+      remaining -= last.length;
+    } else {
+      builder.parts[builder.parts.length - 1] = last.slice(0, last.length - remaining);
+      remaining = 0;
+    }
+  }
+  builder.length -= count - remaining;
+}
+
+/** 末尾の `count` 文字（足りなければ全部）。 */
+function tailString(builder: TextBuilder, count: number): string {
+  if (count >= builder.length) return builder.parts.join('');
+  const collected: string[] = [];
+  let remaining = count;
+  for (let i = builder.parts.length - 1; i >= 0 && remaining > 0; i--) {
+    const part = builder.parts[i]!;
+    if (part.length <= remaining) {
+      collected.push(part);
+      remaining -= part.length;
+    } else {
+      collected.push(part.slice(part.length - remaining));
+      remaining = 0;
+    }
+  }
+  collected.reverse();
+  return collected.join('');
+}
+
+/** 行末ハイフンの照合で、末尾から遡ってよい文字（欧字・和字とハイフン）。 */
+const LETTER_OR_HYPHEN = /[\p{L}\-\u2010\u2011]/u;
+/** 代用対の片割れ。1 つの文字を半分だけ見ても欧字と分からないので、並びの一部として扱う。 */
+const SURROGATE_HALF = /[\uD800-\uDFFF]/;
+
+/**
+ * 行末ハイフンの照合に使う、末尾の窓。
+ *
+ * 一致しうる範囲（末尾の「欧字とハイフンの並び」）が丸ごと収まるまで窓を倍々に広げる。
+ * 収まったかどうかは、**その並びが窓の先頭まで届いているか**で見る。窓の先頭の 1 文字が
+ * 欧字かどうかで見てはいけない — 散文は 8 割が欧字なので、たまたま語の途中で切れた
+ * というだけで窓が倍々に広がり続ける（実測: この見方だと窓が数千文字まで育ち、
+ * tailString と正規表現だけで全体の 4 割を使っていた）。
+ *
+ * 広げ終わった窓に当てた結果は、塊の全文に当てたときと 1 文字も変わらない
+ * （理由は joinLines の中に書いた）。
+ */
+function tailWindow(builder: TextBuilder): string {
+  let size = 64;
+  for (;;) {
+    const window = tailString(builder, size);
+    if (window.length < size) return window; // 塊の全文を取り切った
+    // 末尾の空白は数えない（`[-‐‑]\s$` の `\s` はここで確定している）。
+    let i = window.length - 2;
+    while (i >= 0 && (LETTER_OR_HYPHEN.test(window[i]!) || SURROGATE_HALF.test(window[i]!))) i--;
+    if (i >= 0) return window; // 並びが窓の先頭まで届いていない＝収まっている
+    size *= 2;
+  }
+}
+
+/** 1 文字がハイフンか。 */
+const HYPHEN_CHAR = /[-\u2010\u2011]/;
+
+/**
  * 行末ハイフンを落として良いかの判断材料。
  *
  * `hyphenated` は、同じ文書の**行の途中**に "block-sparse" の形で現れるハイフン付き複合語。
@@ -655,6 +771,13 @@ function decideLineEndHyphen(left: string, right: string, evidence: HyphenEviden
   // 欧文のハイフネーションはこれらをまたがないので、無条件で残してよい。
   if (/[\p{Lu}\p{N}]$/u.test(left) || /^[\p{Lu}\p{N}]/u.test(right)) return true;
 
+  /**
+   * 左側が 1 文字。TeX は語の頭から 1 文字だけ残して割ることをしない
+   * （`\lefthyphenmin` は 2 以上）ので、こう見えたら**本物のハイフン**。
+   * 実測（multicol の 3 段組）で `x-ray` が `xray` になっていた。
+   */
+  if (left.length === 1) return true;
+
   // 左側に既にハイフンがある（"state-of-the-" + "art"）。
   // TeX は明示のハイフンより後ろを音節で割らないので、こう見えたということは
   // 明示のハイフンの位置で折り返したということ。用例が 1 つも無い
@@ -754,6 +877,22 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
   const sentences: Sentence[] = [];
   /** 文ごとに、その文が最後に触れた行の番号。付物を読み順に差し込むときに使う。 */
   const lastLineOf: number[] = [];
+  const byIndex = new Map<number, ClassifiedLine>(lines.map((line) => [line.index, line]));
+  /**
+   * 版面の規則だけで落とした行。文に印を付けるかどうかの相手はこれだけ。
+   *
+   * **ページごとに引けるようにしておく。** 文ごとに全部を舐めると
+   * 「文の数 × 落とした行の数」になり、これも二乗の形（別行立ての式が多い論文ほど効く。
+   * 200 ページの合成 PDF で 13,772 文 × 1,509 行 = 2,000 万回）。
+   * 文が触るページは 1〜2 枚なので、ページで引けば触る量が定数に落ちる。
+   */
+  const droppedByPage = new Map<number, ClassifiedLine[]>();
+  for (const line of lines) {
+    if (line.role !== 'furniture' || !isUncertainKind(line.kind)) continue;
+    const list = droppedByPage.get(line.page);
+    if (list) list.push(line);
+    else droppedByPage.set(line.page, [line]);
+  }
 
   for (const block of blocks) {
     const { buffer, owners } = joinLines(block.lines, hyphenEvidence, spacing);
@@ -770,7 +909,7 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
       const hash = sentenceHash(text);
       const occurrence = occurrences.get(hash) ?? 0;
       occurrences.set(hash, occurrence + 1);
-      sentences.push({
+      const sentence: Sentence = {
         id: sentenceId(hash, occurrence),
         hash,
         order: sentences.length,
@@ -778,7 +917,10 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
         text,
         rects: mergeRects(covered),
         sectionId: block.section,
-      });
+      };
+      const seam = findSeam(covered, byIndex, droppedByPage);
+      if (seam !== null) sentence.seam = seam;
+      sentences.push(sentence);
       lastLineOf.push(covered.length === 0 ? -1 : Math.max(...covered.map((o) => o.line)));
     }
   }
@@ -789,6 +931,91 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
     nonBody: buildNonBody(lines, hyphenEvidence, spacing, sentences, lastLineOf),
     quality: assessReadingOrder(lines),
   };
+}
+
+/**
+ * その文が「本文として採らなかった行と重なる位置で」組み立てられたかを調べる。
+ *
+ * 文書単位のバッジでは足りない。実測（ML 理論の論文、本文 52 文）で、正しく取れた
+ * 46 文と、原文と内容が違う 6 文が同じ顔で並んだ。読む側が知りたいのは
+ * 「この文書は怪しい」ではなく「**どの文か**」。
+ *
+ * 見るのは**矩形だけ**で、新しい当て推量は入れない:
+ *
+ *   1. 落とした行が、この文の**行の内側**にある（矩形が重なる）。
+ *      Σ の上下の添字や分数の分子・分母は、本文の行と同じ帯の中に入り込む。
+ *      実測: `such that 1M∥∇F(x) − ∇F (x)∥2 ≤ ζ2 for all x.` の直下に落ちた
+ *      `Mm=1 m` が消えて、∇F_m が ∇F になり**仮定の意味が変わった**。
+ *   2. 落とした行を**またいで**、この文の行が前後に分かれている。
+ *      ただし、またいだ先が段落の頭（字下げがある）のときだけ印を付ける。
+ *      実測: 補題の式を飛ばして `For all t larger than t0 = ⌈2/δ⌉ we have` が
+ *      次の段落の `The proof is deferred to Appendix A` と 1 文になっていた。
+ *      字下げを見るのは、別行立ての式や表を正しく飛ばして**同じ段落が続く**場合
+ *      （`Information retrieval benefits from ▮ the same sparsity pattern …`）に
+ *      印を付けないため — そちらは文として欠けていない。
+ *
+ * 種類は `formula` / `table` / `other` に限る。柱・ノンブル・キャプション・参考文献は
+ * 構造の手掛かりで落としていて、本文の一部だったということが無い。
+ */
+function findSeam(
+  covered: readonly CharOwner[],
+  byIndex: ReadonlyMap<number, ClassifiedLine>,
+  droppedByPage: ReadonlyMap<number, readonly ClassifiedLine[]>,
+): SentenceSeam | null {
+  const used = [...new Set(covered.map((owner) => owner.line))].sort((a, b) => a - b);
+  if (used.length === 0) return null;
+  const first = used[0]!;
+  const last = used[used.length - 1]!;
+
+  /** この文が占めた行。矩形の比較はここが相手。 */
+  const bands = used
+    .map((index) => byIndex.get(index))
+    .filter((line): line is ClassifiedLine => line !== undefined);
+  if (bands.length === 0) return null;
+  const pages = new Set(bands.map((line) => line.page));
+
+  const kinds: NonBodyKind[] = [];
+  const rects: Rect[] = [];
+  // ページの昇順 → ページ内は行の順。落とした行を全部舐めていた頃と同じ並びになる
+  // （`lines` はページ → 段 → y の順に並んでいるため）。
+  for (const page of [...pages].sort((a, b) => a - b)) {
+    for (const line of droppedByPage.get(page) ?? []) {
+      // 1. 行の内側に入り込んでいるか（矩形が重なる）。
+      //    読み順の番号ではなく**版面の位置**で見る。添字の行は本文の行より後ろに
+      //    並ぶことがあるので、番号の範囲だけで探すと取り逃がす（実測: ∇F_m の
+      //    添字 `Mm=1 m` が文の最終行より後ろの番号にいて、印が付かなかった）。
+      const inside = bands.some(
+        (body) =>
+          body.page === line.page &&
+          line.y < body.y + body.height &&
+          line.y + line.height > body.y &&
+          line.left < body.right &&
+          line.right > body.left,
+      );
+
+      // 2. またいだ先が段落の頭か（字下げがある）。
+      let jumped = false;
+      if (!inside && line.index > first && line.index < last) {
+        const after = bands.find((body) => body.index > line.index);
+        const before = [...bands].reverse().find((body) => body.index < line.index);
+        if (after !== undefined && before !== undefined && after.column === before.column) {
+          jumped = after.left > before.left + Math.max(2, after.height * 0.4);
+        }
+      }
+      if (!inside && !jumped) continue;
+
+      const kind = line.kind ?? 'other';
+      if (!kinds.includes(kind)) kinds.push(kind);
+      rects.push({
+        page: line.page,
+        x: round(line.left),
+        y: round(line.y),
+        w: round(line.right - line.left),
+        h: round(line.height),
+      });
+    }
+  }
+  return rects.length === 0 ? null : { kinds, rects };
 }
 
 /**
@@ -874,16 +1101,19 @@ function joinLines(
   evidence: HyphenEvidence,
   spacing: ScriptSpacing,
 ): Segment {
-  const segment: Segment = { buffer: '', owners: [] };
+  // 連結中の本文は**断片の配列**で持つ（TextBuilder の説明に、なぜ 1 本の文字列だと
+  // O(n²) になるかを書いた）。1 本の文字列に直すのは最後の 1 回だけ。
+  const builder: TextBuilder = { parts: [], length: 0 };
+  const owners: CharOwner[] = [];
   /**
    * 連結後の文字と、その出どころ（文字片・行）を対応づける。
    * `offset` は文字片の本文内の位置。行の継ぎ目に入れる空白は元の文字片に無いので、
    * `from` に -1 を渡して「位置を持たない文字」として記録する（mergeRects が幅から除く）。
    */
   const push = (text: string, chunk: TextChunk, line: number, from: number): void => {
-    segment.buffer += text;
+    appendText(builder, text);
     for (let k = 0; k < text.length; k++) {
-      segment.owners.push({ chunk, line, offset: from < 0 ? -1 : from + k });
+      owners.push({ chunk, line, offset: from < 0 ? -1 : from + k });
     }
   };
 
@@ -925,14 +1155,13 @@ function joinLines(
       // 実測した和文 PDF では、本物の空白は pdf.js が空白文字として返してくるので、
       // 隙間から推測する必要がそもそも無い。
       const gap = previousRight === null ? Infinity : chunk.x - previousRight;
-      const ratio = spacesAtBoundary(segment.buffer[segment.buffer.length - 1], chunk.text[0], spacing)
-        ? 0.22
-        : 0.75;
+      const lastChar = charFromEnd(builder, 0);
+      const ratio = spacesAtBoundary(lastChar, chunk.text[0], spacing) ? 0.22 : 0.75;
       const separated =
         gap > chunk.h * ratio ||
         // 数式の二項演算子の隣は、隙間が潰れていても空白として読む（理由は関数の説明）。
-        isBinaryOperatorBoundary(segment, chunk.text);
-      if (previousRight !== null && separated && !segment.buffer.endsWith(' ')) {
+        isBinaryOperatorBoundary(builder, owners, chunk.text);
+      if (previousRight !== null && separated && lastChar !== ' ') {
         push(' ', chunk, line.index, -1);
       }
       pushChunkText(chunk, line.index, trackingSpaces);
@@ -942,10 +1171,11 @@ function joinLines(
     // 語の切れ目が無いので、入れると折り返すたびに語の途中が割れる。
     // どちらかは継ぎ目の**両側の文字の種類**で決まる（spacesAtBoundary）。
     const next = lines[li + 1];
+    const endChar = charFromEnd(builder, 0);
     if (
-      segment.buffer.length > 0 &&
-      !segment.buffer.endsWith(' ') &&
-      spacesAtBoundary(segment.buffer[segment.buffer.length - 1], firstCharOf(next), spacing)
+      builder.length > 0 &&
+      endChar !== ' ' &&
+      spacesAtBoundary(endChar, firstCharOf(next), spacing)
     ) {
       push(' ', line.chunks[line.chunks.length - 1]!, line.index, -1);
     }
@@ -954,9 +1184,30 @@ function joinLines(
     // 結合を検討する（跨いだときだけ "informa- tion" が画面に残る、という妙な
     // 非対称が起きていた）。
     if (!next) continue;
-    // ハイフンを含む語全体を取る。"state-of-the-" の末尾から "the" だけを見ると、
-    // 文書内の用例 "state-of-the-art" と照合できない。
-    const hyphen = HYPHEN_AT_LINE_END.exec(segment.buffer);
+
+    /**
+     * ハイフンを含む語全体を取る。"state-of-the-" の末尾から "the" だけを見ると、
+     * 文書内の用例 "state-of-the-art" と照合できない。
+     *
+     * 照合は**末尾の語だけ**に当てる。HYPHEN_AT_LINE_END は `$` で閉じているだけで
+     * `^` が無いので、塊の全文に当てると V8 は先頭から全位置を試す。つまり 1 行つき
+     * O(それまでの全文字数)、塊全体で O(n²)。塊は見出しでしか切れないので、見出しの
+     * 少ない原稿ほど 1 本のバッファが文書全体まで育つ。実測（合成 PDF・2 段組）:
+     * buildSentencesFromChunks の 60 ページ 21.6 秒のうち、この 1 行だけで大半を使い、
+     * 120 ページでは 87.9 秒（入力 2 倍で 4.1 倍＝きれいな二乗）だった。
+     *
+     * 末尾だけで足りる理由: 一致する範囲は `((?:\p{L}+[-‐‑])*\p{L}+)[-‐‑]\s$` なので、
+     * 最後の空白の手前は**欧字とハイフンだけ**で埋まっている。つまり一致は必ず
+     * 「末尾から数えて、欧字でもハイフンでもない文字が現れるまで」の中に収まる。
+     * その並びを切り出してから当てれば、結果は全文に当てたときと 1 文字も変わらない。
+     */
+    // 窓を作る前に、当たりようがない行を弾く（正規表現の `[-‐‑]\s$` そのもの）。
+    // 行末がハイフンで終わる行は全体の数 % しかないので、ここでほとんどが落ちる。
+    const endsWhite = charFromEnd(builder, 0);
+    if (endsWhite === undefined || !/\s/.test(endsWhite)) continue;
+    const hyphenChar = charFromEnd(builder, 1);
+    if (hyphenChar === undefined || !HYPHEN_CHAR.test(hyphenChar)) continue;
+    const hyphen = HYPHEN_AT_LINE_END.exec(tailWindow(builder));
     if (!hyphen) continue;
     const nextWord = /^(\p{L}+)/u.exec(next.text)?.[1];
     if (!nextWord) continue;
@@ -968,17 +1219,16 @@ function joinLines(
 
     if (decideLineEndHyphen(left.replace(HYPHEN_CHARS, '-'), nextWord, evidence)) {
       // 本来ハイフンを含む複合語。ハイフンを残したまま行を直結する（空白だけ落とす）。
-      segment.buffer = segment.buffer.slice(0, -1);
-      segment.owners.length = segment.buffer.length;
+      truncateText(builder, 1);
     } else {
       // 真のハイフネーション。ハイフンごと落とす。
-      // 末尾は正規表現が保証する「ハイフン + 空白」なので、位置は必ず length - 2。
-      // （lastIndexOf('-') では U+2010/U+2011 のハイフンを取り逃がす。）
-      const cut = segment.buffer.length - 2;
-      segment.buffer = segment.buffer.slice(0, cut);
-      segment.owners.length = cut;
+      // 末尾は正規表現が保証する「ハイフン + 空白」なので、落とすのは必ず 2 文字。
+      truncateText(builder, 2);
     }
+    owners.length = builder.length;
   }
 
-  return segment;
+  // ここで初めて 1 本の文字列にする。途中で `slice` していた頃は、削るたびに
+  // 塊の全文が平坦化されていた（TextBuilder の説明を参照）。
+  return { buffer: builder.parts.join(''), owners };
 }

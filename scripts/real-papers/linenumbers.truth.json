@@ -1,0 +1,22 @@
+{
+  "expectedSentences": [
+    "Sparse attention reduces the quadratic cost of self-attention in long documents that exceed the usual context window.",
+    "We evaluate three configurations on the standard benchmark suite and report the results in the following section.",
+    "The results indicate a consistent improvement over the dense baseline across all of the datasets we considered.",
+    "Our method scales to sequences of sixty-four thousand tokens without exhausting accelerator memory.",
+    "Each block is processed independently before the aggregation step that combines the partial attention scores.",
+    "We report the mean and the standard deviation over five random seeds for every configuration in the study.",
+    "Prior work by Smith and colleagues introduced a related decomposition that we build upon in this paper.",
+    "The state of the art model uses a hierarchical routing scheme with five levels of granularity.",
+    "Large systems benefit most from stage nine of the proposed pipeline that we describe in this section.",
+    "Sparse attention reduces the quadratic cost of self-attention in setting thirty for all of our runs.",
+    "We evaluate configuration eleven on the test, and then report the results in the following table.",
+    "Our block sparse kernel outperforms the dense baseline by twelve points overall in this configuration.",
+    "Information retrieval benefits from the same sparsity pattern at greater depth in the encoder stack.",
+    "Large systems benefit most from the earlier stages of the pipeline described in the previous paragraph."
+  ],
+  "expectedNonBody": [
+    "Block Sparse Attention Under Review",
+    "Anonymous"
+  ]
+}

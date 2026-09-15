@@ -81,6 +81,18 @@ interface Result {
    */
   coverage: number;
   coverageRisk: 'low' | 'high';
+  /**
+   * 「本文として採らなかった行と重なる位置で組み立てた」印が付いた文の数。
+   *
+   * 文書単位の申告（読順・採録）では足りない。正しく取れた文と、原文と内容が違う文が
+   * 同じ顔で並ぶので、読む側は**どの文か**を知れない。
+   */
+  seams: number;
+  /**
+   * そのうち、**正解の本文そのもの**に付いてしまった数（＝誤爆）。
+   * 1 件でも出れば印は信用されなくなるので、ここは 0 でなければならない。
+   */
+  seamFalseAlarms: number;
 }
 
 /** 多重集合の一致数。同じ文が n 回出るなら n 回数える。 */
@@ -160,6 +172,8 @@ async function score(label: string, pdf: Uint8Array, paper: PaperTruth): Promise
 
   // 字面そのものの照合。空白の詰め方だけ揃えて、ハイフンには触れずに比べる。
   // 正規化して一致した数との差が、「正規化すれば同じだが画面に出る字は違う」文の数。
+  const marked = structure.sentences.filter((sentence) => sentence.seam !== undefined).map((sentence) => normalizeSentence(sentence.text));
+
   const flatten = (text: string): string => text.replace(/\s+/g, ' ').trim();
   const exact = multisetOverlap(paper.expectedSentences.map(flatten), structure.sentences.map((s) => flatten(s.text)));
 
@@ -179,6 +193,8 @@ async function score(label: string, pdf: Uint8Array, paper: PaperTruth): Promise
     readingOrderRisk: structure.quality?.readingOrderRisk ?? 'low',
     coverage: structure.quality?.coverage ?? 1,
     coverageRisk: structure.quality?.coverageRisk ?? 'low',
+    seams: marked.length,
+    seamFalseAlarms: marked.filter((text) => wanted.has(text)).length,
   };
 }
 
@@ -211,6 +227,35 @@ async function measureRealPapers(): Promise<Result[]> {
   return out;
 }
 
+/**
+ * 直せないと分かっている壊れ方の標本（scripts/real-papers/unrecoverable/）。
+ *
+ * ML・統計・最適化の論文では、仮定・補題・定理の主張そのものが別行立ての数式で
+ * 書かれる。pdf.js は分数の分子と分母、総和の上下の添字を別々の行として返すので、
+ * それらは版面の規則で「数式」として落ちる。落ちた断片をまたいで前後が繋がると、
+ * 出来上がるのは**文法の通る英文**で、数学だけが間違っている。
+ * この経路は版面の情報だけでは直せない（消えた記号はどこにも残っていない）。
+ *
+ * だからここで測るのは「直ったか」ではなく「**印を付けられたか**」:
+ *   - 継ぎ目の印が付いているか（MIN_SEAMS 以上）
+ *   - 正しく取れている文に 1 件も付いていないか（誤爆 0）
+ *   - 全部が崩れてはいないか（再現率の下限）
+ */
+const MIN_SEAMS = 2;
+const MIN_UNRECOVERABLE_RECALL = 0.6;
+
+async function measureUnrecoverable(): Promise<Result[]> {
+  const dir = join(fileURLToPath(new URL('.', import.meta.url)), 'real-papers', 'unrecoverable');
+  const names = readdirSync(dir).filter((name) => name.endsWith('.pdf')).sort();
+  const out: Result[] = [];
+  for (const name of names) {
+    const base = name.replace(/\.pdf$/, '');
+    const truth = JSON.parse(readFileSync(join(dir, `${base}.truth.json`), 'utf8')) as PaperTruth;
+    out.push(await score(`直せない / ${base}`, new Uint8Array(readFileSync(join(dir, name))), truth));
+  }
+  return out;
+}
+
 const results = [
   await measure('1 段組 / 6 ページ', { pages: 6, columns: 1 }),
   await measure('2 段組 / 6 ページ', { pages: 6, columns: 2 }),
@@ -226,6 +271,8 @@ const results = [
   // `Table 3.` が行頭に来る形。論文では普通の書き方なので当たりやすい。
   await measure('本文が表を参照', { pages: 6, columns: 2, captionReference: true, justified: true }),
   await measure('2 段組 / 表題あり', { pages: 6, columns: 2, banner: true }),
+  // 段に収まる幅の中央寄せ表題。幅だけを見ると段抜きだと分からず、本文の途中に刺さる。
+  await measure('3 段組 / 段に収まる表題', { pages: 6, columns: 3, narrowBanner: true }),
   await measure('1 ページのみ', { pages: 1, columns: 2 }),
   await measure('紛らわしい言い回し', { pages: 6, columns: 2, pathological: true }),
   await measure('段抜きの図キャプション', { pages: 6, columns: 2, spanFigure: true }),
@@ -236,11 +283,12 @@ const results = [
 ];
 
 const realResults = await measureRealPapers();
+const unrecoverableResults = await measureUnrecoverable();
 
 function table(title: string, rows: Result[]): void {
   console.log(`\n${title}`);
-  console.log('レイアウト             再現率   読順  余分  混入  ハイフン  書換  文数  節  申告  採録   解析');
-  console.log('------------------------------------------------------------------------------------------------');
+  console.log('レイアウト             再現率   読順  余分  混入  ハイフン  書換  文数  節  申告  採録   印  解析');
+  console.log('-------------------------------------------------------------------------------------------------------');
   for (const r of rows) {
     console.log(
       `${r.label.padEnd(20)} ${`${Math.round(r.recall * 100)}%`.padStart(5)} (${r.found}/${r.expected})  ` +
@@ -250,6 +298,7 @@ function table(title: string, rows: Result[]): void {
         `${String(r.sentences).padStart(5)} ` +
         `${String(r.sections).padStart(3)} ${r.readingOrderRisk.padStart(5)} ` +
         `${`${(r.coverage * 100).toFixed(1)}%${r.coverageRisk === 'high' ? '!' : ' '}`.padStart(7)} ` +
+        `${`${r.seams}${r.seamFalseAlarms > 0 ? `(誤${r.seamFalseAlarms})` : ''}`.padStart(4)} ` +
         `${String(r.ms).padStart(6)}ms`,
     );
   }
@@ -257,6 +306,7 @@ function table(title: string, rows: Result[]): void {
 
 table('合成 PDF（回帰の網）', results);
 table('実物の論文（pdflatex / xelatex で組んだもの）', realResults);
+table('直せない壊れ方（印が付くかだけを見る）', unrecoverableResults);
 
 const all = [...results, ...realResults];
 
@@ -292,7 +342,28 @@ const MIN_MEASURED_COVERAGE = 0.98;
 const coverageAlarms = all.filter((r) => r.coverageRisk === 'high' && r.recall >= MIN_RECALL);
 const coverageFailures = all.filter((r) => r.coverage < MIN_MEASURED_COVERAGE);
 
-if (failures.length > 0 || falseAlarms.length > 0 || coverageAlarms.length > 0 || coverageFailures.length > 0) {
+/**
+ * 継ぎ目の印の誤爆の門。
+ *
+ * 印は「この文だけは原文と食い違っているおそれがある」という強い主張なので、
+ * 正しく取れている文に 1 件でも付いたら、以後まとめて無視されるようになる。
+ * 正解の本文そのものに印が付いていたら落とす。
+ */
+const seamFalseAlarms = [...all, ...unrecoverableResults].filter((r) => r.seamFalseAlarms > 0);
+
+/** 直せない標本で、印がちゃんと付いているか。付かなければ黙って壊れたままになる。 */
+const seamMisses = unrecoverableResults.filter(
+  (r) => r.seams < MIN_SEAMS || r.recall < MIN_UNRECOVERABLE_RECALL,
+);
+
+if (
+  failures.length > 0 ||
+  falseAlarms.length > 0 ||
+  coverageAlarms.length > 0 ||
+  coverageFailures.length > 0 ||
+  seamFalseAlarms.length > 0 ||
+  seamMisses.length > 0
+) {
   if (failures.length > 0) {
     console.error(
       `\n品質が基準を下回りました（再現率 >= ${MIN_RECALL * 100}% / 読順 >= ${MIN_ORDER * 100}% / ` +
@@ -318,6 +389,20 @@ if (failures.length > 0 || falseAlarms.length > 0 || coverageAlarms.length > 0 |
       '\n欠落の自己申告が誤って鳴っています（十分に取れている文書に high）:\n' +
         coverageAlarms
           .map((f) => `  ${f.label}: 再現率 ${Math.round(f.recall * 100)}% / 採録率 ${(f.coverage * 100).toFixed(1)}%`)
+          .join('\n'),
+    );
+  }
+  if (seamFalseAlarms.length > 0) {
+    console.error(
+      '\n継ぎ目の印が、正解の本文そのものに付いています（誤爆）:\n' +
+        seamFalseAlarms.map((f) => `  ${f.label}: 印 ${f.seams} 件 / うち誤爆 ${f.seamFalseAlarms} 件`).join('\n'),
+    );
+  }
+  if (seamMisses.length > 0) {
+    console.error(
+      `\n直せない壊れ方に印が付いていません（印 >= ${MIN_SEAMS} / 再現率 >= ${MIN_UNRECOVERABLE_RECALL * 100}%）:\n` +
+        seamMisses
+          .map((f) => `  ${f.label}: 印 ${f.seams} 件 / 再現率 ${Math.round(f.recall * 100)}%`)
           .join('\n'),
     );
   }

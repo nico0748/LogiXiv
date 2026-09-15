@@ -19,6 +19,15 @@ export interface PaperSpec {
   columnGap?: number;
   /** 1 ページ目に段を跨ぐ表題・著者行を置く。 */
   banner?: boolean;
+  /**
+   * 表題を、**どの段にも跨がらない幅**でページの中央に置く。
+   *
+   * 段が細いほど中央寄せの表題は中の段にすっぽり収まる。幅だけで「段抜きか」を
+   * 決めていると段抜きだと分からず、左の段を全部読み終えた後に表題が現れて
+   * **本文の文の途中に刺さる**（実測、multicol の 3 段組）:
+   *   `… which we determine independently Three Narrow Columns from inelastic …`
+   */
+  narrowBanner?: boolean;
   /** 誤分割しやすい言い回し（"温度 T." や "Ph.D." や "[12] Capital"）を混ぜる。 */
   pathological?: boolean;
   /**
@@ -159,6 +168,9 @@ const REFERENCES = [
   '[2] R. Roe. Efficient attention. Journal of ML, 12(3):45-67, 2025.',
 ];
 
+/** 段 1 本ぶんの幅に収まる表題（narrowBanner 用）。 */
+const NARROW_BANNER = ['Narrow Columns', 'C. Tester'];
+
 const BANNER = [
   'Block Sparse Attention for Long Documents',
   'Jane Q. Doe, Alan R. Roe, and Mei Tanaka',
@@ -281,7 +293,8 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
   let line = 0;
   let placedLines = 0;
   // 表題を置くと 1 ページ目の段が短くなる。
-  const bannerLines = spec.banner ? BANNER.length + 1 : 0;
+  const bannerLines = spec.banner || spec.narrowBanner ? BANNER.length + 1 : 0;
+
 
   const linesIn = (atPage: number): number => linesPerColumn - (atPage === 1 ? bannerLines : 0);
   const topOf = (atPage: number): number => bodyTop - (atPage === 1 ? bannerLines * lineHeight : 0);
@@ -608,6 +621,23 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
     list.push({ text: caption, x: margin, y: topOf(2) - cut * lineHeight, size: 9 });
     placedByPage.set(2, list);
     expectedNonBody.push(caption);
+  }
+
+  /**
+   * どの段にも跨がらない、中央寄せの表題。段の中に収まるので「幅」では見分けられない。
+   * 紙の上ではページの頭にあるので、読み順は「どの段よりも上か」で決まる。
+   */
+  if (spec.narrowBanner) {
+    const list = placedByPage.get(1) ?? [];
+    // 段 1 本ぶんの幅に収まる短い表題にする。長い表題は段間をまたいでしまい、
+    // 「幅では見分けられない」という測りたい状況にならない。
+    NARROW_BANNER.forEach((text, index) => {
+      const size = index === 0 ? 16 : 11;
+      const x = (pageWidth - helveticaWidth(text, size)) / 2;
+      list.push({ text, x, y: bodyTop - index * lineHeight, size });
+    });
+    placedByPage.set(1, list);
+    for (const text of NARROW_BANNER) expectedNonBody.push(text);
   }
 
   // 段を跨ぐ表題と著者行。1 ページ目の段はそのぶん下から始まっている。

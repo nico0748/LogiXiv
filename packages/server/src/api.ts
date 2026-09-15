@@ -38,7 +38,7 @@ import { EventBus } from './bus.ts';
 import { GrobidUnavailableError, isGrobidAlive, processFulltext } from './grobid.ts';
 import { parseWithPdfJs } from './fallback.ts';
 import { exportDocumentHtml } from './exporter.ts';
-import { missingStoredPdf, PdfUnreadableError } from './pdf-failure.ts';
+import { missingStoredPdf, pdfIngestAbandoned, PdfUnreadableError } from './pdf-failure.ts';
 
 /**
  * HTTP からも MCP からも同じ入口を通すためのアプリケーション層。
@@ -326,16 +326,45 @@ export class LogiXivApi {
     );
   }
 
-  /** PDF を解析して新規文書にする。GROBID が落ちていたら黙って劣化させず、警告を返す。 */
-  async ingestPdf(pdf: Uint8Array, fileName: string, preference: ParserPreference = 'auto'): Promise<IngestResult> {
+  /**
+   * PDF を解析して新規文書にする。GROBID が落ちていたら黙って劣化させず、警告を返す。
+   *
+   * `signal` は「この取り込みを頼んだ人がまだ待っているか」。ブラウザのタブを閉じる、
+   * 待ちきれずに再読み込みする、といった切断で落ちる。以前はこれを見ていなかったので、
+   * **誰も待っていない解析が最後まで走り切り、その結果が黙って一覧に現れていた**
+   * （実測: 450 ページで、クライアントが諦めた 11 分後）。取り込みを途中で捨てるなら、
+   * 置き場も残さない。
+   */
+  async ingestPdf(
+    pdf: Uint8Array,
+    fileName: string,
+    preference: ParserPreference = 'auto',
+    options: { signal?: AbortSignal } = {},
+  ): Promise<IngestResult> {
     this.assertLooksLikePdf(pdf, fileName);
+    const signal = options.signal;
+    // 関数にしておく。`signal.aborted` を直接書くと、型の絞り込みが
+    // 「一度 false だったのだから以後も false」と判断してしまう（実際には後から立つ）。
+    const clientGone = (): boolean => signal?.aborted === true;
 
-    const { structure, usedFallback, warning } = await this.parseStructure(pdf, fileName, preference);
+    const { structure, usedFallback, warning } = await this.parseStructure(
+      pdf,
+      fileName,
+      preference,
+      signal,
+    );
+    // 解析が終わった瞬間にもう一度見る。解析中に切れた場合は上の await が
+    // 中止で抜けるが、解析が先に終わっていた（＝ここまで来た）ときは
+    // この一行だけが「書かない」を決める最後の場所になる。
+    if (clientGone()) throw pdfIngestAbandoned(fileName);
     const document = createDocument({ structure, sourceFileName: fileName });
 
     try {
       await this.store.writePdf(document.id, pdf);
       await this.store.write(document);
+      // 書き込みの最中に切れることもある。半分だけ置いて帰らないよう、
+      // 書き終えてから消す（消せる状態にしてから判定する）。
+      if (clientGone()) throw pdfIngestAbandoned(fileName);
     } catch (error) {
       // 書けなかったときに作りかけを残さない。document.json の無いディレクトリは
       // 一覧に出ないので、利用者からは見えも消せもしないゴミになる。
@@ -378,11 +407,19 @@ export class LogiXivApi {
     }
   }
 
-  private async parseStructure(pdf: Uint8Array, fileName: string, preference: ParserPreference) {
+  private async parseStructure(
+    pdf: Uint8Array,
+    fileName: string,
+    preference: ParserPreference,
+    signal?: AbortSignal,
+  ) {
     return this.parseSlots.run(async () => {
+      // 順番待ちの間に切れていることがある。待たせた末に「今から 2 分かけて解析します」
+      // では、待ち行列が誰も見ない仕事で埋まる。
+      if (signal?.aborted === true) throw pdfIngestAbandoned(fileName);
       if (preference === 'fallback') {
         return {
-          structure: await parseWithPdfJs(pdf, { fileName }),
+          structure: await parseWithPdfJs(pdf, { fileName, signal }),
           usedFallback: true,
           warning: null as string | null,
         };
@@ -401,7 +438,7 @@ export class LogiXivApi {
         // 「GROBID が使えなかった」を被せると、暗号化された PDF を入れた人に
         // GROBID の設定を疑わせることになる。
         return {
-          structure: await parseWithPdfJs(pdf, { fileName }),
+          structure: await parseWithPdfJs(pdf, { fileName, signal }),
           usedFallback: true,
           warning: `GROBID を使えなかったため簡易解析に切り替えました: ${reason}`,
         };

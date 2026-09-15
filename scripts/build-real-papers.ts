@@ -25,13 +25,25 @@ import { extractTruth } from './real-paper-truth.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const papersDir = join(here, 'real-papers');
 
-const sources = readdirSync(papersDir).filter((name) => name.endsWith('.tex')).sort();
+/**
+ * `real-papers/*.tex` と `real-papers/unrecoverable/*.tex` の両方を組む。
+ *
+ * `unrecoverable/` は「直せないと分かっている壊れ方」の標本。別の場所に置くのは、
+ * 再現率 100% を求める門（measureRealPapers）と混ぜないため。
+ */
+const sources = [
+  ...readdirSync(papersDir).filter((name) => name.endsWith('.tex')).map((name) => name),
+  ...readdirSync(join(papersDir, 'unrecoverable'))
+    .filter((name) => name.endsWith('.tex'))
+    .map((name) => join('unrecoverable', name)),
+].sort();
 if (sources.length === 0) throw new Error(`${papersDir} に .tex がありません`);
 
 const work = mkdtempSync(join(tmpdir(), 'logixiv-tex-'));
 try {
   for (const source of sources) {
     const name = source.replace(/\.tex$/, '');
+    mkdirSync(join(papersDir, name.includes('/') ? name.replace(/\/[^/]*$/, '') : '.'), { recursive: true });
     const tex = readFileSync(join(papersDir, source), 'utf8');
 
     // 正解を先に作る。ここが失敗するなら PDF を組んでも意味がない。
@@ -41,7 +53,8 @@ try {
     }
 
     mkdirSync(join(work, name), { recursive: true });
-    copyFileSync(join(papersDir, source), join(work, name, source));
+    const file = `${name.includes('/') ? name.slice(name.lastIndexOf('/') + 1) : name}.tex`;
+    copyFileSync(join(papersDir, source), join(work, name, file));
     // 和文の原稿は `fontspec` で CJK 書体を指定するので xelatex でないと通らない。
     // 欧文はこれまでどおり pdflatex（速く、標準 14 書体なら書体を埋め込まない）。
     const engine = /\\usepackage(\[[^\]]*\])?\{fontspec\}/.test(tex) ? 'xelatex' : 'pdflatex';
@@ -49,19 +62,19 @@ try {
     // 相互参照（ノンブル・引用番号）を確定させるため 2 回通す。
     for (let pass = 0; pass < 2; pass++) {
       try {
-        execFileSync(engine, ['-interaction=nonstopmode', '-halt-on-error', source], {
+        execFileSync(engine, ['-interaction=nonstopmode', '-halt-on-error', file], {
           cwd: join(work, name),
           stdio: 'pipe',
         });
       } catch (error) {
-        const log = readFileSync(join(work, name, `${name}.log`), 'utf8');
+        const log = readFileSync(join(work, name, file.replace(/\.tex$/, '.log')), 'utf8');
         throw new Error(`${source} の組版に失敗しました（${engine}）:\n${log.slice(-2000)}`, { cause: error });
       }
     }
 
-    verifyInlineMath(tex, join(work, name, `${name}.pdf`), source);
+    verifyInlineMath(tex, join(work, name, file.replace(/\.tex$/, '.pdf')), source);
 
-    copyFileSync(join(work, name, `${name}.pdf`), join(papersDir, `${name}.pdf`));
+    copyFileSync(join(work, name, file.replace(/\.tex$/, '.pdf')), join(papersDir, `${name}.pdf`));
     writeFileSync(join(papersDir, `${name}.truth.json`), `${JSON.stringify(truth, null, 2)}\n`, 'utf8');
 
     const bytes = readFileSync(join(papersDir, `${name}.pdf`)).byteLength;
