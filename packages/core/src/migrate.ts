@@ -98,12 +98,14 @@ export function migrateDocument(document: PaperDocument): MigrationResult {
         ...(edit.undo ? { undo: { ...edit.undo, hashes: mapHashes(edit.undo.hashes) } } : {}),
       };
     }
-    const derived = deriveEdit(edit.type, edit.sourceTexts, edit.offsets ?? [], edit.undo?.joiners);
+    const joiners = edit.type === 'merge' ? (edit.joiners ?? edit.undo?.joiners) : undefined;
+    const derived = deriveEdit(edit.type, edit.sourceTexts, edit.offsets ?? [], joiners);
     return {
       ...edit,
       hashes: derived.hashes,
-      ...(edit.type === 'split' ? { offsets: derived.offsets } : {}),
-      undo: { ...derived.undo, occurrences: edit.undo?.occurrences },
+      ...(edit.type === 'split' ? { offsets: derived.offsets } : { joiners: derived.undo.joiners }),
+      // 位置は元の記録のまま。件数が無い古い記録は 1 か所に留める（戻しすぎより軽い）。
+      undo: { ...derived.undo, occurrences: edit.undo?.occurrences ?? 1, at: edit.undo?.at },
     };
   });
 

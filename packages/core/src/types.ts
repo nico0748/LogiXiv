@@ -111,6 +111,8 @@ export interface SentenceEdit {
   hashes: string[];
   /** split のときだけ使う、原文テキスト内の分割位置（昇順）。 */
   offsets?: number[];
+  /** merge のときだけ使う、断片を繋ぐ文字列。既定は空白 1 個。 */
+  joiners?: string[];
   /**
    * 対象の原文そのもの。hash はここから計算できる。
    *
@@ -124,9 +126,17 @@ export interface SentenceEdit {
    *
    * joiners は分割を戻すときに断片を繋ぐ文字列。単語の途中で切った場合は空文字になる。
    * ここで空白を決め打ちすると、戻した文が元と違う本文になり訳がはぐれる。
-   * occurrences は適用された箇所の数。元から在った同じ本文の文まで巻き込まないための上限。
+   * occurrences は適用された箇所の数、at はその通し番号。
+   * 件数だけでは「何か所戻すか」しか決まらず、同じ本文が手前にもあると
+   * 編集していない方をほどいてしまう。
    */
-  undo?: { hashes: string[]; offsets?: number[]; joiners?: string[]; occurrences?: number };
+  undo?: {
+    hashes: string[];
+    offsets?: number[];
+    joiners?: string[];
+    occurrences?: number;
+    at?: number[];
+  };
   createdAt: string;
 }
 

@@ -573,11 +573,13 @@ export class LogiXivApi {
     if (targetId) {
       let report: unknown = null;
       let adoptedEdits = 0;
+      let detachedByAdoption = { translations: 0, notes: 0 };
       await this.mutate(targetId, (current) => {
         // 相手が直した文の区切りを先に取り込む。順番が逆だと、まとめた文に付いた訳が
         // 「対応なし」として捨てられる（区切りが違うだけで hash が当たらないため）。
         const adopted = adoptSentenceEdits(current, parsed.annotations.sentenceEdits ?? []);
         adoptedEdits = adopted.adopted;
+        detachedByAdoption = adopted.detached;
         const base = adopted.document;
         const hashes = new Set(base.structure.sentences.map((s) => s.hash));
         const merged = mergeAnnotations(base.annotations, parsed.annotations, hashes);
@@ -587,7 +589,12 @@ export class LogiXivApi {
       this.bus.publish({ type: 'document.updated', documentId: targetId, reason: 'import' });
       return {
         documentId: targetId,
-        report: { ...(report as Record<string, number>), sentenceEditsAdopted: adoptedEdits },
+        report: {
+          ...(report as Record<string, number>),
+          sentenceEditsAdopted: adoptedEdits,
+          detachedTranslations: detachedByAdoption.translations,
+          detachedNotes: detachedByAdoption.notes,
+        },
         note: '既存の文書に注釈をマージしました',
         warning,
       };

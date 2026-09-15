@@ -144,13 +144,33 @@ function editKey(edit: SentenceEdit): string {
 export function adoptSentenceEdits(
   document: PaperDocument,
   incoming: readonly SentenceEdit[],
-): { document: PaperDocument; adopted: number; skipped: number } {
+): {
+  document: PaperDocument;
+  adopted: number;
+  skipped: number;
+  /** こちら側の注釈のうち、区切りが変わってどの文にも結び付かなくなった数。 */
+  detached: { translations: number; notes: number };
+} {
+  const none = { translations: 0, notes: 0 };
   const known = new Set((document.annotations.sentenceEdits ?? []).map(editKey));
   const candidates = incoming.filter((edit) => !known.has(editKey(edit)));
-  if (candidates.length === 0) return { document, adopted: 0, skipped: 0 };
+  if (candidates.length === 0) return { document, adopted: 0, skipped: 0, detached: none };
 
   const replay = applySentenceEdits(document.structure, candidates);
-  if (replay.applied.length === 0) return { document, adopted: 0, skipped: replay.stale.length };
+  if (replay.applied.length === 0) {
+    return { document, adopted: 0, skipped: replay.stale.length, detached: none };
+  }
+
+  // 相手の区切りに合わせると、こちらが既に付けていた訳やメモが外れることがある。
+  // 取り込み結果の orphaned は「相手の注釈」の話なので、これはそこに出てこない。
+  const survivors = new Set(replay.structure.sentences.map((sentence) => sentence.hash));
+  const lost = new Set(
+    document.structure.sentences.map((s) => s.hash).filter((hash) => !survivors.has(hash)),
+  );
+  const detached = {
+    translations: [...lost].filter((hash) => document.annotations.translations[hash]).length,
+    notes: document.annotations.notes.filter((note) => lost.has(note.sentenceHash)).length,
+  };
 
   return {
     document: {
@@ -163,6 +183,7 @@ export function adoptSentenceEdits(
     },
     adopted: replay.applied.length,
     skipped: replay.stale.length,
+    detached,
   };
 }
 

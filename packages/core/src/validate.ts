@@ -13,6 +13,7 @@ import type {
   Translation,
 } from './types.ts';
 import { STRUCTURE_VERSION, newId, sentenceHash, sentenceId } from './hash.ts';
+import { sanitizeJoiner } from './edits.ts';
 
 /**
  * 外から来た JSON を、型どおりだと保証できる値に落とす。
@@ -262,6 +263,9 @@ export function sanitizeAnnotations(value: unknown, report: SanitizeReport): Ann
             .slice(0, 64)
         : [];
       if (sourceTexts.length > 0) edit.sourceTexts = sourceTexts;
+      if (type === 'merge' && Array.isArray(raw['joiners'])) {
+        edit.joiners = raw['joiners'].slice(0, 64).map((item) => sanitizeJoiner(typeof item === 'string' ? item : ' '));
+      }
       const undo = raw['undo'];
       if (isRecord(undo)) {
         const undoHashes = sanitizeHashList(undo['hashes']);
@@ -270,11 +274,20 @@ export function sanitizeAnnotations(value: unknown, report: SanitizeReport): Ann
           edit.undo = {
             hashes: undoHashes,
             offsets: sanitizeOffsets(undo['offsets']),
+            // 繋ぎ文字は空白類だけ通す。外から来た任意の文字列で本文を作らせない。
             joiners: Array.isArray(undo['joiners'])
-              // 繋ぎ文字は「空文字」か「空白 1 個」しか作らない。外から来た任意文字列は入れない。
-              ? undo['joiners'].slice(0, 64).map((item) => (item === '' ? '' : ' '))
+              ? undo['joiners'].slice(0, 64).map((item) => sanitizeJoiner(typeof item === 'string' ? item : ' '))
               : [],
             ...(occurrences !== null && occurrences > 0 ? { occurrences: Math.floor(occurrences) } : {}),
+            ...(Array.isArray(undo['at'])
+              ? {
+                  at: undo['at']
+                    .map(finiteNumber)
+                    .filter((n): n is number => n !== null && n >= 0)
+                    .map((n) => Math.floor(n))
+                    .slice(0, 1000),
+                }
+              : {}),
           };
         }
       }

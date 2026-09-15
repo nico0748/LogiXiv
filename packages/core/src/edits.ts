@@ -35,8 +35,10 @@ function rebuildOrder(sentences: Sentence[]): Sentence[] {
 
 /**
  * 同じ行に乗る矩形をまとめ直す（結合で細切れの枠が重なって出ないように）。
- * 横に離れているものはまとめない。段組の左右は y がほぼ同じなので、
- * 距離を見ないと 1 本の枠が柱間を跨いで無関係な段まで光る。
+ *
+ * 横に離れているものはまとめない。段組の左右は y がほぼ同じなので、距離を見ないと
+ * 1 本の枠が柱間を跨いで無関係な段まで光る。許容量は空白 1 個ぶん（文字高の 0.6 倍）。
+ * 二段組の柱間は狭くても 12pt（layout.ts の MIN_GUTTER）あるので、これで混ざらない。
  */
 function normalizeRects(rects: readonly Rect[]): Rect[] {
   const merged: Rect[] = [];
@@ -44,7 +46,7 @@ function normalizeRects(rects: readonly Rect[]): Rect[] {
     const last = merged[merged.length - 1];
     if (last && last.page === rect.page && Math.abs(last.y - rect.y) < Math.max(2, last.h * 0.5)) {
       const gap = rect.x - (last.x + last.w);
-      if (gap < Math.max(4, last.h * 2)) {
+      if (gap < Math.max(4, last.h * 0.6)) {
         const x0 = Math.min(last.x, rect.x);
         const x1 = Math.max(last.x + last.w, rect.x + rect.w);
         const y0 = Math.min(last.y, rect.y);
@@ -115,24 +117,34 @@ function cutIntoPieces(text: string, cuts: readonly number[]): Piece[] {
 }
 
 /**
- * 断片同士を元どおりに繋ぎ直すための文字列。
+ * 断片同士を元どおりに繋ぎ直すための文字列。元の文にあった空白をそのまま持つ。
  * 単語の途中で切った場合は空文字になる。ここで空白 1 個を決め打ちすると、
  * 取り消したときに元と違う本文ができて、訳が静かにはぐれる。
  */
 function joinersBetween(source: string, pieces: readonly Piece[]): string[] {
   const joiners: string[] = [];
   for (let i = 0; i < pieces.length - 1; i++) {
-    const gap = source.slice(pieces[i]!.to, pieces[i + 1]!.from);
-    joiners.push(gap.length === 0 ? '' : ' ');
+    joiners.push(sanitizeJoiner(source.slice(pieces[i]!.to, pieces[i + 1]!.from)));
   }
   return joiners;
+}
+
+/** 繋ぎ文字は空白類だけ。長さも切る（外から来た記録で本文を作らせない）。 */
+export function sanitizeJoiner(gap: string): string {
+  const clean = gap.replace(/[^\s]/g, '').slice(0, 8);
+  return clean;
 }
 
 /** 断片を繋いで 1 文にする。 */
 function joinPieces(texts: readonly string[], joiners: readonly string[] | undefined): string {
   return texts
-    .map((text, index) => (index === 0 ? tidy(text) : `${joiners?.[index - 1] ?? ' '}${tidy(text)}`))
+    .map((text, index) => (index === 0 ? tidy(text) : `${joinerAt(joiners, index - 1)}${tidy(text)}`))
     .join('');
+}
+
+function joinerAt(joiners: readonly string[] | undefined, index: number): string {
+  const joiner = joiners?.[index];
+  return joiner === undefined ? ' ' : joiner;
 }
 
 /** 結合後テキストの上で、元の境目がどこだったかを測る。 */
@@ -140,7 +152,7 @@ function boundariesIn(texts: readonly string[], joiners: readonly string[] | und
   const boundaries: number[] = [];
   let at = 0;
   for (let i = 0; i < texts.length - 1; i++) {
-    at += tidy(texts[i]!).length + (joiners?.[i] ?? ' ').length;
+    at += tidy(texts[i]!).length + joinerAt(joiners, i).length;
     if (at > 0 && at < total) boundaries.push(at);
   }
   return boundaries;
@@ -164,7 +176,7 @@ export function deriveEdit(
       undo: {
         hashes: [sentenceHash(text)],
         offsets: boundariesIn(sourceTexts, joiners, text.length),
-        joiners: sourceTexts.slice(0, -1).map((_, index) => joiners?.[index] ?? ' '),
+        joiners: sourceTexts.slice(0, -1).map((_, index) => joinerAt(joiners, index)),
       },
     };
   }
@@ -186,6 +198,8 @@ export interface EditOutcome {
   structure: DocumentStructure;
   /** 編集の対象になった文の原文。移行で hash を作り直すために記録に残す。 */
   sourceTexts: string[];
+  /** 実際に使った繋ぎ文字（merge のときだけ意味を持つ）。 */
+  joiners: string[];
   /** 取り消しに必要な情報。 */
   undo: NonNullable<SentenceEdit['undo']>;
   /** 実際に適用された箇所の数。 */
@@ -197,8 +211,14 @@ export interface EditOutcome {
 export interface SentenceMergeOptions {
   /** 断片を繋ぐ文字列。省略すると空白 1 個。分割の取り消しで元の区切りを再現するために使う。 */
   joiners?: readonly string[];
-  /** 先頭から数えて何か所までに適用するか。取り消しで、元から在った同文まで巻き込まないために使う。 */
+  /** 先頭から数えて何か所までに適用するか。 */
   limit?: number;
+  /**
+   * ここに挙げた通し番号から始まる並びだけを対象にする。
+   * 件数だけを上限にすると、同じ本文が手前にもあるとき、編集していない方を
+   * ほどいてしまう（そして記録は消えるので二度と直せない）。
+   */
+  at?: readonly number[];
 }
 
 /**
@@ -213,14 +233,17 @@ export function mergeSentences(
   if (hashes.length < 2) throw new SentenceEditError('結合するには 2 文以上を指定してください');
 
   const limit = options.limit ?? Infinity;
+  const wanted = options.at ? new Set(options.at) : null;
   const sentences = structure.sentences;
   const next: Sentence[] = [];
+  const at: number[] = [];
   let applied = 0;
   let sourceTexts: string[] | null = null;
 
   for (let i = 0; i < sentences.length; ) {
     const matches =
       applied < limit &&
+      (wanted === null || wanted.has(sentences[i]!.order)) &&
       i + hashes.length <= sentences.length &&
       hashes.every((hash, offset) => sentences[i + offset]!.hash === hash);
     if (!matches) {
@@ -228,6 +251,7 @@ export function mergeSentences(
       i++;
       continue;
     }
+    at.push(next.length);
     const parts = sentences.slice(i, i + hashes.length);
     const text = joinPieces(
       parts.map((part) => part.text),
@@ -252,11 +276,13 @@ export function mergeSentences(
     throw new SentenceEditError('指定された文が連続して見つかりません（再解析で区切りが変わった可能性があります）');
   }
 
-  const derived = deriveEdit('merge', sourceTexts, [], options.joiners);
+  const joiners = sourceTexts.slice(0, -1).map((_, index) => joinerAt(options.joiners, index));
+  const derived = deriveEdit('merge', sourceTexts, [], joiners);
   return {
     structure: { ...structure, sentences: rebuildOrder(next) },
     sourceTexts,
-    undo: { ...derived.undo, occurrences: applied },
+    joiners,
+    undo: { ...derived.undo, occurrences: applied, at },
     occurrences: applied,
     offsets: [],
   };
@@ -290,6 +316,46 @@ function sliceRects(rects: readonly Rect[], fromRatio: number, toRatio: number):
 export interface SplitOptions {
   /** 先頭から数えて何か所までに適用するか。 */
   limit?: number;
+  /** ここに挙げた通し番号の文だけを対象にする（merge の at と同じ理由）。 */
+  at?: readonly number[];
+  /**
+   * 分割後にこの hash 列になるように切り位置を探し直す。
+   *
+   * 再解析すると、正規化すると同じ hash でも綴りの長さが変わることがある
+   * （"block- sparse" → "block-sparse"）。文字位置をそのまま当てると
+   * 関係ない場所で切れて、両方の断片が別の本文になる。
+   */
+  pieceHashes?: readonly string[];
+}
+
+/**
+ * 断片の hash 列から切り位置を探し直す。
+ * 語の切れ目を先に試し、見つからなければ全位置を試す（文はせいぜい数百文字）。
+ */
+function relocateCuts(text: string, pieceHashes: readonly string[]): number[] | null {
+  if (pieceHashes.length < 2 || text.length > 8000) return null;
+  const wordStarts: number[] = [];
+  const word = /\S+/g;
+  let match: RegExpExecArray | null;
+  while ((match = word.exec(text)) !== null) if (match.index > 0) wordStarts.push(match.index);
+  const everywhere = Array.from({ length: text.length - 1 }, (_, index) => index + 1);
+
+  const search = (candidates: readonly number[]): number[] | null => {
+    const cuts: number[] = [];
+    let start = 0;
+    for (let piece = 0; piece < pieceHashes.length - 1; piece++) {
+      const found = candidates.find(
+        (candidate) =>
+          candidate > start && sentenceHash(tidy(text.slice(start, candidate))) === pieceHashes[piece],
+      );
+      if (found === undefined) return null;
+      cuts.push(found);
+      start = found;
+    }
+    return sentenceHash(tidy(text.slice(start))) === pieceHashes[pieceHashes.length - 1] ? cuts : null;
+  };
+
+  return search(wordStarts) ?? search(everywhere);
 }
 
 /**
@@ -308,17 +374,30 @@ export function splitSentence(
   const target = structure.sentences.find((sentence) => sentence.hash === hash);
   if (!target) throw new SentenceEditError('指定された文が見つかりません');
 
-  const cuts = normalizeOffsets(target.text, offsets);
+  const relocated = options.pieceHashes ? relocateCuts(target.text, options.pieceHashes) : null;
+  const cuts = relocated ?? normalizeOffsets(target.text, offsets);
   if (cuts.length === 0) throw new SentenceEditError('分割位置が文の内側にありません');
+  if (options.pieceHashes && !relocated) {
+    // 記録どおりの断片を作れない。文字位置で当てずっぽうに切るより、当てられなかったことにする。
+    throw new SentenceEditError('本文が変わったため、記録どおりの位置で分割できません');
+  }
   const pieces = cutIntoPieces(target.text, cuts);
   if (pieces.length < 2) throw new SentenceEditError('分割の結果が 1 文にしかなりません');
 
   const limit = options.limit ?? Infinity;
+  const wanted = options.at ? new Set(options.at) : null;
   const length = target.text.length;
   let occurrences = 0;
+  const at: number[] = [];
+  let emitted = 0;
   const next = structure.sentences.flatMap((sentence): Sentence[] => {
-    if (sentence.hash !== hash || occurrences >= limit) return [sentence];
+    if (sentence.hash !== hash || occurrences >= limit || (wanted !== null && !wanted.has(sentence.order))) {
+      emitted++;
+      return [sentence];
+    }
     occurrences++;
+    at.push(emitted);
+    emitted += pieces.length;
     return pieces.map((piece) => {
       const pieceHash = sentenceHash(piece.text);
       const rects = sliceRects(sentence.rects, piece.from / length, piece.to / length);
@@ -338,7 +417,8 @@ export function splitSentence(
   return {
     structure: { ...structure, sentences: rebuildOrder(next) },
     sourceTexts: [target.text],
-    undo: { ...derived.undo, occurrences },
+    joiners: [],
+    undo: { ...derived.undo, occurrences, at },
     occurrences,
     offsets: cuts,
   };
@@ -354,8 +434,8 @@ export interface ApplyEditsResult {
 
 export function applySentenceEdit(structure: DocumentStructure, edit: SentenceEdit): EditOutcome {
   return edit.type === 'merge'
-    ? mergeSentences(structure, edit.hashes)
-    : splitSentence(structure, edit.hashes[0] ?? '', edit.offsets ?? []);
+    ? mergeSentences(structure, edit.hashes, { joiners: edit.joiners })
+    : splitSentence(structure, edit.hashes[0] ?? '', edit.offsets ?? [], { pieceHashes: edit.undo?.hashes });
 }
 
 /** 記録された編集を打ち消す。結合は分割で、分割は結合で戻す。 */
@@ -364,11 +444,20 @@ export function revertSentenceEdit(structure: DocumentStructure, edit: SentenceE
   if (!undo || undo.hashes.length === 0) {
     throw new SentenceEditError('この編集には取り消しの情報がありません');
   }
-  // 適用した箇所の数だけ戻す。元から在った同じ本文の文まで巻き込まないため。
-  const limit = undo.occurrences;
+  // 編集した箇所だけを戻す。件数しか見ないと、同じ本文が手前にもあるとき
+  // 編集していない方をほどいてしまい、記録は消えるので二度と直せない。
+  // 位置が分からない古い記録では 1 か所に留める（戻しすぎる方が壊れ方が重い）。
+  const limit = undo.occurrences ?? 1;
+  const at = undo.at;
   return edit.type === 'merge'
-    ? splitSentence(structure, undo.hashes[0]!, undo.offsets ?? [], { limit }).structure
-    : mergeSentences(structure, undo.hashes, { joiners: undo.joiners, limit }).structure;
+    ? splitSentence(structure, undo.hashes[0]!, undo.offsets ?? [], {
+        limit,
+        at,
+        // 結合を戻すときの断片は、結合前の文そのもの。hash で位置を探し直せば、
+        // 再解析で綴りが変わっていても正しい場所で切れる。
+        pieceHashes: edit.hashes.length >= 2 ? edit.hashes : undefined,
+      }).structure
+    : mergeSentences(structure, undo.hashes, { joiners: undo.joiners, limit, at }).structure;
 }
 
 /**
@@ -395,7 +484,9 @@ export function applySentenceEdits(
       applied.push({
         ...edit,
         sourceTexts: outcome.sourceTexts,
-        ...(edit.type === 'split' ? { offsets: outcome.offsets } : {}),
+        ...(edit.type === 'split'
+          ? { offsets: outcome.offsets }
+          : { joiners: outcome.joiners }),
         undo: outcome.undo,
       });
     } catch (error) {

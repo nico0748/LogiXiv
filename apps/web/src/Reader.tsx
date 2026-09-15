@@ -203,6 +203,12 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
       const base = report
         ? `取り込み完了: 訳 +${report['translationsAdded'] ?? 0} / 更新 ${report['translationsUpdated'] ?? 0} / メモ +${report['notesAdded'] ?? 0} / 対応なし ${report['orphaned'] ?? 0}${
             report['sentenceEditsAdopted'] ? ` / 区切りの直し ${report['sentenceEditsAdopted']} 件を反映` : ''
+          }${
+            (report['detachedTranslations'] ?? 0) + (report['detachedNotes'] ?? 0) > 0
+              ? `（区切りが変わったため、こちらの訳 ${report['detachedTranslations'] ?? 0} 件・メモ ${
+                  report['detachedNotes'] ?? 0
+                } 件が元の文から外れました）`
+              : ''
           }`
         : result.note;
       return result.warning ? `${base}（${result.warning}）` : base;

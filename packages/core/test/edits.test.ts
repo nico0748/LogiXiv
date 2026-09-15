@@ -334,3 +334,138 @@ test('正規化規則が変わっても、記録した区切りは再解析で�
   assert.equal(applied.editsReapplied, 1, '移行後に区切りの直しが当たらなくなっている');
   assert.equal(applied.document.structure.sentences.length, 1);
 });
+
+// --- サイクル5 の批評で見つかった壊れ方 --------------------------------
+
+test('結合の取り消しは、手前にある同じ本文ではなく編集した箇所をほどく', () => {
+  // 件数だけを上限にすると、手前の同文をほどいて編集した方はそのまま残る。
+  const base = structureOf(['Step one. Step two.', 'Filler.', 'Step one.', 'Step two.']);
+  let document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  document = setTranslation(document, base.sentences[0]!.hash, '手順 1。手順 2。', { source: 'human' }).document;
+
+  const merged = editSentenceBoundary(document, {
+    type: 'merge',
+    hashes: [base.sentences[2]!.hash, base.sentences[3]!.hash],
+  });
+  assert.equal(merged.applied, true);
+
+  const back = undoSentenceEdit(merged.document);
+  assert.deepEqual(
+    back.document.structure.sentences.map((s) => s.text),
+    ['Step one. Step two.', 'Filler.', 'Step one.', 'Step two.'],
+  );
+  assert.equal(progress(back.document).translated, 1, '手前の文の訳が外れている');
+});
+
+test('分割の取り消しも、手前にある同じ並びを巻き込まない', () => {
+  const base = structureOf(['alpha', 'beta', 'Filler.', 'alphabeta']);
+  const document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  const split = editSentenceBoundary(document, {
+    type: 'split',
+    hashes: [base.sentences[3]!.hash],
+    offsets: [5],
+  });
+  assert.equal(split.applied, true);
+  const back = undoSentenceEdit(split.document);
+  assert.deepEqual(
+    back.document.structure.sentences.map((s) => s.text),
+    ['alpha', 'beta', 'Filler.', 'alphabeta'],
+  );
+});
+
+test('再解析で綴りが変わったら、分割は文字位置ではなく断片の一致で当て直す', () => {
+  const fallback = structureOf(['We use block- sparse attention. It is fast.', 'Tail.']);
+  let document = createDocument({ structure: fallback, sourceFileName: 'a.pdf' });
+  const split = editSentenceBoundary(document, {
+    type: 'split',
+    hashes: [fallback.sentences[0]!.hash],
+    offsets: ['We use block- sparse attention.'.length],
+  });
+  assert.equal(split.applied, true);
+  document = split.document;
+  const [left, right] = document.structure.sentences;
+  document = setTranslation(document, left!.hash, '前半', { source: 'human' }).document;
+  document = setTranslation(document, right!.hash, '後半', { source: 'human' }).document;
+  assert.equal(progress(document).translated, 2);
+
+  // GROBID がハイフンを解決した綴りを返す。正規化すると同じ hash だが 1 文字短い。
+  const grobid = structureOf(['We use block-sparse attention. It is fast.', 'Tail.']);
+  const applied = applyStructure(document, grobid);
+  assert.equal(applied.editsReapplied, 1);
+  assert.deepEqual(
+    applied.document.structure.sentences.map((s) => s.text),
+    ['We use block-sparse attention.', 'It is fast.', 'Tail.'],
+  );
+  assert.equal(progress(applied.document).translated, 2, '再解析で訳がはぐれている');
+});
+
+test('断片を作り直せない編集は、当てずっぽうに切らずに記録から外れる', () => {
+  const base = structureOf(['One two three four.', 'Tail.']);
+  const document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  const split = editSentenceBoundary(document, {
+    type: 'split',
+    hashes: [base.sentences[0]!.hash],
+    offsets: [8],
+  }).document;
+
+  const applied = applyStructure(split, structureOf(['Totally different text here.', 'Tail.']));
+  assert.equal(applied.editsReapplied, 0);
+  assert.equal(applied.editsDropped, 1);
+  assert.deepEqual(
+    applied.document.structure.sentences.map((s) => s.text),
+    ['Totally different text here.', 'Tail.'],
+  );
+});
+
+test('件数の記録が無い古い編集は、1 か所だけ戻す', () => {
+  const base = structureOf(['Step one.', 'Step two.', 'Filler.', 'Step one.', 'Step two.']);
+  const document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  const merged = editSentenceBoundary(document, {
+    type: 'merge',
+    hashes: [base.sentences[0]!.hash, base.sentences[1]!.hash],
+  }).document;
+  assert.equal(merged.structure.sentences.length, 3);
+
+  // occurrences も at も持たない、この修正より前に保存された記録を模す。
+  const legacy = {
+    ...merged,
+    annotations: {
+      ...merged.annotations,
+      sentenceEdits: (merged.annotations.sentenceEdits ?? []).map((edit) => ({
+        ...edit,
+        undo: { hashes: edit.undo!.hashes, offsets: edit.undo!.offsets, joiners: edit.undo!.joiners },
+      })),
+    },
+  };
+  const back = undoSentenceEdit(legacy);
+  assert.equal(back.applied, true);
+  assert.equal(back.document.structure.sentences.length, 4, '戻しすぎている');
+});
+
+test('繋ぎ文字は元の空白をそのまま持つ', () => {
+  const base = structureOf(['alpha\tbeta gamma.']);
+  const document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  const split = editSentenceBoundary(document, {
+    type: 'split',
+    hashes: [base.sentences[0]!.hash],
+    offsets: [6],
+  });
+  assert.equal(split.applied, true);
+  const back = undoSentenceEdit(split.document);
+  assert.equal(back.document.structure.sentences[0]!.text, 'alpha\tbeta gamma.');
+});
+
+test('段組の柱間（12pt）は結合しても 1 本の枠にならない', () => {
+  for (const [height, gap] of [
+    [9, 20],
+    [11, 20],
+    [13, 20],
+    [12, 12],
+  ] as const) {
+    const base = structureOf(['Left side.', 'Right side.']);
+    base.sentences[0]!.rects = [{ page: 1, x: 50, y: 400, w: 237, h: height }];
+    base.sentences[1]!.rects = [{ page: 1, x: 287 + gap, y: 400, w: 237, h: height }];
+    const merged = mergeSentences(base, [base.sentences[0]!.hash, base.sentences[1]!.hash]);
+    assert.equal(merged.structure.sentences[0]!.rects.length, 2, `h=${height} gap=${gap} で柱間を跨いだ`);
+  }
+});
