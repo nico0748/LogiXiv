@@ -13,10 +13,32 @@
     "We evaluate configuration eleven on the test, and then report the results in the following table.",
     "Our block sparse kernel outperforms the dense baseline by twelve points overall in this configuration.",
     "Information retrieval benefits from the same sparsity pattern at greater depth in the encoder stack.",
-    "Large systems benefit most from the earlier stages of the pipeline described in the previous paragraph."
+    "Large systems benefit most from the earlier stages of the pipeline described in the previous paragraph.",
+    "The routing scheme assigns every query block to a small set of key blocks chosen by a learned scorer.",
+    "We train the scorer jointly with the rest of the network using a straight-through estimator.",
+    "Ablations show that removing the scorer costs four points of accuracy on the longest split.",
+    "The kernel is implemented once in a portable fashion and reused for both training and inference.",
+    "Training from scratch with the sparse kernel converges in the same number of steps as the dense baseline.",
+    "Memory use grows linearly with the sequence length rather than quadratically as in the dense case.",
+    "We measure wall clock time on a single accelerator with the batch size fixed at thirty two.",
+    "The speedup over the dense baseline reaches a factor of six at sixty-four thousand tokens.",
+    "We compare against four published baselines under an identical training budget and tokeniser.",
+    "Every number in this section is the mean over five seeds with the standard deviation in brackets.",
+    "The largest gain appears on the retrieval task where long range dependencies matter most.",
+    "On the short context tasks the sparse and the dense models are statistically indistinguishable.",
+    "We also report results with the scorer frozen after the first epoch of training.",
+    "Freezing the scorer early loses one point of accuracy but halves the cost of a training step.",
+    "The block size of sixty four was chosen on the validation split and kept fixed thereafter.",
+    "A smaller block size improves accuracy slightly but the kernel becomes memory bound.",
+    "The results support the view that most attention mass is concentrated in a few blocks.",
+    "We did not observe any degradation on the tasks that require dense global mixing.",
+    "A limitation of the present study is that we evaluate a single model family at one scale.",
+    "Extending the analysis to encoder decoder architectures is left for future work.",
+    "We release the kernel and the training scripts so that the results can be reproduced."
   ],
   "expectedNonBody": [
     "Block Sparse Attention Under Review",
     "Anonymous"
-  ]
+  ],
+  "expectedSeams": []
 }

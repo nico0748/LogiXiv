@@ -427,3 +427,188 @@ test('64 文字を超える複合語が行末で割れても、全文に当て�
   // 元からハイフンを含む複合語なので、ハイフンは残したまま直結する。
   assert.ok(text.includes(`${compound}value in the configuration`), `複合語の繋ぎ方が変わった: ${text}`);
 });
+
+/**
+ * 壊れた入力で落ちない／遅くならないことの回帰テスト。
+ *
+ * どちらも「読める PDF なのに解析が失敗する（しかも画面には『PDF が壊れています』と出る）」
+ * という形で見つかったもの。文末記号が 1 つも無い文書も、空白を含まない行が続く文書も、
+ * 実際にある（OCR で句点が落ちた稿、終止符を使わない言語、本文と判定されたデータ列）。
+ */
+
+/** 終端記号を 1 つも含まない版面。1 行 54 字。 */
+function noTerminatorChunks(lines: number): { chunks: TextChunk[]; pages: PageSize[] } {
+  const chunks: TextChunk[] = [];
+  const pages: PageSize[] = [];
+  const line = 'ACGTGGCATTACGGTTACCGGATTACAGGCATTACGGTTACCGGATTACAGGCA';
+  for (let i = 0; i < lines; i++) {
+    const page = Math.floor(i / 45) + 1;
+    if (pages.length < page) pages.push({ page, width: 612, height: 792 });
+    chunks.push({ page, text: line, x: 54, y: 100 + (i % 45) * 14, w: 400, h: 10 });
+  }
+  return { chunks, pages };
+}
+
+test('文末記号が 1 つも無い長い文書でも、解析が落ちない', () => {
+  // `Math.max(...covered.map(…))` はスプレッドで配列を引数に展開するので、文 1 つの
+  // 文字数が引数の上限を超えると RangeError で落ちていた。実測では 1 行 54 字の PDF で
+  // 2400 行（約 53 ページ）から落ち、画面には「PDF が壊れています」と出ていた。
+  const { chunks, pages } = noTerminatorChunks(3000);
+  const result = buildSentencesFromChunks(chunks, pages);
+  assert.ok(result.sentences.length > 0, '文が 1 つも取れていない');
+});
+
+test('文末記号が無くても、1 枚のカードに収まらない巨大な文を作らない', () => {
+  // 落ちなくなっても、18 万字の文が 1 枚のカードとして出てくると画面にも MCP にも渡せない
+  // （対訳は 1 文ずつ、という前提そのものが崩れる）。上限で割る。
+  const { chunks, pages } = noTerminatorChunks(3000);
+  const { sentences } = buildSentencesFromChunks(chunks, pages);
+
+  const longest = Math.max(...sentences.map((s) => s.text.length));
+  assert.ok(longest <= 4_000, `1 文が ${longest} 字ある（上限 4,000 字）`);
+  // 割っただけで、文字は 1 つも落としていないこと。
+  const joinedLength = sentences.reduce((sum, s) => sum + s.text.length, 0);
+  assert.ok(joinedLength > 3000 * 50, `本文が失われている（${joinedLength} 字しか残っていない）`);
+  // ハイライトの矩形も文ごとに収まっていること。
+  const widest = Math.max(...sentences.map((s) => s.rects.length));
+  assert.ok(widest <= 200, `1 文の矩形が ${widest} 個ある`);
+});
+
+/** 空白を含まない「欧字とハイフンだけ」の行。行末もハイフンで終わる。 */
+function hyphenOnlyChunks(lines: number): { chunks: TextChunk[]; pages: PageSize[] } {
+  const chunks: TextChunk[] = [];
+  const pages: PageSize[] = [];
+  const text = `${'alpha-beta-gamma-delta-epsilon-zeta-eta-theta-iota-kappa'.slice(0, 59)}-`;
+  for (let i = 0; i < lines; i++) {
+    const page = Math.floor(i / 45) + 1;
+    if (pages.length < page) pages.push({ page, width: 612, height: 792 });
+    chunks.push({ page, text, x: 54, y: 100 + (i % 45) * 14, w: text.length * 4.5, h: 10 });
+  }
+  return { chunks, pages };
+}
+
+/** 同じ文字数の普通の散文（こちらは線形と分かっているので、物差しに使う）。 */
+function proseChunks(lines: number): { chunks: TextChunk[]; pages: PageSize[] } {
+  const words = 'the ensemble variance under distribution shift never calibrates because a shared bias term remains fixed and'.split(' ');
+  const chunks: TextChunk[] = [];
+  const pages: PageSize[] = [];
+  for (let i = 0; i < lines; i++) {
+    const page = Math.floor(i / 45) + 1;
+    if (pages.length < page) pages.push({ page, width: 612, height: 792 });
+    const picked: string[] = [];
+    let n = 0;
+    for (let w = 0; n < 52; w++) {
+      const word = words[(i * 7 + w) % words.length]!;
+      picked.push(word);
+      n += word.length + 1;
+    }
+    const text = `${picked.join(' ')} informa-`;
+    chunks.push({ page, text, x: 54, y: 100 + (i % 45) * 14, w: text.length * 4.5, h: 10 });
+  }
+  return { chunks, pages };
+}
+
+test('ハイフンだらけの入力でも、塊の長さに二乗で効かない', () => {
+  // 行末ハイフンで繋ぐたびに継ぎ目の空白が消えるので、空白を含まない行が続くと
+  // 「欧字とハイフンの並び」が行をまたいで伸び続ける。窓を無制限に広げていた頃は、
+  // その並びが塊全体まで育って二乗が戻っていた（実測 10 万字 4.4 秒、80 万字 275 秒）。
+  //
+  // 時間の絶対値はぶれるので、**同じ文字数の散文**を物差しにする。散文の側は線形と
+  // 分かっているので、比が跳ね上がったらハイフン側だけが二乗に戻ったということ。
+  const LINES = 1700; // 約 10 万字
+  const hy = hyphenOnlyChunks(LINES);
+  const pr = proseChunks(LINES);
+
+  const run = (input: { chunks: TextChunk[]; pages: PageSize[] }): number => {
+    let best = Infinity;
+    for (let i = 0; i < 2; i++) {
+      const started = process.hrtime.bigint();
+      buildSentencesFromChunks(input.chunks, input.pages);
+      best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6);
+    }
+    return best;
+  };
+  run(pr); // 先に一度回して暖めておく
+  const prose = run(pr);
+  const hyphen = run(hy);
+
+  // 実測: 直す前 26 倍 → 直した後 1.5 倍。
+  assert.ok(
+    hyphen < prose * 4,
+    `ハイフンだらけの入力だけが ${(hyphen / prose).toFixed(1)} 倍遅い（ハイフン: ${hyphen.toFixed(0)}ms / 散文: ${prose.toFixed(0)}ms）`,
+  );
+});
+
+/**
+ * 継ぎ目の印の回帰テスト。
+ *
+ * 印には**対称形**がある。断片は落ちるとは限らない:
+ *   - 落ちた断片 … 本文から消える。落とした行との矩形の比較で拾う。
+ *   - 移動した断片 … 隣の本文行に押し込まれ、そのまま文の一部になる。落ちていないので
+ *     落とした行しか見ない実装には**永遠に映らない**。
+ * 実測（レビュアーの 136 文）では欠落 5 件に対し移動 6 件で、移動のほうが多かった。
+ */
+
+const SEAM_PAGE: PageSize = { page: 1, width: 612, height: 792 };
+
+test('隣の本文行に押し込まれた断片を抱えた文に、継ぎ目の印が付く', () => {
+  // インライン `\frac` の分母や添字は、落ちずに隣の本文行へ入ることが多い
+  // （実測: `The constant 1/4 is not t 4 optimised.` の 4 と t）。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 14; i++) {
+    chunks.push({ page: 1, text: `The constant is not optimised in line ${i} of this page.`, x: 50, y: 100 + i * 13, w: 250, h: 9.96 });
+  }
+  // 行と行の間に押し込まれた断片。段の左端に来るので字下げも無く、**本文の行として残る**。
+  chunks.push({ page: 1, text: '4', x: 51, y: 106.5, w: 5, h: 8.91 });
+
+  const { sentences } = buildSentencesFromChunks(chunks, [SEAM_PAGE]);
+  const holder = sentences.find((s) => s.text.startsWith('4 '));
+  assert.ok(holder !== undefined, `断片を抱えた文が見つからない: ${sentences.map((s) => s.text.slice(0, 20)).join(' / ')}`);
+  assert.ok(holder.seam !== undefined, '移動した断片を抱えた文に印が付いていない');
+  // 落ちた行の本文も渡す（矩形だけだと、読む側にできるのは「飛ばす」だけ）。
+  assert.deepEqual(holder.seam.texts, ['4'], `印に断片の本文が入っていない: ${JSON.stringify(holder.seam.texts)}`);
+  // 他の文には付かないこと（誤爆 0 が絶対条件）。
+  assert.equal(sentences.filter((s) => s.seam !== undefined).length, 1, '印が余計な文にも付いた');
+});
+
+test('段落の途中に表が挟まっただけの文には、継ぎ目の印を付けない', () => {
+  // こちらは本文が欠けていない。表の手前の行が**段の右端まで届いている**ことで、
+  // 「段落がそこで切れた」形（別行立てが文の続きを持っている）と見分ける。
+  const chunks: TextChunk[] = [];
+  const closed = 'The ensemble variance under distribution shift never calibrates at all here.';
+  const open = 'The ensemble variance under distribution shift never calibrates and so';
+  for (let i = 0; i < 5; i++) chunks.push({ page: 1, text: closed, x: 50, y: 100 + i * 14, w: 400, h: 10 });
+  chunks.push({ page: 1, text: open, x: 50, y: 170, w: 400, h: 10 });
+  chunks.push({ page: 1, text: '16 12.4 88.9', x: 150, y: 190, w: 80, h: 10 });
+  chunks.push({ page: 1, text: '64 1.9 88.7', x: 150, y: 204, w: 80, h: 10 });
+  chunks.push({ page: 1, text: '256 0.4 85.1', x: 150, y: 218, w: 80, h: 10 });
+  for (let i = 0; i < 6; i++) chunks.push({ page: 1, text: closed, x: 50, y: 240 + i * 14, w: 400, h: 10 });
+
+  const { sentences } = buildSentencesFromChunks(chunks, [SEAM_PAGE]);
+  const marked = sentences.filter((s) => s.seam !== undefined);
+  assert.equal(marked.length, 0, `割り込んだだけの表で印が付いた: ${marked.map((s) => s.text.slice(0, 40)).join(' / ')}`);
+});
+
+test('1 行を 2 文が共有していても、すれ違っただけの別行立てには印が付かない', () => {
+  // 規則 1 は矩形の重なりで見るが、重なり量の下限が無く、比べる相手も**行の帯**だった。
+  // そのため、行の右半分に**すれ違っただけ**の式が、その行の左半分の文にも印を付けていた。
+  // すれ違いの大きさは実測に合わせてある（theorem-display で発火していたのは 0.03pt）。
+  // 縦は帯、横は文の矩形で見て、どちらにも下限を置く。
+  const chunks: TextChunk[] = [];
+  const body = [
+    'We first fix the notation that the rest of the argument uses in full here.',
+    'The estimator that we analyse in this section is defined over the sample.',
+    'Alpha runs all the way to the end of this line. Beta starts here and runs on.',
+    'The shared bias term is what the ensemble spread never sees at all in practice.',
+    'Any procedure whose members share a systematic error has the same obstruction.',
+  ];
+  const ys = [100, 116, 132, 168, 184];
+  body.forEach((text, i) => chunks.push({ page: 1, text, x: 54, y: ys[i]!, w: 400, h: 10 }));
+  // 3 行目（y=132..142）の右半分に、0.03pt だけ重なる別行立ての式。
+  chunks.push({ page: 1, text: 'x2 + y2 = z2', x: 260, y: 141.97, w: 70, h: 9 });
+  chunks.push({ page: 1, text: '(2)', x: 420, y: 141.97, w: 20, h: 9 });
+
+  const { sentences } = buildSentencesFromChunks(chunks, [SEAM_PAGE]);
+  const marked = sentences.filter((s) => s.seam !== undefined).map((s) => s.text);
+  assert.deepEqual(marked, [], `すれ違っただけで印が付いた: ${marked.join(' / ')}`);
+});

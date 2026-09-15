@@ -1,0 +1,79 @@
+% 別行立ての数式が**文の目的語**になる形（「… is given by (1), where …」）。
+%
+% 論文でいちばん多い形。本文はこう取り出される:
+%
+%   `The estimator that we analyse in this section is and the weights are chosen
+%    so that the variance is minimised over the simplex.`
+%
+% 式の中身は本文として取り出せない（取り出してもいけない）。取り出せなくてよいが、
+% **落ちたことが読む側に伝わらなければならない**。字面は正しくても文の中身が 1 つ
+% 抜けているので、正しく取れた文と同じ顔で並べてはいけない。
+%
+% そういう文は `\sq{...}` で書く（`\s{...}` と同じく本文 1 文だが、
+% 「継ぎ目の印が付いてほしい」という印を正解に持たせる）。
+%
+% 直す前の実測: 印 0 件。継ぎ目の規則 2 は「またいだ先に段落の字下げがあるとき」
+% しか印を付けないので、式の後に同じ段落が続くこの形には一度も当たらない。
+%
+% 段落の途中に**表**が入るだけの段落（最後の 1 文）は `\s{...}` のまま。
+% 表は段落を切らずに流し込まれる浮きもので、文としては欠けていない。
+% ここに印が付いたら誤爆。
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage{mathptmx}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\newtheorem{lemma}{Lemma}
+
+\newcommand{\s}[1]{#1}
+% `\sq{...}` は**正解にだけ**書く印で、組版はしない（本文はすぐ下に普通に書く）。
+% 式をまたいだ 1 文なので `\s{...}` のように地の文を囲む形には書けない。
+% 中身は、下の段落の**式より前の行と式より後の行をそのまま空白でつないだもの**。
+\newcommand{\sq}[1]{}
+
+\title{Block Sparse Attention}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Analysis}
+
+\s{We evaluate three configurations on the standard suite and report the average accuracy across five random seeds.}
+
+% 式が文の目的語になる 1 文目。正解は「式より前の行 ＋ 空白 ＋ 式より後の行」。
+\sq{The estimator that we analyse in this section is and the weights are chosen so that the variance is minimised over the simplex.}
+The estimator that we analyse in this section is
+\begin{equation}
+\hat{\mu} = \frac{1}{n}\sum_{i=1}^{n} w_i z_i ,
+\end{equation}
+and the weights are chosen so that the variance is minimised over the simplex.
+
+\s{We now state the main guarantee of the paper.}
+
+% 式が文の目的語になる 2 文目。
+\sq{For every step size that satisfies the stated bound the iterates satisfy and the constant does not depend on the dimension of the problem.}
+For every step size that satisfies the stated bound the iterates satisfy
+\begin{equation}
+\|x_t - x^\star\|^2 \le (1-\eta\mu)^t \|x_0 - x^\star\|^2 ,
+\end{equation}
+and the constant does not depend on the dimension of the problem.
+
+\s{Under these assumptions the analysis of the previous section applies verbatim.}
+\s{The kernel is implemented once and reused for both training and inference in all of the experiments that we report.}
+
+% 段落の途中に表が入るだけの段落。表は段落を切らずに流し込まれる浮きもので、
+% 文としては欠けていない。ここに印が付いたら誤爆。
+\s{Training with the sparse kernel from scratch converges in the same number of steps as the dense baseline, which we verified on three seeds.}
+
+\begin{table}[h]\centering
+\begin{tabular}{lrr}
+Model & Acc & F1 \\
+Dense & 81.2 & 79.4 \\
+Sparse & 83.7 & 81.9 \\
+\end{tabular}
+\caption{Accuracy and F1 on the held-out split.}
+\end{table}
+
+\end{document}

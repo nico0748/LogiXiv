@@ -32,5 +32,6 @@
     "Sparse Attention Notes",
     "[1] M. Tanaka. Block structured kernels. In Proc. ICML, pages 991–1002, 2023.",
     "[2] R. Roe. Efficient attention in practice. Journal of ML, 12(3):45–67, 2025."
-  ]
+  ],
+  "expectedSeams": []
 }

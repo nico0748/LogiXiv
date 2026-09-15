@@ -27,6 +27,17 @@ export interface PaperTruth {
   expectedSentences: string[];
   /** 本文として取れて**ほしくない**もの（柱・キャプション・参考文献・表題など）。 */
   expectedNonBody: string[];
+  /**
+   * 本文としては正しく取れるが、**継ぎ目の印が付いてほしい**文（`\sq{...}`）。
+   *
+   * 別行立ての数式が文の目的語になる「… is given by (1), where …」は論文でいちばん
+   * 多い形で、取り出した本文は `… is given by where …` になる。字面としては
+   * `expectedSentences` のとおりでも、式の中身は**落ちている**ので、読む側には
+   * 「ここで何かが抜けた」と伝わらなければならない。
+   *
+   * ここに入る文に印が付いても**誤爆ではない**。逆に、付いていなければ見逃し。
+   */
+  expectedSeams?: string[];
 }
 
 /**
@@ -227,14 +238,19 @@ export function extractTruth(source: string): PaperTruth {
 
   // --- 本文 ---------------------------------------------------------------
   // `\s{...}` は 1 行 1 文で書く決まりなので、行単位で拾う。
+  // `\sq{...}` は「本文としては正しく取れるが、継ぎ目の印が付いてほしい文」。
   const expectedSentences: string[] = [];
+  const expectedSeams: string[] = [];
   for (const line of stripped.split('\n')) {
-    const at = line.indexOf('\\s{');
+    const seam = line.indexOf('\\sq{');
+    const at = seam === -1 ? line.indexOf('\\s{') : seam;
     if (at === -1) continue;
-    const body = braced(line, at + 2);
+    const body = braced(line, at + (seam === -1 ? 2 : 3));
     if (body === null) throw new Error(`\\s{...} が 1 行で閉じていません: ${line}`);
     const text = toPlainText(body.body, cite);
-    if (text.length > 0) expectedSentences.push(text);
+    if (text.length === 0) continue;
+    expectedSentences.push(text);
+    if (seam !== -1) expectedSeams.push(text);
   }
 
   // --- 本文でないもの -----------------------------------------------------
@@ -258,5 +274,5 @@ export function extractTruth(source: string): PaperTruth {
   }
   for (const entry of bibliographyEntries(stripped, cite)) expectedNonBody.push(entry);
 
-  return { expectedSentences, expectedNonBody };
+  return { expectedSentences, expectedNonBody, expectedSeams };
 }

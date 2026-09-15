@@ -51,6 +51,7 @@ export interface Note {
 export interface SentenceSeam {
   kinds: NonBodySentence['kind'][];
   rects: Rect[];
+  texts?: string[];
 }
 
 export interface NonBodySentence extends Sentence {

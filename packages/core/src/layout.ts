@@ -51,6 +51,20 @@ export interface ClassifiedLine extends Line {
    * 知っている側でしか決められないので、判定した場所で持たせる。
    */
   startsBlock?: boolean;
+  /**
+   * その行が段の右端まで届いていたか。
+   *
+   * 届いている＝組版が折り返しただけで、段落はまだ続いている。
+   * 届いていない＝段落の最終行（欧文の組版では `\parfillskip` のぶん右が余る）。
+   * 文末記号より信用できる手掛かりで、classifyLines は既にこれを計算している。
+   *
+   * 外へ出すのは、**継ぎ目の印**が使うため。別行立ての数式に本文が丸ごと吸われた文
+   * （`The estimator that we analyse in this section is and the weights are chosen …`）は、
+   * 式の直前の行が「右端に届いていない」ことでしか見分けられない。
+   * 段落の途中に図表が割り込んだだけの文（こちらは欠けていない）では、
+   * 割り込みの直前の行は段の右端まで届いている。詳細は sentences.ts の findSeam。
+   */
+  reachesRight?: boolean;
 }
 
 const BIN_WIDTH = 2;
@@ -113,6 +127,15 @@ const MIN_COLUMN_CHARS = 15;
  * 本文に落ちて直後の文と癒着する。
  */
 const SENTENCE_END = /[.!?。！？]$/;
+
+/**
+ * 「語と約物だけでできていて、文末記号で閉じている行」。
+ *
+ * 数字・等号・添字・括弧・記号が 1 つでも混じれば通らない。短い本文行
+ * （段落の最終行）を数式や表と分けるためだけに使う。詳細は looksLikeProse。
+ */
+const PLAIN_WORDS =
+  /^\p{L}[\p{L}\p{M}'’\-]*(?:[ \u00a0,;:]+\p{L}[\p{L}\p{M}'’\-]*)*[.!?]$/u;
 /** 文が途中で終わっていない（＝続きがある）ことを否定する記号。読点・中黒も含む。 */
 const CLAUSE_END = /[.!?:;,。！？：；、]$/;
 
@@ -125,6 +148,15 @@ const PROSE_MIN_CHARS_CJK = 12;
 /** 同じく、小文字の語（和文ならひらがな）の最小個数。数式と表のセルには現れない。 */
 const PROSE_MIN_WORDS = 3;
 
+/**
+ * 段落の最終行として守るときの、小文字の語の数の下限。
+ *
+ * 最終行は短い。`published baseline.` のように 2 語しか残らないことがある。
+ * 下げたぶんの歯止めは「段の左端にそろっている」「語と約物しか無い」で掛ける
+ * （looksLikeProse を参照）。
+ */
+const PROSE_MIN_WORDS_TAIL = 2;
+
 export interface ColumnRange {
   from: number;
   to: number;
@@ -132,17 +164,57 @@ export interface ColumnRange {
 
 const SINGLE_COLUMN: ColumnRange[] = [{ from: -Infinity, to: Infinity }];
 
+/**
+ * 配列の最小値・最大値。`Math.min(...array)` は使わない。
+ *
+ * スプレッドは配列を**引数リスト**に展開するので、要素数が処理系の引数上限
+ * （V8 でおよそ 12 万）を超えると `RangeError: Maximum call stack size exceeded` を
+ * 投げる。ここに来るのは 1 ページぶんの文字片や 1 行ぶんの文字片で、ふつうは数百だが、
+ * 図面を文字で描いた PDF・OCR をかけた紙・1 文字ずつ座標を持つ書き出しでは
+ * 1 ページ 10 万片を軽く超える。例外は上まで抜けて「PDF が壊れています」と表示され、
+ * **壊れていない PDF を壊れていると誤って伝える**（実測）。
+ */
+function minOf(values: readonly number[]): number {
+  let best = Infinity;
+  for (const value of values) if (value < best) best = value;
+  return best;
+}
+
+function maxOf(values: readonly number[]): number {
+  let best = -Infinity;
+  for (const value of values) if (value > best) best = value;
+  return best;
+}
+
 function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)]!;
 }
 
-/** 大きい方から数えて `ratio` の位置の値。外れ値（全幅の図表）に引きずられない代表値。 */
+/**
+ * 大きい方から数えて `ratio` の位置の値。外れ値（全幅の図表）に引きずられない代表値。
+ *
+ * **要素が少ないときは必ず最大値を 1 つ飛ばす。** `Math.floor(n * ratio)` は
+ * `n` が `1/ratio` に満たないと 0 になり、「外れ値を避ける」はずの代表値が
+ * **最大値そのもの**になる。ratio = 0.05 なら 20 行未満、0.1 なら 10 行未満の段が全部そう。
+ * 1 段 20 行未満は珍しくない（1 ページの短信、節の始め、表や図の多いページ、
+ * 2 段組の最終ページ）。
+ *
+ * 実測（`\documentclass[twocolumn]`、本文 20 行の 1 ページ）: ノンブル `1` が
+ * 段の右端より 7.5pt だけ外にいたため、それが「段の代表的な右端」になり、
+ * 段いっぱいの本文行が 0.1pt 足りずに「右端に届いていない」と判定された。
+ * その 1 行は文章の歯止め（looksLikeProse）を通れず、別行立ての数式として
+ * 落ちて、`The method achieves a substantial improvement over the tion operator to
+ * a linear one …` という**原文に無い文**になった。
+ *
+ * 2 個しかないときに飛ばすと残るのは最小値（＝段落の最終行）なので、3 個からにする。
+ */
 function percentile(values: number[], ratio: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => b - a);
-  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))]!;
+  const floor = ratio > 0 && sorted.length >= 3 ? 1 : 0;
+  return sorted[Math.min(sorted.length - 1, Math.max(floor, Math.floor(sorted.length * ratio)))]!;
 }
 
 function rowKey(chunk: TextChunk): number {
@@ -186,7 +258,7 @@ function charHeight(chunks: TextChunk[]): number {
  * 単純な median だと、見出しや参考文献の行数が多い文書で代表値がそちらへ引っ張られ、
  * 本文行が「小さい文字＝脚注」と誤判定される（実際に本文の最終行が消えていた）。
  */
-function bodyTextHeight(lines: Line[]): number {
+function bodyTextHeight(lines: readonly Line[]): number {
   const weight = new Map<number, number>();
   for (const line of lines) {
     const bucket = Math.round(line.height * 2) / 2;
@@ -213,8 +285,8 @@ function bodyTextHeight(lines: Line[]): number {
 export function detectColumns(chunks: TextChunk[], tolerance = 0.15): ColumnRange[] {
   if (chunks.length === 0) return SINGLE_COLUMN;
 
-  const minX = Math.min(...chunks.map((c) => c.x));
-  const maxX = Math.max(...chunks.map((c) => c.x + c.w));
+  const minX = minOf(chunks.map((c) => c.x));
+  const maxX = maxOf(chunks.map((c) => c.x + c.w));
   const width = maxX - minX;
   if (width <= 0) return SINGLE_COLUMN;
 
@@ -477,15 +549,99 @@ function findMarginNumbers(byPage: ReadonlyMap<number, TextChunk[]>): Set<TextCh
     if (numeric.length < MIN_MARGIN_NUMBERS) continue;
     const rest = pageChunks.filter((chunk) => !/^\d{1,4}$/.test(chunk.text.trim()));
     if (rest.length === 0) continue;
-    const textLeft = Math.min(...rest.map((chunk) => chunk.x));
-    const textRight = Math.max(...rest.map((chunk) => chunk.x + chunk.w));
+    const textLeft = minOf(rest.map((chunk) => chunk.x));
+    const textRight = maxOf(rest.map((chunk) => chunk.x + chunk.w));
     // 余白との隔たりは文字高で測る（版面の寸法に依らない）。
     const gap = median(rest.map((chunk) => chunk.h)) * 0.5;
     const outside = numeric.filter(
       (chunk) => chunk.x + chunk.w <= textLeft - gap || chunk.x >= textRight + gap,
     );
-    if (outside.length < MIN_MARGIN_NUMBERS) continue;
-    for (const chunk of outside) found.add(chunk);
+    if (outside.length >= MIN_MARGIN_NUMBERS) for (const chunk of outside) found.add(chunk);
+
+    for (const chunk of findNumberBands(numeric, rest)) found.add(chunk);
+  }
+  return found;
+}
+
+/** 行番号の帯と認める、段差（1 行ごと・5 行ごと）の一致率。 */
+const NUMBER_BAND_AGREEMENT = 0.8;
+/** 行番号の帯と認める、ページの本文の高さに対する帯の高さの下限。 */
+const NUMBER_BAND_SPAN = 0.4;
+
+/**
+ * 段間（柱間）に組まれた行番号を見つける。
+ *
+ * `\usepackage{lineno}` を 2 段組で使うと、番号は段の**外側**ではなく
+ * 段と段の間（柱間）に落ちる。これは**ページの本文 x 範囲の内側**なので、
+ * 「版面の外にある」という手掛かりでは 1 つも拾えない。
+ *
+ * 実測（`\documentclass[twocolumn]` + `\linenumbers`、1 ページ 47 行）:
+ * 左段の全行が `We evaluate three configurations on the standard suite49` と
+ * 番号を飲み込み、行末ハイフンの結合も効かず `Informa-55 tion retrieval` が残った。
+ * 右段は番号が右の余白（＝版面の外）にあるので無傷 — 段によって壊れ方が違い、
+ * しかも申告は low のままだった。番号が柱間の中央に来る組み方では、
+ * 細い帯が段の切れ目を埋めて**段組の検出そのもの**が崩れる。
+ *
+ * 版面の外かどうかを見ないかわりに、行番号の**並び方**で見分ける:
+ *   - 同じ x に縦 1 列に並ぶ（右揃え・左揃えのどちらもあるので両端で試す）
+ *   - y の順に値が**等差で増える**（1 行ごとなら 1、`\modulolinenumbers{5}` なら 5）
+ *   - ページの本文の高さの 4 割以上にわたって続く
+ *   - 本文より**小さい字**で組まれている（lineno の既定は `\tiny`）
+ * 表の数値列は、等差で増えることはあっても本文より小さい字では組まないし、
+ * ページの高さの 4 割にわたって 5 個以上並ぶこともまずない。
+ */
+function findNumberBands(numeric: TextChunk[], rest: TextChunk[]): TextChunk[] {
+  if (numeric.length < MIN_MARGIN_NUMBERS || rest.length === 0) return [];
+  const bodyHeight = median(rest.map((chunk) => chunk.h));
+  if (bodyHeight <= 0) return [];
+  // 本文より小さい字だけを候補にする。ここが無いと表の数値列と見分けられない。
+  const small = numeric.filter((chunk) => chunk.h < bodyHeight * 0.9);
+  if (small.length < MIN_MARGIN_NUMBERS) return [];
+
+  const restTop = minOf(rest.map((chunk) => chunk.y));
+  const restBottom = maxOf(rest.map((chunk) => chunk.y + chunk.h));
+  const minSpan = (restBottom - restTop) * NUMBER_BAND_SPAN;
+
+  // 右揃え・左揃えのどちらでも縦 1 列になるよう、左端と右端の両方で束ねる。
+  const bands = new Map<string, TextChunk[]>();
+  const put = (key: string, chunk: TextChunk): void => {
+    const list = bands.get(key);
+    if (list) list.push(chunk);
+    else bands.set(key, [chunk]);
+  };
+  for (const chunk of small) {
+    put(`l${Math.round(chunk.x / 2)}`, chunk);
+    put(`r${Math.round((chunk.x + chunk.w) / 2)}`, chunk);
+  }
+
+  const found: TextChunk[] = [];
+  for (const band of bands.values()) {
+    if (band.length < MIN_MARGIN_NUMBERS) continue;
+    const sorted = [...band].sort((a, b) => a.y - b.y);
+    if (maxOf(sorted.map((c) => c.y)) - minOf(sorted.map((c) => c.y)) < minSpan) continue;
+
+    // y の順に値が増えているか。1 つでも戻ったら行番号ではない。
+    const values = sorted.map((chunk) => Number(chunk.text.trim()));
+    let increasing = true;
+    const steps: number[] = [];
+    for (let i = 1; i < values.length; i++) {
+      const step = values[i]! - values[i - 1]!;
+      if (step <= 0) {
+        increasing = false;
+        break;
+      }
+      steps.push(step);
+    }
+    if (!increasing || steps.length === 0) continue;
+
+    // 段差がそろっているか（1 行ごと、または n 行ごと）。
+    const counts = new Map<number, number>();
+    for (const step of steps) counts.set(step, (counts.get(step) ?? 0) + 1);
+    let agreed = 0;
+    for (const count of counts.values()) if (count > agreed) agreed = count;
+    if (agreed < steps.length * NUMBER_BAND_AGREEMENT) continue;
+
+    for (const chunk of band) found.push(chunk);
   }
   return found;
 }
@@ -651,9 +807,9 @@ export function buildLines(chunks: TextChunk[]): Line[] {
            * `⋆` が行を作り、添字 `m` が 2 つとも別の行に落ちて本文から消えた。
            * これまでに入った文字片のいちばん大きい高さを行の高さとみなす。
            */
-          const lineHeight = Math.max(...current.chunks.map((c) => c.h));
-          const right = Math.max(...current.chunks.map((c) => c.x + c.w));
-          const left = Math.min(...current.chunks.map((c) => c.x));
+          const lineHeight = maxOf(current.chunks.map((c) => c.h));
+          const right = maxOf(current.chunks.map((c) => c.x + c.w));
+          const left = minOf(current.chunks.map((c) => c.x));
           const adjacent = chunk.x >= left - lineHeight && chunk.x <= right + lineHeight;
           // 0.65 は実測値。添字だけなら 0.45 で足りるが、`\beta_i^2` のように
           // 上付きと添字が同居すると添字がさらに下がる（10pt の行で 6.2pt）。
@@ -703,8 +859,8 @@ export function buildLines(chunks: TextChunk[]): Line[] {
   for (const line of lines) {
     line.chunks.sort((a, b) => a.x - b.x);
     line.text = line.chunks.map((c) => c.text).join('').replace(/\s+/g, ' ').trim();
-    line.left = Math.min(...line.chunks.map((c) => c.x));
-    line.right = Math.max(...line.chunks.map((c) => c.x + c.w));
+    line.left = minOf(line.chunks.map((c) => c.x));
+    line.right = maxOf(line.chunks.map((c) => c.x + c.w));
     line.height = median(line.chunks.map((c) => c.h));
   }
 
@@ -898,8 +1054,8 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       if (gap > 0 && gap < 100) spacings.push(gap);
     }
     stats.set(page, {
-      top: Math.min(...ys),
-      bottom: Math.max(...ys),
+      top: minOf(ys),
+      bottom: maxOf(ys),
       spacing: median(spacings) || bodyHeight * 1.3,
     });
   }
@@ -1083,8 +1239,8 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       ...line,
       chunks: kept,
       text: kept.map((chunk) => chunk.text).join('').replace(/\s+/g, ' ').trim(),
-      left: Math.min(...kept.map((chunk) => chunk.x)),
-      right: Math.max(...kept.map((chunk) => chunk.x + chunk.w)),
+      left: minOf(kept.map((chunk) => chunk.x)),
+      right: maxOf(kept.map((chunk) => chunk.x + chunk.w)),
       height: median(kept.map((chunk) => chunk.h)),
     };
   };
@@ -1224,7 +1380,13 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
    */
   /** 文章として読める行か（定義は looksLikeProse を参照）。 */
   /** 文章として読める行か。定義は looksLikeProse（採録率の物差しと同じもの）。 */
-  const readsAsProse = (line: Line): boolean => looksLikeProse(line, reachesRight(line));
+  /** その行が段の左端にそろっているか（段落の最終行を守るために使う）。 */
+  const atColumnLeft = (line: Line): boolean => {
+    const left = columnLeft.get(`${line.page}:${line.column}`);
+    return left !== undefined && Math.abs(line.left - left) <= 2;
+  };
+  const readsAsProse = (line: Line): boolean =>
+    looksLikeProse(line, reachesRight(line), atColumnLeft(line));
 
   const displayBlock = new Set<number>();
   {
@@ -1417,6 +1579,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     /** 付物として落とす。種類は画面が「なぜ右に無いか」を言うために持たせる。 */
     const drop = (kind: NonBodyKind): ClassifiedLine => ({
       ...line,
+      reachesRight: reachesRight(line),
       role: 'furniture' as const,
       // 参考文献の各エントリと各キャプションは、続きの行と束ねずに 1 件ずつ出す。
       startsBlock: isCaption(line.text) || REFERENCE_ENTRY.test(line.text),
@@ -1449,8 +1612,21 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     ) {
       return drop(isPageNumber ? 'pageNumber' : 'runningHead');
     }
-    // 端に出る数字だけの行はノンブル。1 ページでも落としてよい。
-    if (isPageNumber) {
+    /**
+     * 端に出る数字だけの行はノンブル。1 ページでも落としてよい。
+     *
+     * ただし**天地の端の帯に出ているもの**（edgeCandidate）に限る。`nearEdge` は
+     * 「ページの上下 15%」という緩い位置しか見ていないので、本文が短いページでは
+     * 5〜6 行目でも `nearEdge` になる。
+     *
+     * ここを閉めないと、インライン `\frac` の**分母が置き場所を間違えて**
+     * 独立した行になったときに、それが「ノンブル」として落ちる。ノンブルは
+     * 種類のはっきりした付物なので継ぎ目の印の相手にならず、
+     * 分母を失った文（実測: `η∥∇F ∥2 ≥ η2(1 − δ)ζ2/4, as claimed.` — 本来は η/2）も、
+     * 余った数字を受け取った文も、**印が付かないまま**並ぶ。
+     * 落ちた断片は「本文だったかもしれないもの」として残さなければならない。
+     */
+    if (isPageNumber && edgeCandidate.has(line.index)) {
       return drop('pageNumber');
     }
 
@@ -1538,10 +1714,10 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       // 無い。実測（和文 1 段組）で、著者行の直後に来た `概要` が -1 で本文に落ち、
       // 要旨の 1 文目と 1 文に癒着していた（`…文境界の推定概要本稿では、…`）。
       else if (previous && !knownFurniture(previous.index) && !SENTENCE_END.test(previous.text)) score -= 1;
-      if (score >= 2) return { ...line, role: 'heading' as const };
+      if (score >= 2) return { ...line, reachesRight: reachesRight(line), role: 'heading' as const };
     }
 
-    return { ...line, role: 'body' as const };
+    return { ...line, reachesRight: reachesRight(line), role: 'body' as const };
   });
 }
 
@@ -1568,7 +1744,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
  *   - 段の右端まで届いている（＝組版が折り返しただけの行）か、文末記号で閉じている。
  *     別行立ての数式も表のセルも擬似コードも、段の右端には届かない。
  */
-function looksLikeProse(line: Line, reachesRight: boolean): boolean {
+function looksLikeProse(line: Line, reachesRight: boolean, atColumnLeft: boolean): boolean {
   const text = line.text;
   const squeezed = text.replace(/\s+/g, '');
   if (!(reachesRight || SENTENCE_END.test(text.trim()))) return false;
@@ -1578,6 +1754,31 @@ function looksLikeProse(line: Line, reachesRight: boolean): boolean {
     squeezed.length >= PROSE_MIN_CHARS &&
     FUNCTION_WORDS.test(text) &&
     (text.match(/\b\p{Ll}{2,}\b/gu) ?? []).length >= PROSE_MIN_WORDS
+  ) {
+    return true;
+  }
+
+  /**
+   * 欧文の短い行: **段の左端にそろい**、語と約物だけでできていて、文末記号で閉じている。
+   *
+   * 機能語（the / of / and）を必須にすると、**段落の最終行**が守れない。
+   * 最終行は短いので機能語が 1 つも無いことがふつうにあり、語数も 2 つまで落ちる。
+   * 実測（`\vspace{-0.6em}` で式を本文に寄せた 2 段組）: 段落の最後の行
+   * `published baseline.` が別行立ての塊に吸われ、
+   * `The method achieves a substantial improvement over the strongest Sparse
+   * attention reduces the quadratic cost …` という**原文に無い、しかも文法の通る
+   * 文**になった。申告は 3 つとも low のまま。もっともらしいので読む側には気付けない。
+   *
+   * 語数を 2 つまで下げるかわりに、条件を 2 つ足して別行立てと分ける:
+   *   - **段の左端にそろっている。** 別行立ての数式も表も中央寄せか字下げなので、
+   *     段の左端ちょうどには来ない（来る組み方 — fleqn — でも字下げが入る）。
+   *   - **語と約物しか無い。** 等号・不等号・添字・数字・括弧が 1 つでもあれば通らない。
+   *     `A = 11 12, b = x2.` も `Dense 81.2 79.4` も `Model Acc F1` も外れる。
+   */
+  if (
+    atColumnLeft &&
+    PLAIN_WORDS.test(text.trim()) &&
+    (text.match(/\b\p{Ll}{2,}\b/gu) ?? []).length >= PROSE_MIN_WORDS_TAIL
   ) {
     return true;
   }
@@ -1602,14 +1803,16 @@ function looksLikeProse(line: Line, reachesRight: boolean): boolean {
 }
 
 /**
- * 段ごとの代表的な右端を取り直して、「その行は段の右端に届いたか」を返す関数を作る。
+ * 段ごとの代表的な右端と左端を取り直して、「その行は文章として読めるか」を返す関数を作る。
  *
  * classifyLines の中にも同じ判定がある。こちらは行だけを受け取る外向きの入口
  * （assessCoverage）のために作り直す — assessReadingOrder も同じやり方をしている。
+ * 落としてよいかの歯止めと、失われた量の物差しは**同じ定義**でなければならない。
  */
-function reachesRightOf(lines: readonly ClassifiedLine[]): (line: Line) => boolean {
+function proseTestOf(lines: readonly ClassifiedLine[]): (line: Line) => boolean {
   const rights = new Map<string, number[]>();
   const widths = new Map<string, number[]>();
+  const lefts = new Map<string, number[]>();
   for (const line of lines) {
     const key = `${line.page}:${line.column}`;
     const r = rights.get(key);
@@ -1618,17 +1821,25 @@ function reachesRightOf(lines: readonly ClassifiedLine[]): (line: Line) => boole
     const w = widths.get(key);
     if (w) w.push(line.right - line.left);
     else widths.set(key, [line.right - line.left]);
+    const l = lefts.get(key);
+    if (l) l.push(line.left);
+    else lefts.set(key, [line.left]);
   }
   const right = new Map<string, number>();
   for (const [key, values] of rights) right.set(key, percentile(values, 0.05));
   const width = new Map<string, number>();
   for (const [key, values] of widths) width.set(key, percentile(values, 0.1));
+  const left = new Map<string, number>();
+  for (const [key, values] of lefts) left.set(key, median(values));
   return (line: Line): boolean => {
     const key = `${line.page}:${line.column}`;
     const edge = right.get(key);
     const span = width.get(key);
     if (edge === undefined || span === undefined || span <= 0) return false;
-    return line.right >= edge - Math.max(2, span * 0.03);
+    const reaches = line.right >= edge - Math.max(2, span * 0.03);
+    const start = left.get(key);
+    const atLeft = start !== undefined && Math.abs(line.left - start) <= 2;
+    return looksLikeProse(line, reaches, atLeft);
   };
 }
 
@@ -1652,6 +1863,79 @@ const UNCERTAIN_KINDS = new Set<NonBodyKind>(['formula', 'table', 'other']);
  * 版面の見え方だけで決めているので外れることがあり、**本文の一部**だったかもしれない。
  * 文に印を付けるかどうかの判断でも同じ線引きを使う（sentences.ts から参照）。
  */
+/** 置き場所を間違えた断片と認める、文字数の上限。 */
+const FRAGMENT_MAX_CHARS = 4;
+/** 置き場所を間違えた断片と認める、本文の文字高に対する高さの比。 */
+const FRAGMENT_HEIGHT_RATIO = 0.95;
+/** 置き場所を間違えた断片と認める、隣の行との距離（本文の文字高に対する比）。 */
+const FRAGMENT_GAP_RATIO = 1.1;
+
+/**
+ * 「落ちた断片」ではなく「**置き場所を間違えた断片**」を見つける。
+ *
+ * 継ぎ目の印は、版面の規則で**落とした**行と文の矩形を比べて立てている。
+ * ところが断片は落ちるとは限らない。隣の本文の矩形に**取り込まれる**方が多い。
+ * 数学の論文ではインライン `\frac` が普通なので、件数はこちらの方が多くなる。
+ *
+ * 実測（レビュアーの本文 136 文）: 欠落 5 件（印 5）／移動 6 件（印 2）。
+ * 2 段組にインライン `\frac` を 4 つ置いた論文では、分母 4 つが**全部**動き、
+ * そのうち 2 つには印が付かなかった:
+ *   - `[48] … ≥ η2(1 − δ)ζ2, as claimed.` が `/4` を失い、
+ *     `[49] The constant 1/4 is not t 4 optimised.` が余った `4` と `t` を受け取った。
+ *     受け取った側の断片の高さは 8.91、本文は 9.96。
+ *   - `min nμ imax`（分母 `nμ` が "minimax" に突き刺さった）、`uncompressed M cost`。
+ *
+ * 見分け方は矩形だけ:
+ *   - 本文の文字高より**低い**（8.91 / 9.96 = 0.89 なので 0.85 では届かない）
+ *   - 文字数が数文字しかない（分子・分母・添字・大きな演算子の記号）
+ *   - **隣の本文行の x 範囲の内側**にある（段の外へはみ出した行番号や式番号は外れる）
+ *   - 隣の本文行との距離が 1 行ぶんに満たない（＝行と行の間に押し込まれている）
+ *
+ * 高さの門を 0.95 まで緩めるかわりに、残り 3 つを全部満たすことを求める。
+ * 4 文字以下で本文の字より低く、しかも隣の行の内側に 1 行ぶん未満の距離で
+ * 収まっている行は、組版の結果としては本文の行になりえない。
+ *
+ * 返すのは**行の番号**。どの文に印を付けるかは、行と文の対応を持っている側
+ * （sentences.ts の findSeam）が決める。
+ */
+export function findDisplacedFragments(lines: readonly ClassifiedLine[]): Set<number> {
+  const found = new Set<number>();
+  if (lines.length === 0) return found;
+  const bodyHeight = bodyTextHeight(lines);
+  if (bodyHeight <= 0) return found;
+
+  const byColumn = new Map<string, ClassifiedLine[]>();
+  for (const line of lines) {
+    const key = `${line.page}:${line.column}`;
+    const list = byColumn.get(key);
+    if (list) list.push(line);
+    else byColumn.set(key, [line]);
+  }
+
+  for (const columnLines of byColumn.values()) {
+    const sorted = [...columnLines].sort((a, b) => a.y - b.y);
+    for (let i = 0; i < sorted.length; i++) {
+      const line = sorted[i]!;
+      if (line.role !== 'body') continue;
+      const squeezed = line.text.replace(/\s+/g, '');
+      if (squeezed.length === 0 || squeezed.length > FRAGMENT_MAX_CHARS) continue;
+      if (line.height >= bodyHeight * FRAGMENT_HEIGHT_RATIO) continue;
+
+      for (const neighbour of [sorted[i - 1], sorted[i + 1]]) {
+        if (neighbour === undefined || neighbour.role !== 'body') continue;
+        if (neighbour.height < bodyHeight * FRAGMENT_HEIGHT_RATIO) continue;
+        // 隣の行の x 範囲の内側か。1pt は組版の端数。
+        if (line.left < neighbour.left - 1 || line.right > neighbour.right + 1) continue;
+        // 行と行の間に押し込まれているか（1 行ぶんの送りには足りない距離）。
+        if (Math.abs(line.y - neighbour.y) > bodyHeight * FRAGMENT_GAP_RATIO) continue;
+        found.add(line.index);
+        break;
+      }
+    }
+  }
+  return found;
+}
+
 export function isUncertainKind(kind: NonBodyKind | undefined): boolean {
   return UNCERTAIN_KINDS.has(kind ?? 'other');
 }
@@ -1679,7 +1963,7 @@ export function assessCoverage(lines: readonly ClassifiedLine[]): {
   coverageReason: string;
 } {
   const squeeze = (text: string): number => text.replace(/\s+/g, '').length;
-  const reaches = reachesRightOf(lines);
+  const readsAsProse = proseTestOf(lines);
 
   let total = 0;
   let lost = 0;
@@ -1689,7 +1973,7 @@ export function assessCoverage(lines: readonly ClassifiedLine[]): {
     total += size;
     if (line.role !== 'furniture') continue;
     if (!UNCERTAIN_KINDS.has(line.kind ?? 'other')) continue;
-    if (!looksLikeProse(line, reaches(line))) continue;
+    if (!readsAsProse(line)) continue;
     lost += size;
     pages.add(line.page);
   }
@@ -1765,7 +2049,7 @@ export function guessTitleFromChunks(chunks: TextChunk[]): string | null {
   }
   if (frontMatter.length === 0) return null;
 
-  const largest = Math.max(...frontMatter.map((line) => line.height));
+  const largest = maxOf(frontMatter.map((line) => line.height));
   // 本文と同じ大きさしか無いページでは、表題を見分けられない。
   if (largest < body * 1.15) return null;
 

@@ -16,5 +16,6 @@
   "expectedNonBody": [
     "Sparse Gradient Aggregation",
     "Anonymous"
-  ]
+  ],
+  "expectedSeams": []
 }

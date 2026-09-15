@@ -131,9 +131,13 @@ function sentenceView(document: PaperDocument, sentence: Sentence) {
       ? {
           seam: {
             kinds: sentence.seam.kinds,
+            // 抜けた中身そのもの。補題の本体が落ちていることがあり、
+            // これがあれば「飛ばす」以外の手（補って訳す）が取れる。
+            missing: sentence.seam.texts ?? [],
             warning:
               '本文として取り出せなかった行がこの文の中に挟まっています。記号や語が抜けているおそれがあります。' +
-              '訳さずに add_note で「原文が壊れている可能性」を残すか、skip_sentences に reason="unreadable" で回してください。',
+              'missing に抜けた中身が入っていれば、それを補って訳してよい（数式・記号は原文のまま残す）。' +
+              '補えないときは add_note で「原文が壊れている可能性」を残すか、skip_sentences に reason="unreadable" で回してください。',
           },
         }
       : {}),

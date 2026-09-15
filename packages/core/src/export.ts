@@ -129,10 +129,14 @@ function renderSentence(sentence: Sentence, document: PaperDocument, notes: stri
   }
   if (sentence.seam) {
     // 訳文だけを読むと、記号が落ちた文も「そう書いてある」としか見えない。
+    const missing =
+      sentence.seam.texts && sentence.seam.texts.length > 0
+        ? ` 抜けたのはここ: ${escapeHtml(sentence.seam.texts.join(' / '))}`
+        : '';
     parts.push(
       `<p class="lx-seam">この文には、本文として取り出せなかった${escapeHtml(
         seamLabel(sentence.seam.kinds),
-      )}が挟まっています（記号や語が抜けているおそれ）。</p>`,
+      )}が挟まっています（記号や語が抜けているおそれ）。${missing}</p>`,
     );
   }
   for (const note of notes) {

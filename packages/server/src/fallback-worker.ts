@@ -131,6 +131,35 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
         // 同じ求め方（左端 = tx[4]、字高 = hypot(tx[2], tx[3])、上端 = ベースライン - 字高）。
         const tx = pdfjs.Util.transform(viewport.transform, item.transform);
         const height = Math.hypot(tx[2] ?? 0, tx[3] ?? 0) || (item.height > 0 ? item.height : 10);
+
+        // ページの中で回っている文字（図の y 軸ラベル、\rotatebox の注記）は別に扱う。
+        // matplotlib や pgfplots をベクタで貼った図の軸ラベルはこの形なので、
+        // 図のある論文で普通に起きる。ここを横書きと同じに扱うと、
+        // 縦の長さが横幅として入り、同じ y に潰れて本文と 1 文に繋がっていた
+        // （`Accuracy on the held-out validation splitThroughput in tokens per second Sparse …`）。
+        // 版面の縦書きは本文ではないので、矩形を実際の向きに合わせたうえで、
+        // 行の組み立てが拾わないよう「本文とは別の帯」に置く。
+        const angle = Math.atan2(tx[1] ?? 0, tx[0] ?? 1);
+        const upright = Math.abs(angle) < Math.PI / 12;
+        if (!upright) {
+          // 回った文字片は、幅が縦に伸びる。外接矩形をその向きで作る。
+          const width = item.width * Math.hypot(tx[0] ?? 0, tx[1] ?? 0);
+          const dx = Math.cos(angle) * width;
+          const dy = Math.sin(angle) * width;
+          const x0 = Math.min(tx[4] ?? 0, (tx[4] ?? 0) + dx);
+          const y0 = Math.min((tx[5] ?? 0) - height, (tx[5] ?? 0) - height + dy);
+          chunks.push({
+            page: pageNumber,
+            text: item.str,
+            x: x0,
+            y: y0,
+            w: Math.max(height, Math.abs(dx)),
+            h: Math.max(height, Math.abs(dy)),
+            rotated: true,
+          });
+          continue;
+        }
+
         chunks.push({
           page: pageNumber,
           text: item.str,

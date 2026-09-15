@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { assessCoverage, buildLines, classifyLines, detectColumns } from '../src/layout.ts';
+import {
+  assessCoverage,
+  buildLines,
+  classifyLines,
+  detectColumns,
+  findDisplacedFragments,
+} from '../src/layout.ts';
 import { buildSentencesFromChunks, splitIntoSentences, type TextChunk } from '../src/sentences.ts';
 import type { PageSize } from '../src/types.ts';
 
@@ -1072,4 +1078,190 @@ test('1 文字の語の直後の行末ハイフンは落とさない', () => {
     texts.some((t) => t.includes('x-ray diffraction')),
     `本来のハイフンが消えた: ${JSON.stringify(texts.slice(-2))}`,
   );
+});
+
+// --- 大きすぎる入力 ------------------------------------------------------
+
+test('1 ページ 15 万個の文字片でも例外で止まらない', () => {
+  // `Math.min(...array)` は配列を引数リストに展開するので、要素数が処理系の
+  // 引数上限を超えると RangeError になる。図面を文字で描いた PDF、OCR をかけた紙、
+  // 1 文字ずつ座標を持つ書き出しでは 1 ページ 10 万片を軽く超える。例外は上まで
+  // 抜けて「PDF が壊れています」と表示され、壊れていない PDF を壊れていると伝える。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 150_000; i++) {
+    chunks.push({ page: 1, text: 'x', x: 50 + (i % 500) * 0.9, y: 100 + Math.floor(i / 500) * 2, w: 0.9, h: 2 });
+  }
+  assert.doesNotThrow(() => classifyLines(buildLines(chunks), pages(1)));
+});
+
+// --- 1 段あたりの行数が少ないページ --------------------------------------
+
+test('1 段 20 行未満のページで、ノンブルが段の右端の代表値にならない', () => {
+  // `percentile(rights, 0.05)` は 20 行未満だと最大値そのものを返す。段の外にいる
+  // ノンブルが「段の代表的な右端」になり、段いっぱいの本文行が「右端に届いて
+  // いない」と判定される。その行は文章の歯止め（looksLikeProse）を通れないので、
+  // すぐ上の別行立ての塊に道連れで落ち、原文に無い文ができる。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) {
+    chunks.push({ page: 1, text: 'We evaluate three configurations on the standard suite and', x: 50, y: 100 + i * 12, w: 250, h: 10 });
+  }
+  // 別行立ての塊（字下げがあり、段幅の 70% に満たない）。
+  chunks.push({ page: 1, text: 'n', x: 160, y: 176, w: 6, h: 7 });
+  chunks.push({ page: 1, text: 'A = 11 12 , b = 1 x2 (1)', x: 120, y: 184, w: 140, h: 10 });
+  chunks.push({ page: 1, text: 'i=1', x: 160, y: 193, w: 14, h: 7 });
+  // 塊の直下の本文行。段いっぱい（右端に届く）だが、行末はハイフンなので
+  // 文末記号では守れない。ここが「右端に届いた」と分からないと落ちる。
+  chunks.push({ page: 1, text: 'Sparse attention reduces the quadratic cost of the atten-', x: 50, y: 201, w: 250, h: 10 });
+  for (let i = 0; i < 6; i++) {
+    chunks.push({ page: 1, text: `tion operator to a linear one under mild assumption ${i}.`, x: 50, y: 213 + i * 12, w: 250, h: 10 });
+  }
+  // ノンブルは段の右端より少し外。これが段の代表的な右端になってしまう。
+  chunks.push({ page: 1, text: '1', x: 303, y: 700, w: 5, h: 10 });
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const line = lines.find((l) => l.text.includes('Sparse attention reduces'));
+  assert.ok(line !== undefined, '本文行が見つからない');
+  assert.equal(line.role, 'body', `段いっぱいの本文行が ${line.kind} として落ちた`);
+});
+
+// --- 段落の最終行 --------------------------------------------------------
+
+test('段落の最終行が、詰めて置かれた別行立ての塊に吸われない', () => {
+  // `\vspace{-0.6em}` で式を本文へ寄せると、段落の最終行が塊の一部と見なされて
+  // 落ち、前後がつながって原文に無い文ができる。最終行は短いので機能語も
+  // 小文字 3 語も無いことがふつうにある。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 12; i++) {
+    chunks.push({ page: 1, text: 'The method achieves a substantial improvement over the', x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  // 段落の最終行: 段の左端、語と約物だけ、文末記号で閉じる、小文字 2 語。
+  chunks.push({ page: 1, text: 'published baseline.', x: 50, y: 256, w: 76, h: 10 });
+  // 詰んで積まれた別行立ての塊（分数・和の記号・式番号）。
+  chunks.push({ page: 1, text: 'n', x: 160, y: 265, w: 6, h: 7 });
+  chunks.push({ page: 1, text: 'b = 1 x2 . (1)', x: 130, y: 273, w: 120, h: 10 });
+  chunks.push({ page: 1, text: 'i=1', x: 160, y: 283, w: 14, h: 7 });
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const tail = lines.find((l) => l.text.includes('published baseline'));
+  assert.ok(tail !== undefined, '最終行が見つからない');
+  assert.equal(tail.role, 'body', `段落の最終行が ${tail.kind} として落ちた`);
+});
+
+// --- 2 段組の行番号 ------------------------------------------------------
+
+test('2 段組で柱間に組まれた行番号を落とす', () => {
+  // `lineno` を 2 段組で使うと、右の段の番号は段の外ではなく**柱間**に落ちる。
+  // ページの本文 x 範囲の内側なので「版面の外か」では 1 つも拾えず、左の段の
+  // 行末に飲み込まれて `… the standard suite49` になる。
+  const chunks: TextChunk[] = [];
+  const left = 50;
+  const right = 310;
+  for (let i = 0; i < 14; i++) {
+    chunks.push({ page: 1, text: `Left body line ${i} on the page that runs full.`, x: left, y: 100 + i * 13, w: 210, h: 10 });
+    chunks.push({ page: 1, text: `Right body line ${i} on the page that runs full.`, x: right, y: 100 + i * 13, w: 210, h: 10 });
+    // 右の段の行番号が柱間（左段の右端のすぐ外、ページの本文範囲の内側）に落ちる。
+    chunks.push({ page: 1, text: String(i + 47), x: 296, y: 100 + i * 13, w: 6, h: 5 });
+  }
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    !sentences.some((s) => /\b(?:4[7-9]|5\d|60)\b/.test(s.text)),
+    `柱間の行番号が本文に混ざった: ${JSON.stringify(sentences.slice(0, 2).map((s) => s.text))}`,
+  );
+});
+
+test('表の数値の列は行番号と間違えない', () => {
+  // 等差で増える数値の列は表にもある。本文より小さい字で組まれていなければ
+  // 行番号ではない（`lineno` の既定は \tiny）。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 12; i++) {
+    chunks.push({ page: 1, text: `Body line ${i} of the page that runs full width.`, x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  for (let i = 0; i < 8; i++) {
+    // 表の 1 列目: 10, 20, 30 … 本文と同じ大きさ。
+    chunks.push({ page: 1, text: String((i + 1) * 10), x: 70, y: 300 + i * 14, w: 12, h: 10 });
+    chunks.push({ page: 1, text: `${(i + 1) * 3}.4`, x: 140, y: 300 + i * 14, w: 18, h: 10 });
+  }
+  const kept = classifyLines(buildLines(chunks), pages(1));
+  assert.ok(
+    kept.some((l) => l.text.includes('10')),
+    '表の数値の列が行番号として消えた',
+  );
+});
+
+// --- 置き場所を間違えた断片 ----------------------------------------------
+
+test('隣の本文行の内側に押し込まれた低い断片を見つける', () => {
+  // 継ぎ目の印は「落とした行」としか矩形を比べていないが、インライン `\frac` の
+  // 分母や添字は落ちるとは限らず、隣の本文の矩形に**取り込まれる**方が多い。
+  // 実測（レビュアーの本文 136 文）: 欠落 5 件（印 5）／移動 6 件（印 2）。
+  // 受け取った側の断片は高さ 8.91、本文は 9.96 — 0.85 倍の門では届かない。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 14; i++) {
+    chunks.push({ page: 1, text: `The constant is not optimised in line ${i} of this page.`, x: 50, y: 100 + i * 13, w: 250, h: 9.96 });
+  }
+  // 行と行の間に押し込まれた断片（隣の行の x 範囲の内側、1 行ぶんに満たない距離）。
+  // 段の左端に来た断片は、字下げが無いので別行立てにも見えず、**本文の行**として残る
+  // — つまり落ちていないので、落とした行と矩形を比べる継ぎ目の印には映らない。
+  chunks.push({ page: 1, text: '4', x: 51, y: 106.5, w: 5, h: 8.91 });
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const fragment = lines.find((l) => l.text.trim() === '4');
+  assert.ok(fragment !== undefined, '断片が行として残っていない');
+  assert.equal(fragment.role, 'body', '前提が崩れている（落ちた行なら既存の規則で印が付く）');
+  assert.ok(
+    findDisplacedFragments(lines).has(fragment.index),
+    `置き場所を間違えた断片を見つけられない（高さ ${fragment.height} / 役割 ${fragment.role}）`,
+  );
+});
+
+test('本文と同じ高さの短い行は、置き場所を間違えた断片としない', () => {
+  // 箇条書きの記号や短い最終行に印が付くと誤爆になる。誤爆 0 が絶対条件。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 14; i++) {
+    chunks.push({ page: 1, text: `The constant is not optimised in line ${i} of this page.`, x: 50, y: 100 + i * 13, w: 250, h: 9.96 });
+  }
+  // 段落の最終行（本文と同じ高さ、行送りも普通）。
+  chunks.push({ page: 1, text: 'end.', x: 50, y: 282, w: 20, h: 9.96 });
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  assert.equal(findDisplacedFragments(lines).size, 0, '本文の短い行に印が付いた');
+});
+
+// --- 段の右端に届いたか --------------------------------------------------
+
+test('段の右端に届いたかを行が持っている', () => {
+  // 別行立ての数式に本文が丸ごと吸われた文は、式の直前の行が「右端に届いて
+  // いない」ことでしか見分けられない（段落の途中に図表が割り込んだだけの文では、
+  // 割り込みの直前の行は段の右端まで届く）。継ぎ目の印が使う。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) {
+    chunks.push({ page: 1, text: `Full width body line ${i} that reaches the right edge.`, x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  // 式の直前で切れた行（段の右端に届かない）。
+  chunks.push({ page: 1, text: 'The estimator that we analyse in this section is', x: 50, y: 230, w: 160, h: 10 });
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const full = lines.find((l) => l.text.includes('Full width body line 0'));
+  const short = lines.find((l) => l.text.includes('The estimator'));
+  assert.equal(full?.reachesRight, true, '段いっぱいの行が「届いていない」になった');
+  assert.equal(short?.reachesRight, false, '式の直前で切れた行が「届いた」になった');
+});
+
+test('本文の途中に落ちた数字の断片をノンブルと間違えない', () => {
+  // `nearEdge` は「ページの上下 15%」という緩い位置しか見ていないので、本文が
+  // 短いページでは 5〜6 行目でも nearEdge になる。インライン `\frac` の分母が
+  // 独立した行になったとき、それが「ノンブル」として落ちると、ノンブルは種類の
+  // はっきりした付物なので継ぎ目の印の相手にならず、分母を失った文にも、
+  // 余った数字を受け取った文にも印が付かない。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 14; i++) {
+    chunks.push({ page: 1, text: `The constant is not optimised in line ${i} of this page.`, x: 50, y: 100 + i * 13, w: 250, h: 9.96 });
+  }
+  chunks.push({ page: 1, text: '2', x: 180, y: 106.5, w: 5, h: 6.97 });
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const fragment = lines.find((l) => l.text.trim() === '2');
+  assert.ok(fragment !== undefined, '断片が行として残っていない');
+  assert.notEqual(fragment.kind, 'pageNumber', '本文の途中の断片をノンブルとして落とした');
 });

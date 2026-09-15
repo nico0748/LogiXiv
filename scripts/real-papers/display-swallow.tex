@@ -1,0 +1,82 @@
+% 別行立ての数式が、直前の本文の行を丸ごと吸ってしまう組み方。
+%
+% `\vspace{-0.6em}`（投稿規定のページ数に収めるためによく使われる）で式を本文へ寄せると、
+% 段落の**最終行**が式の塊の一部と見なされて落ち、前後がつながって
+% **原文に無い、しかも文法の通る文**ができる。実測（直す前）:
+%
+%   `The method achieves a substantial improvement over the strongest Sparse attention
+%    reduces the quadratic cost of the attention operator to a linear one …`
+%
+% 期待される 2 文は
+%   `The method achieves a substantial improvement over the strongest published dense baseline.`
+%   `Sparse attention reduces the quadratic cost …`
+% で、落ちたのは `published dense baseline.` の 1 行。
+% 申告は 3 つとも low（継ぎ目の印なし・採録 100%・読み順 low）だったので、
+% 読む側には「論文がそう書いてある」としか見えない。
+%
+% 段落の最終行は短いので `the / of / and` が 1 つも無いことがふつうにあり、語数も
+% 2 語まで落ちる。「機能語があること」「小文字の語が 3 つ」を本文の条件にしていると
+% この行は守れない（looksLikeProse を参照）。
+%
+% あわせて、1 段あたりの行数が 20 行未満のページで「段の代表的な右端」がノンブルの
+% 右端になり、段いっぱいの本文行が 0.1pt 足りずに「右端に届いていない」と判定される
+% 穴もこの標本で踏む（percentile を参照）。
+%
+% 式の項の順を `b = … , A = [行列]` にしてあるのは意図的。行列の大きな括弧の行が
+% 段の右寄りに来て、段落の最終行と x が重ならなくなる。継ぎ目の印の規則 1
+% （落とした行の矩形が文の行と重なる）には**重なり量の下限が無い**ので、
+% 括弧の行を左に置くと、正しく取れた文に 0.8pt の重なりだけで印が付く（＝誤爆）。
+% 下限は sentences.ts の findSeam 側の直しなので、この標本では版面で避けてある。
+%
+% 正解の取り出し方は他の real-papers/*.tex と同じ（本文 1 文 = \s{...} を 1 行）。
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage{mathptmx}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath}
+
+\newcommand{\s}[1]{#1}
+\newcommand{\m}[2]{#2}
+
+\title{Block Sparse Attention}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setup}
+
+\s{We evaluate three configurations on the standard suite and report the average accuracy across five random seeds.}
+\s{The method achieves a substantial improvement over the strongest published dense baseline.}
+
+\vspace{-0.6em}
+\begin{equation}
+b = \frac{1}{2}\sum_{i=1}^{n} x_i^2 , \qquad A = \begin{bmatrix} a_{11} & a_{12} \\ a_{21} & a_{22} \end{bmatrix} .
+\end{equation}
+\vspace{-0.6em}
+
+\noindent
+\s{Sparse attention reduces the quadratic cost of the attention operator to a linear one under mild assumptions on the block structure of the mask.}
+\s{Information retrieval benefits from the same sparsity pattern at every depth of the network.}
+
+\s{The kernel is implemented once and reused for both training and inference.}
+\s{Training with the sparse kernel from scratch converges in the same number of steps as the dense baseline.}
+
+\section{Method}
+
+\s{Each block is processed independently before the aggregation step that combines the partial attention scores.}
+\s{We report the mean and the standard deviation over five random seeds for every configuration in the study.}
+\s{The routing scheme assigns every query block to a small set of key blocks chosen by a learned scorer.}
+
+\vspace{-0.6em}
+\begin{equation}
+\lambda = \frac{1}{n}\sum_{i=1}^{n} \bigl( y_i - \hat{y}_i \bigr)^2 .
+\end{equation}
+\vspace{-0.6em}
+
+\noindent
+\s{Ablations show that removing the scorer costs four points of accuracy on the longest split.}
+\s{The kernel is portable and needs no vendor specific intrinsics to reach the reported speed.}
+
+\end{document}

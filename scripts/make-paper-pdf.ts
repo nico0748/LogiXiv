@@ -70,6 +70,19 @@ export interface GeneratedPaper {
   expectedSentences: string[];
   /** 本文として取れて**ほしくない**もの（ページ番号・図キャプション・参考文献など）。 */
   expectedNonBody: string[];
+  /**
+   * 本文としては正しく取れるが、**継ぎ目の印が付いてほしい**文。
+   *
+   * 別行立ての数式を文の途中に挟んだ段落がこれ。取り出した本文は
+   * `The attention weights of run n are computed as where the query and key …` に
+   * なる — 字面は expectedSentences のとおりでも、**式の中身は落ちている**。
+   * 正しく取れた文と同じ顔で並ぶと、読む側には式が省かれたことが分からない。
+   *
+   * ここに入る文に印が付いても誤爆ではない（逆に、付いていなければ見逃し）。
+   * 段落の途中に**表**を挟んだ方はここに入れない。表は段落を切らずに流し込まれる
+   * 浮きもので、文としては欠けていないため。
+   */
+  expectedSeams: string[];
 }
 
 interface Placed {
@@ -285,6 +298,7 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
 
   const expectedSentences: string[] = [];
   const expectedNonBody: string[] = [];
+  const expectedSeams: string[] = [];
 
   // --- 段組に配置する ---------------------------------------------------
   const placedByPage = new Map<number, Placed[]>();
@@ -496,6 +510,9 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
     const before = `The attention weights of run ${n} are computed as`;
     const after = `where the query and key matrices are shared across every head in run ${n}.`;
     expectedSentences.push(`${before} ${after}`);
+    // 式の中身は本文として取れない（取れてもいけない）。字面は上のとおりでも
+    // **文の中身が 1 つ落ちている**ので、印が付いてほしい。詳細は expectedSeams。
+    expectedSeams.push(`${before} ${after}`);
     pushLine(before, 10);
     // 数式は中央寄せ、式番号だけ段の右端にぶら下げる（実際の別行立て数式と同じ形）。
     const number = `(${(n % 9) + 1})`;
@@ -702,5 +719,6 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
     pdf: new Uint8Array(Buffer.from(pdf, 'latin1')),
     expectedSentences,
     expectedNonBody,
+    expectedSeams,
   };
 }

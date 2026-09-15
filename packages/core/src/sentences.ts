@@ -9,7 +9,14 @@ import type {
   StructureQuality,
 } from './types.ts';
 import { sentenceHash, sentenceId, stableId } from './hash.ts';
-import { assessReadingOrder, buildLines, classifyLines, isUncertainKind, type ClassifiedLine } from './layout.ts';
+import {
+  assessReadingOrder,
+  buildLines,
+  classifyLines,
+  findDisplacedFragments,
+  isUncertainKind,
+  type ClassifiedLine,
+} from './layout.ts';
 
 /**
  * GROBID が使えないときのフォールバック経路。
@@ -24,6 +31,16 @@ export interface TextChunk {
   y: number;
   w: number;
   h: number;
+  /**
+   * ページの中で回っている文字（図の y 軸ラベル、\rotatebox の注記）。
+   *
+   * 版面の縦書きは本文ではない。横書きと同じに扱うと、縦に並んだ文字が
+   * 同じ y の 1 行として畳まれ、本文と 1 文に繋がる
+   * （`Accuracy on the held-out validation splitThroughput in tokens per second Sparse …`）。
+   * matplotlib や pgfplots をベクタで貼った図の軸ラベルはこの形なので、
+   * 図のある論文で普通に起きる。
+   */
+  rotated?: boolean;
 }
 
 /**
@@ -102,14 +119,59 @@ export function splitIntoSentences(text: string): string[] {
     // 欧文の文末には空白が要る（"3.14" のような並びを切らない）。CJK の終端記号は空白不要。
     if (after.length > 0 && !/^\s/.test(after) && !/[。！？]/.test(ch)) continue;
 
-    const candidate = text.slice(start, end).trim();
-    if (candidate.length > 0) out.push(candidate);
+    pushSentence(out, text.slice(start, end).trim());
     start = end;
     i = end - 1;
   }
-  const tail = text.slice(start).trim();
-  if (tail.length > 0) out.push(tail);
+  pushSentence(out, text.slice(start).trim());
   return out.filter((s) => /\p{L}/u.test(s));
+}
+
+/**
+ * 1 つの文として扱う長さの上限。
+ *
+ * 文末記号が 1 つも無い文書はある（OCR でテキスト層の句点が落ちた稿、終止符を使わない
+ * 言語、本文と判定されたデータ列やコードの付録）。そういう文書では**塊まるごとが 1 文**に
+ * なり、実測で 34 ページの PDF から「1 文が 18 万字・矩形 1800 個」のカードが 1 枚出ていた。
+ * これは画面にも MCP にも渡せない — 対訳は 1 文ずつという前提そのものが崩れるし、
+ * 1 回のやり取りに載る量も超える。
+ *
+ * だから上限で切る。4,000 字にしたのは:
+ *   - 実在の論文でいちばん長い文が 144 字（計測に使っている実物 7 本の正解より）。
+ *     28 倍の余裕があるので、ふつうの文書では一度も当たらない。
+ *   - この道具が既に「1 回のやり取りに載せる文字数」として使っている値と同じ
+ *     （MCP の MAX_QUERY_CHARS）。
+ */
+const MAX_SENTENCE_CHARS = 4_000;
+
+/**
+ * 文を 1 つ足す。長すぎるものは上限で割る。
+ *
+ * 割る位置は**語の切れ目**を探す（上限の手前 1/8 まで遡って空白を探し、無ければ上限ちょうど）。
+ * 和文には空白が無いので上限ちょうどで切れるが、そこまで来た時点で既に
+ * 「句点の無い和文」という壊れた入力なので、これ以上できることは無い。
+ */
+function pushSentence(out: string[], candidate: string): void {
+  if (candidate.length <= MAX_SENTENCE_CHARS) {
+    if (candidate.length > 0) out.push(candidate);
+    return;
+  }
+  let at = 0;
+  while (candidate.length - at > MAX_SENTENCE_CHARS) {
+    let cut = at + MAX_SENTENCE_CHARS;
+    const floor = cut - Math.floor(MAX_SENTENCE_CHARS / 8);
+    for (let i = cut; i > floor; i--) {
+      if (/\s/.test(candidate[i - 1]!)) {
+        cut = i;
+        break;
+      }
+    }
+    const piece = candidate.slice(at, cut).trim();
+    if (piece.length > 0) out.push(piece);
+    at = cut;
+  }
+  const rest = candidate.slice(at).trim();
+  if (rest.length > 0) out.push(rest);
 }
 
 /**
@@ -632,6 +694,23 @@ const LETTER_OR_HYPHEN = /[\p{L}\-\u2010\u2011]/u;
 const SURROGATE_HALF = /[\uD800-\uDFFF]/;
 
 /**
+ * 行末ハイフンの照合に使う窓の上限（文字）。
+ *
+ * 上限が無いと、**空白を含まない「欧字とハイフンだけの行」が続く入力**で窓が塊全体まで
+ * 育ち、二乗が戻る。行末ハイフンで繋ぐたびに空白が消えるので、並びが行をまたいで
+ * 伸び続けるため。実測（1 行 60 字・全行が行末ハイフン）: 10 万字 4.4 秒、20 万字 17.3 秒、
+ * 40 万字 68.3 秒、80 万字 275 秒（入力 2 倍で 4 倍）。同じ量の散文は 0.17／0.43／0.98／1.9 秒。
+ *
+ * 256 字にしたのは、**実在の複合語がそこまで長くならない**から。
+ * 照合相手の用例（HyphenEvidence）は行の中から拾った複合語なので、それ自体が
+ * 行の長さ（1 段組でも 100 字ほど）で頭打ちになる。窓がそれを超えていれば、
+ * 一致するものはもう無い。判定に使う残りの手掛かり（末尾の字種・語形・
+ * 「ハイフンを含むか」）も、256 字の末尾で答えが変わらない
+ * — 行末ハイフンまで届く並びは必ずハイフンを含むので、切り詰めても「含む」のまま。
+ */
+const HYPHEN_WINDOW_LIMIT = 256;
+
+/**
  * 行末ハイフンの照合に使う、末尾の窓。
  *
  * 一致しうる範囲（末尾の「欧字とハイフンの並び」）が丸ごと収まるまで窓を倍々に広げる。
@@ -652,7 +731,8 @@ function tailWindow(builder: TextBuilder): string {
     let i = window.length - 2;
     while (i >= 0 && (LETTER_OR_HYPHEN.test(window[i]!) || SURROGATE_HALF.test(window[i]!))) i--;
     if (i >= 0) return window; // 並びが窓の先頭まで届いていない＝収まっている
-    size *= 2;
+    if (size >= HYPHEN_WINDOW_LIMIT) return window;
+    size = Math.min(size * 2, HYPHEN_WINDOW_LIMIT);
   }
 }
 
@@ -821,7 +901,14 @@ function decideLineEndHyphen(left: string, right: string, evidence: HyphenEviden
  * 正解の文が取れた割合が 60%（1 段組）から 30%（2 段組）まで落ちていた。
  */
 export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[]): FallbackResult {
-  const lines = classifyLines(buildLines(chunks), pages);
+  // 回っている文字は本文の行組みに入れない（理由は TextChunk.rotated に書いた）。
+  // 捨てるのではなく、行き先の分かる付物として残す — 「PDF には見えているのに
+  // 右に無い」を作らないため、というのは落とした行と同じ理屈。
+  const rotatedChunks = chunks.filter((chunk) => chunk.rotated === true);
+  const lines = classifyLines(
+    buildLines(rotatedChunks.length > 0 ? chunks.filter((chunk) => chunk.rotated !== true) : chunks),
+    pages,
+  );
   const hyphenEvidence = collectHyphenEvidence(lines);
   // 和文と欧文の境目に空白を置く文書かどうかは、文書ごとに違う。
   // 行を繋ぐ前に、その文書自身の書き方を数えておく。
@@ -879,6 +966,11 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
   const lastLineOf: number[] = [];
   const byIndex = new Map<number, ClassifiedLine>(lines.map((line) => [line.index, line]));
   /**
+   * 置き場所を間違えた断片（落ちてはいないが、隣の本文行に押し込まれたもの）。
+   * 落とした行と矩形を比べるだけでは映らないので、行の番号で持つ。詳細は layout.ts。
+   */
+  const displaced = findDisplacedFragments(lines);
+  /**
    * 版面の規則だけで落とした行。文に印を付けるかどうかの相手はこれだけ。
    *
    * **ページごとに引けるようにしておく。** 文ごとに全部を舐めると
@@ -918,17 +1010,40 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
         rects: mergeRects(covered),
         sectionId: block.section,
       };
-      const seam = findSeam(covered, byIndex, droppedByPage);
+      const seam = findSeam(covered, sentence.rects, byIndex, droppedByPage, displaced);
       if (seam !== null) sentence.seam = seam;
       sentences.push(sentence);
-      lastLineOf.push(covered.length === 0 ? -1 : Math.max(...covered.map((o) => o.line)));
+      lastLineOf.push(lastLineOfOwners(covered));
     }
   }
 
+  // 回っている文字は、種類の分かる付物として並べる（画面では「本文以外（訳しません）」）。
+  // 図の軸ラベルなので、ページの先頭に置けば「この図の中にこういう字がある」と分かる。
+  const rotatedNonBody: NonBodySentence[] = [];
+  for (const chunk of rotatedChunks) {
+    const text = chunk.text.trim();
+    if (text.length === 0) continue;
+    const hash = sentenceHash(text);
+    const anchor = [...sentences].reverse().find((sentence) => sentence.page <= chunk.page);
+    rotatedNonBody.push({
+      id: `nb_rot_${hash}_${rotatedNonBody.length}`,
+      hash,
+      order: rotatedNonBody.length,
+      page: chunk.page,
+      text,
+      rects: [{ page: chunk.page, x: chunk.x, y: chunk.y, w: chunk.w, h: chunk.h }],
+      sectionId: anchor?.sectionId ?? null,
+      kind: 'other',
+      afterOrder: anchor?.order ?? -1,
+      afterHash: anchor?.hash ?? null,
+    });
+  }
+
+  const nonBody = buildNonBody(lines, hyphenEvidence, spacing, sentences, lastLineOf);
   return {
     sentences,
     sections,
-    nonBody: buildNonBody(lines, hyphenEvidence, spacing, sentences, lastLineOf),
+    nonBody: rotatedNonBody.length > 0 ? [...nonBody, ...rotatedNonBody] : nonBody,
     quality: assessReadingOrder(lines),
   };
 }
@@ -959,8 +1074,10 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
  */
 function findSeam(
   covered: readonly CharOwner[],
+  ink: readonly Rect[],
   byIndex: ReadonlyMap<number, ClassifiedLine>,
   droppedByPage: ReadonlyMap<number, readonly ClassifiedLine[]>,
+  displaced: ReadonlySet<number>,
 ): SentenceSeam | null {
   const used = [...new Set(covered.map((owner) => owner.line))].sort((a, b) => a - b);
   if (used.length === 0) return null;
@@ -974,8 +1091,51 @@ function findSeam(
   if (bands.length === 0) return null;
   const pages = new Set(bands.map((line) => line.page));
 
+  // 行ごとに「その行で文が占めた左右の端」を出しておく（規則 1 で使う）。
+  const bandInk: BandInk[] = bands.map((body) => {
+    let left = Infinity;
+    let right = -Infinity;
+    for (const rect of ink) {
+      if (rect.page !== body.page) continue;
+      // 同じ行の矩形か（縦に重なっているか）で対応づける。
+      if (rect.y + rect.h <= body.y || rect.y >= body.y + body.height) continue;
+      if (rect.x < left) left = rect.x;
+      if (rect.x + rect.w > right) right = rect.x + rect.w;
+    }
+    // 対応する矩形が無い行（継ぎ目の空白しか持たない行）は、行の帯をそのまま使う。
+    return right > left ? { line: body, left, right } : { line: body, left: body.left, right: body.right };
+  });
+
   const kinds: NonBodyKind[] = [];
   const rects: Rect[] = [];
+  const texts: string[] = [];
+
+  /**
+   * 置き場所を間違えた断片を、この文が**本文として抱えて**いないか。
+   *
+   * ここが継ぎ目の印の**対称形**。断片は落ちるとは限らない。
+   *   - 落ちた断片 … 本文から消える。下の規則 1・2（落とした行との矩形の比較）で拾う。
+   *   - 移動した断片 … 隣の本文行に押し込まれ、そのまま文の一部になる。
+   *     落ちていないので**検出器の入力に一度も入らない**。矩形を比べるだけでは永遠に映らない。
+   * 実測（レビュアーの 136 文）: 欠落 5 件に対し移動 6 件。数学の論文はインライン
+   * `\frac` が普通なので、分母や添字が隣の行に入る**移動のほうが多い**
+   * （`The constant 1/4 is not t 4 optimised.` ← 分母の 4 と添字の t がここへ移った）。
+   * 落ちた側だけを見る実装に戻さないこと。
+   */
+  for (const body of bands) {
+    if (!displaced.has(body.index)) continue;
+    const kind = body.kind ?? 'other';
+    if (!kinds.includes(kind)) kinds.push(kind);
+    rects.push({
+      page: body.page,
+      x: round(body.left),
+      y: round(body.y),
+      w: round(body.right - body.left),
+      h: round(body.height),
+    });
+    texts.push(body.text);
+  }
+
   // ページの昇順 → ページ内は行の順。落とした行を全部舐めていた頃と同じ並びになる
   // （`lines` はページ → 段 → y の順に並んでいるため）。
   for (const page of [...pages].sort((a, b) => a - b)) {
@@ -984,14 +1144,7 @@ function findSeam(
       //    読み順の番号ではなく**版面の位置**で見る。添字の行は本文の行より後ろに
       //    並ぶことがあるので、番号の範囲だけで探すと取り逃がす（実測: ∇F_m の
       //    添字 `Mm=1 m` が文の最終行より後ろの番号にいて、印が付かなかった）。
-      const inside = bands.some(
-        (body) =>
-          body.page === line.page &&
-          line.y < body.y + body.height &&
-          line.y + line.height > body.y &&
-          line.left < body.right &&
-          line.right > body.left,
-      );
+      const inside = bandInk.some((band) => overlapsBand(band, line));
 
       // 2. またいだ先が段落の頭か（字下げがある）。
       let jumped = false;
@@ -999,7 +1152,22 @@ function findSeam(
         const after = bands.find((body) => body.index > line.index);
         const before = [...bands].reverse().find((body) => body.index < line.index);
         if (after !== undefined && before !== undefined && after.column === before.column) {
-          jumped = after.left > before.left + Math.max(2, after.height * 0.4);
+          const indented = after.left > before.left + Math.max(2, after.height * 0.4);
+          /**
+           * 字下げが無くても、**またいだ手前の行が段の右端に届いていない**なら印を付ける。
+           * 段落は右端まで組まれてから折り返すので、右が余っている行は「そこで段落が
+           * 切れた」行 — 別行立ての要素がその続きを持っている。
+           *
+           * 実測: `The estimator that we analyse in this section is` の直後に式 (1) が来て、
+           * `… is and the weights are chosen so that …` という**文法の壊れた、原文に
+           * 無い文**になっていた。次の行に字下げは無いので、字下げだけを見る規則では
+           * 印が付かない。式が文の目的語になる「… is given by (1), where …」は
+           * 論文でいちばん多い形。
+           *
+           * `formula` に絞るのは実測の結果。絞らないと、段落の途中に表が割り込んだだけの
+           * 文（こちらは欠けていない）5 件に印が付き、既存テストも落ちた。
+           */
+          jumped = indented || (before.reachesRight === false && line.kind === 'formula');
         }
       }
       if (!inside && !jumped) continue;
@@ -1013,9 +1181,76 @@ function findSeam(
         w: round(line.right - line.left),
         h: round(line.height),
       });
+      // 落とした行の**本文**も持たせる。矩形だけだと、読む側にできるのは
+      // 「この文は飛ばす」しかない。落ちたのが補題の主張そのものだったときに、
+      // 飛ばしてよいかどうかを決める材料が無い。文字列があれば継ぎ直せる。
+      texts.push(line.text);
     }
   }
-  return rects.length === 0 ? null : { kinds, rects };
+  return rects.length === 0 ? null : { kinds, rects, texts };
+}
+
+/**
+ * その文が最後に触れた行の番号。
+ *
+ * `Math.max(...covered.map(…))` と書いてはいけない。スプレッドは**配列を引数に展開する**ので、
+ * 要素数が引数の上限（V8 では実測 12.5 万、ワーカースレッドでは約 50 万）を超えると
+ * `RangeError: Maximum call stack size exceeded` で落ちる。`covered` は文 1 つの**文字数**
+ * なので、文末記号が 1 つも無い文書（OCR で句点が落ちた稿、終止符を使わない言語、
+ * 本文と判定された付録のデータ列）では簡単に超える。実測: 1 行 54 字の PDF で
+ * 2400 行＝約 53 ページから落ち、しかも画面には「PDF が壊れているか、LogiXiv が
+ * 扱えない作りのファイルです」と出ていた（壊れていない）。
+ */
+function lastLineOfOwners(covered: readonly CharOwner[]): number {
+  let last = -1;
+  for (const owner of covered) if (owner.line > last) last = owner.line;
+  return last;
+}
+
+/**
+ * 落とした行が、その文の**インク**にどれだけ重なっているかの下限（短いほうに対する比）。
+ *
+ * 下限が無かった頃は、**すれ違っただけ**で印が付いていた。実測（theorem-display）で
+ * 縦の重なりが 0.03pt（低いほうの字高の 0.3%）の組み合わせが発火していた。
+ *
+ * 本物の重なりは、いちばん浅いもので 0.14（総和の添字 `m=1` が本文行の帯に 1pt
+ * 食い込む形。既存テスト『落とした行が文の内側にあるとき、その文に印を付ける』）、
+ * 深いもので 0.28〜0.50。0.05 で切ると、すれ違い（0.003）とは 15 倍、
+ * いちばん浅い本物とは 2.9 倍の隔たりがある。**上げすぎると本物が落ちる** —
+ * 0.15 にしたら上の既存テストが落ちた。
+ */
+const MIN_SEAM_OVERLAP = 0.05;
+
+/**
+ * 文が占めた行と、その行で**文が実際に占めた左右の端**。
+ *
+ * 縦は行の帯で見る。文の矩形（mergeRects の結果）は上付き・下付きを含む外接なので、
+ * 行より背が高くなることがあり、そのまま縦に使うと隣の行の式にまで当たる
+ * （実測: これで 3 段組と twocolumn に誤爆が 1 件ずつ出た）。
+ *
+ * 横は**文の矩形**で見る。行の帯で見ていた頃は、1 行を 2 文が共有しているとき
+ * （"… ends here. Beta starts here." が 1 行に収まる形）、右半分に落ちた式が
+ * **左半分の文にも**印を付けていた。文の矩形は mergeRects が文字数で按分しているので、
+ * その文が紙面のどこを占めていたかを持っている。
+ */
+interface BandInk {
+  line: ClassifiedLine;
+  left: number;
+  right: number;
+}
+
+/** 落とした行が、その帯（縦）と文のインク（横）に実際に重なっているか。 */
+function overlapsBand(band: BandInk, line: ClassifiedLine): boolean {
+  const body = band.line;
+  if (body.page !== line.page) return false;
+  const height = Math.min(line.height, body.height);
+  if (height <= 0) return false;
+  const overlapY = Math.min(line.y + line.height, body.y + body.height) - Math.max(line.y, body.y);
+  if (overlapY < height * MIN_SEAM_OVERLAP) return false;
+  const width = Math.min(line.right - line.left, band.right - band.left);
+  if (width <= 0) return false;
+  const overlapX = Math.min(line.right, band.right) - Math.max(line.left, band.left);
+  return overlapX >= width * MIN_SEAM_OVERLAP;
 }
 
 /**

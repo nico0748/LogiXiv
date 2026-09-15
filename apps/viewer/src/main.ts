@@ -300,13 +300,16 @@ function boot(): void {
     // 受け取った側にも、どの文の原文が怪しいかは要る。訳文だけを読むと
     // 記号が落ちた文も「そう書いてある」としか見えない。
     if (sentence.seam) {
-      card.append(
-        el(
-          'p',
-          'lxv-seam',
-          `この文には、本文として取り出せなかった${seamLabel(sentence.seam.kinds)}が挟まっています（記号や語が抜けているおそれ）。`,
-        ),
+      const seam = el(
+        'p',
+        'lxv-seam',
+        `この文には、本文として取り出せなかった${seamLabel(sentence.seam.kinds)}が挟まっています（記号や語が抜けているおそれ）。`,
       );
+      if (sentence.seam.texts && sentence.seam.texts.length > 0) {
+        // 抜けた中身をその場に出す。読み手が PDF を開き直さずに補える。
+        seam.append(el('span', 'lxv-seam-text', ` 抜けたのはここ: ${sentence.seam.texts.join(' / ')}`));
+      }
+      card.append(seam);
     }
 
     for (const note of notesByHash.get(sentence.hash) ?? []) {

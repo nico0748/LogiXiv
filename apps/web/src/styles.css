@@ -798,6 +798,17 @@ textarea {
 }
 
 /* 継ぎ目の印。文書単位のバッジでは「どの文か」が分からないので、その文に出す。 */
+.card-seam p {
+  margin: 0;
+}
+
+.card-seam-text {
+  margin-top: 0.2rem !important;
+  color: var(--muted);
+  font-size: 0.72rem;
+  word-break: break-word;
+}
+
 .card-seam {
   margin: 0.25rem 0 0;
   padding: 0.25rem 0.5rem;

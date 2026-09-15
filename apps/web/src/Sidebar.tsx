@@ -513,10 +513,19 @@ function SentenceCardView(props: CardProps): React.JSX.Element {
           Claude がもっともらしい日本語に訳し、読者には「そう書いてある」
           としか見えない（定理の不等式から係数が消えた例が実際にあった）。 */}
       {sentence.seam && (
-        <p className="card-seam">
-          この文には、本文として取り出せなかった{seamLabel(sentence.seam.kinds)}が挟まっています。
-          記号や語が抜けているおそれがあるので、訳す前に PDF を確かめてください。
-        </p>
+        <div className="card-seam">
+          <p>
+            この文には、本文として取り出せなかった{seamLabel(sentence.seam.kinds)}が挟まっています。
+            記号や語が抜けているおそれがあるので、訳す前に PDF を確かめてください。
+          </p>
+          {/* 抜けた中身をその場に出す。補題の本体が落ちていることがあり、
+              中身が分かれば「飛ばす」以外の手（補って訳す）が取れる。 */}
+          {sentence.seam.texts && sentence.seam.texts.length > 0 && (
+            <p className="card-seam-text" lang="en">
+              抜けたのはここ: {sentence.seam.texts.join(' / ')}
+            </p>
+          )}
+        </div>
       )}
 
       {props.repeat && (

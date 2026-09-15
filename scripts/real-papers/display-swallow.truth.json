@@ -1,0 +1,20 @@
+{
+  "expectedSentences": [
+    "We evaluate three configurations on the standard suite and report the average accuracy across five random seeds.",
+    "The method achieves a substantial improvement over the strongest published dense baseline.",
+    "Sparse attention reduces the quadratic cost of the attention operator to a linear one under mild assumptions on the block structure of the mask.",
+    "Information retrieval benefits from the same sparsity pattern at every depth of the network.",
+    "The kernel is implemented once and reused for both training and inference.",
+    "Training with the sparse kernel from scratch converges in the same number of steps as the dense baseline.",
+    "Each block is processed independently before the aggregation step that combines the partial attention scores.",
+    "We report the mean and the standard deviation over five random seeds for every configuration in the study.",
+    "The routing scheme assigns every query block to a small set of key blocks chosen by a learned scorer.",
+    "Ablations show that removing the scorer costs four points of accuracy on the longest split.",
+    "The kernel is portable and needs no vendor specific intrinsics to reach the reported speed."
+  ],
+  "expectedNonBody": [
+    "Block Sparse Attention",
+    "Anonymous"
+  ],
+  "expectedSeams": []
+}

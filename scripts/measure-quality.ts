@@ -91,8 +91,14 @@ interface Result {
   /**
    * そのうち、**正解の本文そのもの**に付いてしまった数（＝誤爆）。
    * 1 件でも出れば印は信用されなくなるので、ここは 0 でなければならない。
+   *
+   * 正解が「印を付けてほしい」と言っている文（`expectedSeams`）は数えない。
    */
   seamFalseAlarms: number;
+  /** 正解が「印を付けてほしい」と言っている文のうち、実際に出てきた数。 */
+  seamWanted: number;
+  /** そのうち、印が付いた数。`seamWanted` に足りなければ見逃し。 */
+  seamWantedMarked: number;
 }
 
 /** 多重集合の一致数。同じ文が n 回出るなら n 回数える。 */
@@ -173,6 +179,16 @@ async function score(label: string, pdf: Uint8Array, paper: PaperTruth): Promise
   // 字面そのものの照合。空白の詰め方だけ揃えて、ハイフンには触れずに比べる。
   // 正規化して一致した数との差が、「正規化すれば同じだが画面に出る字は違う」文の数。
   const marked = structure.sentences.filter((sentence) => sentence.seam !== undefined).map((sentence) => normalizeSentence(sentence.text));
+  const markedSet = new Set(marked);
+  const gotSet = new Set(got);
+  /**
+   * 正解が「印を付けてほしい」と言っている文。
+   *
+   * 別行立ての数式が文の目的語になる形（`… is given by (1), where …`）は、
+   * 字面としては正解どおりに取れても**式の中身が落ちている**。正しく取れた文と
+   * 同じ顔で並べてはいけないので、ここに印が付くのは誤爆ではなく正解。
+   */
+  const wantSeam = new Set((paper.expectedSeams ?? []).map(normalizeSentence));
 
   const flatten = (text: string): string => text.replace(/\s+/g, ' ').trim();
   const exact = multisetOverlap(paper.expectedSentences.map(flatten), structure.sentences.map((s) => flatten(s.text)));
@@ -194,7 +210,9 @@ async function score(label: string, pdf: Uint8Array, paper: PaperTruth): Promise
     coverage: structure.quality?.coverage ?? 1,
     coverageRisk: structure.quality?.coverageRisk ?? 'low',
     seams: marked.length,
-    seamFalseAlarms: marked.filter((text) => wanted.has(text)).length,
+    seamFalseAlarms: marked.filter((text) => wanted.has(text) && !wantSeam.has(text)).length,
+    seamWanted: [...wantSeam].filter((text) => gotSet.has(text)).length,
+    seamWantedMarked: [...wantSeam].filter((text) => markedSet.has(text)).length,
   };
 }
 
@@ -298,7 +316,7 @@ function table(title: string, rows: Result[]): void {
         `${String(r.sentences).padStart(5)} ` +
         `${String(r.sections).padStart(3)} ${r.readingOrderRisk.padStart(5)} ` +
         `${`${(r.coverage * 100).toFixed(1)}%${r.coverageRisk === 'high' ? '!' : ' '}`.padStart(7)} ` +
-        `${`${r.seams}${r.seamFalseAlarms > 0 ? `(誤${r.seamFalseAlarms})` : ''}`.padStart(4)} ` +
+        `${`${r.seams}${r.seamFalseAlarms > 0 ? `(誤${r.seamFalseAlarms})` : ''}${r.seamWanted > r.seamWantedMarked ? `(見逃${r.seamWanted - r.seamWantedMarked})` : ''}`.padStart(4)} ` +
         `${String(r.ms).padStart(6)}ms`,
     );
   }
@@ -355,6 +373,30 @@ const seamFalseAlarms = [...all, ...unrecoverableResults].filter((r) => r.seamFa
 const seamMisses = unrecoverableResults.filter(
   (r) => r.seams < MIN_SEAMS || r.recall < MIN_UNRECOVERABLE_RECALL,
 );
+
+/**
+ * 「印を付けてほしい」と正解が言っている文のうち、印が付いていないもの。
+ *
+ * 別行立ての数式が文の目的語になる形（`… is given by (1), where …`）は、
+ * 字面としては正解どおりに取れても**式の中身が落ちている**。
+ *
+ * **ここはまだ門にしていない。** 印を立てているのは
+ * `packages/core/src/sentences.ts` の `findSeam` で、この形に印を付けるには
+ * そちらの規則 2（またいだ先に字下げがあるときだけ印を付ける）を緩める必要がある。
+ * 直しが入るまでは見逃しが残るので、数を出すだけにして終了コードには影響させない。
+ * 直しが入ったら `seamWantedMisses.length > 0` を下の条件に足すこと。
+ */
+const seamWantedMisses = [...all, ...unrecoverableResults].filter(
+  (r) => r.seamWantedMarked < r.seamWanted,
+);
+
+// 門ではないので、成否によらず先に出す（理由は seamWantedMisses の説明を参照）。
+if (seamWantedMisses.length > 0) {
+  console.error(
+    '\n印が付いてほしい文に印が付いていません（別行立ての要素が文の中で落ちている）:\n' +
+      seamWantedMisses.map((f) => `  ${f.label}: ${f.seamWanted} 件中 ${f.seamWantedMarked} 件`).join('\n'),
+  );
+}
 
 if (
   failures.length > 0 ||

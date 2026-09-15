@@ -29,5 +29,6 @@
   "expectedNonBody": [
     "Greedy block selection",
     "Technical Report"
-  ]
+  ],
+  "expectedSeams": []
 }

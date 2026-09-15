@@ -33,6 +33,8 @@ export interface NonBodySentence extends Sentence {
 export interface SentenceSeam {
   kinds: NonBodySentence['kind'][];
   rects: Rect[];
+  /** 落ちた行の本文。これがあると、読む側は「飛ばす」以外の手を持てる。 */
+  texts?: string[];
 }
 
 export interface Sentence {
