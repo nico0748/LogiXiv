@@ -14,48 +14,85 @@ import workerSource from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?raw';
 let workerReady = false;
 let workerMode: 'blob' | 'data' | 'none' = 'none';
 
-function canConstructWorker(url: string): boolean {
-  try {
-    const probe = new Worker(url, { type: 'classic' });
-    probe.terminate();
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * その URL の作り方でワーカーを本当に起動できるかを、小さな台本で確かめる。
+ *
+ * 判定は「メッセージが返ってくること」まで見る。構築が例外を投げるかどうかでは足りない。
+ * file:// の `blob:` + module ワーカーは、構築は通るのに後から error になるためで、
+ * pdf.js はそこで黙って fake worker（＝ UI スレッド処理）に落ちる。
+ *
+ * 試すのは pdf.js 本体ではなく 1 行の台本にする。本物のワーカーは合図を返さないので、
+ * 「動いた」ことを確かめようがない。URL の作り方と module 型さえ同じなら、
+ * 通るかどうかは同じ条件で決まる。
+ */
+function probeScheme(makeUrl: (source: string) => string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let url: string;
+    let worker: Worker;
+    try {
+      url = makeUrl('self.postMessage(1);');
+      // pdf.js は module 型で読み込むので、こちらも module で試す。
+      worker = new Worker(url, { type: 'module' });
+    } catch {
+      resolve(false);
+      return;
+    }
+    const finish = (ok: boolean): void => {
+      clearTimeout(timer);
+      worker.terminate();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), 1500);
+    worker.addEventListener('message', () => finish(true));
+    worker.addEventListener('error', () => finish(false));
+    worker.addEventListener('messageerror', () => finish(false));
+  });
 }
 
-function ensureWorker(): void {
+const asBlobUrl = (source: string): string =>
+  URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+const asDataUrl = (source: string): string =>
+  `data:text/javascript;base64,${bytesToBase64(new TextEncoder().encode(source))}`;
+
+/**
+ * ワーカーは**自分で作って渡す**（workerSrc ではなく workerPort）。
+ *
+ * pdf.js は workerSrc が同一オリジンでないと判断すると、`import "<url>"` だけの
+ * blob: ラッパを作り直して module ワーカーとして読み込む。file:// では blob: の
+ * オリジンが null なので必ずこの経路に入り、そして file:// では blob: の
+ * module ワーカーが起動できないため、毎回 fake worker（UI スレッド処理）に落ちていた。
+ * data: の module ワーカーは file:// でも http:// でも動くので、自分で作って
+ * 出来上がったものを渡せば、ラッパを挟ませずに済む。
+ */
+async function ensureWorker(): Promise<void> {
   if (workerReady) return;
   workerReady = true;
 
-  try {
-    const blobUrl = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
-    if (canConstructWorker(blobUrl)) {
-      pdfjs.GlobalWorkerOptions.workerSrc = blobUrl;
-      workerMode = 'blob';
+  for (const [mode, makeUrl] of [
+    ['data', asDataUrl],
+    ['blob', asBlobUrl],
+  ] as const) {
+    try {
+      if (!(await probeScheme(makeUrl))) continue;
+      const worker = new Worker(makeUrl(workerSource), { type: 'module' });
+      (pdfjs.GlobalWorkerOptions as { workerPort: Worker | null }).workerPort = worker;
+      workerMode = mode;
       return;
+    } catch {
+      // この作り方は使えない。次を試す。
     }
-    URL.revokeObjectURL(blobUrl);
-  } catch {
-    // Blob も URL も使えない環境。次の手に進む。
-  }
-
-  try {
-    const dataUrl = `data:text/javascript;base64,${bytesToBase64(new TextEncoder().encode(workerSource))}`;
-    if (canConstructWorker(dataUrl)) {
-      pdfjs.GlobalWorkerOptions.workerSrc = dataUrl;
-      workerMode = 'data';
-      return;
-    }
-  } catch {
-    // ここまで駄目なら pdf.js の fake worker に任せる。
   }
   workerMode = 'none';
 }
 
-/** PDF を別スレッドで処理できているか。できていないときは画面にその旨を出す。 */
+/**
+ * PDF を別スレッドで処理できているか。
+ *
+ * 見込み（workerMode）だけでなく、pdf.js が実際に fake worker へ落ちたときの
+ * 警告も見る。予測が外れても画面の表示は事実に合う。
+ */
 export function isWorkerAvailable(): boolean {
-  return workerMode !== 'none';
+  return workerMode !== 'none' && !fellBackToFakeWorker;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -83,24 +120,50 @@ export function base64ToBytes(base64: string): Uint8Array {
  * ここを黙らせると「開いたけど何も出ない」という、原因の分からない壊れ方になる。
  */
 let missingResources = false;
+let fellBackToFakeWorker = false;
 const RESOURCE_WARNING = /cMapUrl|standardFontDataUrl|wasmUrl|translateFont failed/i;
+const FAKE_WORKER_WARNING = /fake worker/i;
+
+/**
+ * 監視は参照数で管理する。
+ *
+ * 遅延描画では複数の描画が重なるので、素朴に「保存して戻す」を入れ子にすると、
+ * 内側が外側の差し替え済み関数を「元の関数」として保存し、最後に戻すのが
+ * 差し替え版になる。console.warn が永久に差し替わったまま残っていた。
+ */
+let watchers = 0;
+let nativeWarn: typeof console.warn | null = null;
+let nativeLog: typeof console.log | null = null;
 
 function watchWarnings<T>(task: () => Promise<T>): Promise<T> {
-  const original = { warn: console.warn, log: console.log };
   const check = (args: unknown[]): void => {
-    if (args.some((arg) => typeof arg === 'string' && RESOURCE_WARNING.test(arg))) missingResources = true;
+    for (const arg of args) {
+      if (typeof arg !== 'string') continue;
+      if (RESOURCE_WARNING.test(arg)) missingResources = true;
+      if (FAKE_WORKER_WARNING.test(arg)) fellBackToFakeWorker = true;
+    }
   };
-  console.warn = (...args: unknown[]) => {
-    check(args);
-    original.warn.apply(console, args);
-  };
-  console.log = (...args: unknown[]) => {
-    check(args);
-    original.log.apply(console, args);
-  };
+  if (watchers === 0) {
+    nativeWarn = console.warn;
+    nativeLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      check(args);
+      nativeWarn?.apply(console, args);
+    };
+    console.log = (...args: unknown[]) => {
+      check(args);
+      nativeLog?.apply(console, args);
+    };
+  }
+  watchers++;
   return task().finally(() => {
-    console.warn = original.warn;
-    console.log = original.log;
+    watchers--;
+    if (watchers === 0 && nativeWarn && nativeLog) {
+      console.warn = nativeWarn;
+      console.log = nativeLog;
+      nativeWarn = null;
+      nativeLog = null;
+    }
   });
 }
 
@@ -109,7 +172,7 @@ export function needsMissingResources(): boolean {
 }
 
 export async function loadPdf(bytes: Uint8Array) {
-  ensureWorker();
+  await ensureWorker();
   return watchWarnings(() => pdfjs.getDocument({ data: bytes, disableFontFace: false }).promise);
 }
 

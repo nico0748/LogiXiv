@@ -326,9 +326,13 @@ async function handle(
           throw new BadRequestError(`entries[${index}] がオブジェクトではありません`);
         }
         const item = raw as Record<string, unknown>;
+        const text = requireString(item['text'], `entries[${index}].text`, MAX_TEXT_FIELD);
+        // 空の訳を通すと、その文は永久に「訳し終わった」ことになって二度と出てこない。
+        // 生成が途中で切れたときに静かに欠落するので、入口で断る。
+        if (text.trim().length === 0) throw new BadRequestError(`entries[${index}].text が空です`);
         return {
           sentenceHash: requireString(item['sentenceHash'], `entries[${index}].sentenceHash`, 64),
-          text: requireString(item['text'], `entries[${index}].text`, MAX_TEXT_FIELD),
+          text,
         };
       });
       const source = body.source === 'claude' ? 'claude' : 'human';
@@ -340,6 +344,7 @@ async function handle(
     if (translationMatch && method === 'PUT') {
       const body = await readJson<{ text?: unknown; source?: unknown }>(request);
       const text = requireString(body.text, 'text', MAX_TEXT_FIELD);
+      if (text.trim().length === 0) throw new BadRequestError('text が空です');
       const source = body.source === 'claude' ? 'claude' : 'human';
       sendJson(response, 200, await api.setTranslation(id, translationMatch[1]!, text, { source }));
       return;
@@ -371,6 +376,8 @@ async function handle(
     if ((rest === '/glossary' && method === 'PUT') || (rest === '/glossary' && method === 'POST')) {
       const body = await readJson<{ entries?: unknown }>(request);
       if (!Array.isArray(body.entries)) throw new BadRequestError('entries が配列ではありません');
+      // 空配列での置換は、確認も無く用語集を消す操作になる。意図が読めないので断る。
+      if (body.entries.length === 0) throw new BadRequestError('entries が空です');
       if (body.entries.length > 2000) throw new BadRequestError('entries は 2000 件までです');
       const entries = body.entries.map((raw, index) => {
         if (typeof raw !== 'object' || raw === null) {

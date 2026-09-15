@@ -32,7 +32,9 @@ const RESIZE_DEBOUNCE_MS = 300;
  * 静的フォールバックごと消えた真っ白なページになる。
  */
 function readPayload(): ExportPayload | null {
-  const elements = document.querySelectorAll(`#${DATA_ELEMENT_ID}`);
+  // 取り込み側と同じものを指す。id だけで拾うと、<div id="logixiv-data"> のような
+  // 取り込み側には見えない要素からビューアだけが起動してしまう。
+  const elements = document.querySelectorAll(`script#${DATA_ELEMENT_ID}[type="application/json"]`);
   if (elements.length !== 1) return null;
   try {
     const payload = JSON.parse(elements[0]!.textContent ?? '') as ExportPayload;
@@ -40,6 +42,10 @@ function readPayload(): ExportPayload | null {
     if (!paper || typeof paper !== 'object') return null;
     if (!Array.isArray(paper.structure?.sentences)) return null;
     if (!Array.isArray(paper.structure?.sections)) return null;
+    // 座標が無い文は珍しくない（GROBID が返さないことがある）。ここで落とさず補う。
+    for (const sentence of paper.structure.sentences) {
+      if (!Array.isArray(sentence?.rects)) sentence.rects = [];
+    }
     const annotations = paper.annotations;
     if (!annotations || typeof annotations !== 'object') return null;
     if (!Array.isArray(annotations.notes) || typeof annotations.translations !== 'object') return null;
@@ -178,12 +184,24 @@ function boot(): void {
     card?.classList.add('is-active');
     for (const marker of markers.get(id) ?? []) marker.classList.add('is-active');
 
-    if (origin === 'pdf') card?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    else markers.get(id)?.[0]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (origin === 'pdf') {
+      card?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return;
+    }
+    const marker = markers.get(id)?.[0];
+    if (!marker) return;
+    // 飛び先のページを先に描く。観測任せだと、着いた先が白い枠のままになる。
+    const page = marker.closest('.lxv-page');
+    if (page instanceof HTMLElement) drawPage?.(Number(page.dataset['page']));
+    marker.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
 
   let renderToken = 0;
   let pageObserver: IntersectionObserver | null = null;
+  /** 描いたページを見える範囲の近さで手放すための、直近に描いた順の並び。 */
+  const MAX_DRAWN_PAGES = 12;
+  /** 選択された文のページを、観測を待たずに描くための取っ掛かり。 */
+  let drawPage: ((pageNumber: number) => void) | null = null;
 
   /**
    * ページは「枠だけ先に並べ、見える範囲に入ったら描く」。
@@ -196,7 +214,10 @@ function boot(): void {
     const token = ++renderToken;
     pageObserver?.disconnect();
     pageObserver = null;
+    drawPage = null;
     pdfColumn.textContent = '';
+    // 画面を作り直すので、一度出した注意書きも出し直せるようにする。
+    resourceWarningShown = false;
     markers.clear();
     const status = el('p', 'lxv-status', 'PDF を読み込んでいます…');
     pdfColumn.append(status);
@@ -231,27 +252,51 @@ function boot(): void {
       }
     }
 
-    const drawn = new Set<number>();
-    const draw = async (container: HTMLElement, pageNumber: number): Promise<void> => {
-      if (drawn.has(pageNumber) || token !== renderToken) return;
-      drawn.add(pageNumber);
-      try {
-        const canvas = await renderPageCanvas(pdf, pageNumber, cssWidth);
-        if (token !== renderToken) return;
-        container.prepend(canvas);
-        if (needsMissingResources()) showResourceWarning();
-      } catch {
-        drawn.delete(pageNumber);
-      }
-    };
-    const release = (container: HTMLElement, pageNumber: number): void => {
-      const canvas = container.querySelector('canvas');
+    /**
+     * 描いたページは「直近 MAX_DRAWN_PAGES 枚」だけ残す。
+     *
+     * 交差の監視は状態が**変わったとき**しか通知しないので、「画面から
+     * 6 画面ぶん離れたら手放す」という条件はそもそも発火しない（離れた瞬間は
+     * 必ず 1 画面ぶんの距離しかない）。200 ページを普通にスクロールするだけで
+     * キャンバスが 111 枚・477MB 積み上がっていた。件数で抑える方が確実。
+     */
+    const drawn = new Map<number, HTMLElement>();
+    const release = (pageNumber: number): void => {
+      const container = drawn.get(pageNumber);
+      drawn.delete(pageNumber);
+      const canvas = container?.querySelector('canvas');
       if (!canvas) return;
       // 実体を手放す。width=0 にしないと、要素を外してもピクセルは解放されない。
       canvas.width = 0;
       canvas.height = 0;
       canvas.remove();
-      drawn.delete(pageNumber);
+    };
+    const evict = (keep: number): void => {
+      while (drawn.size > MAX_DRAWN_PAGES) {
+        const oldest = [...drawn.keys()].find((page) => page !== keep);
+        if (oldest === undefined) return;
+        release(oldest);
+      }
+    };
+    const draw = async (container: HTMLElement, pageNumber: number): Promise<void> => {
+      if (drawn.has(pageNumber) || token !== renderToken) return;
+      drawn.set(pageNumber, container);
+      try {
+        const canvas = await renderPageCanvas(pdf, pageNumber, cssWidth);
+        if (token !== renderToken) return;
+        container.prepend(canvas);
+        evict(pageNumber);
+        if (needsMissingResources()) showResourceWarning();
+      } catch {
+        drawn.delete(pageNumber);
+      }
+    };
+
+    // 選んだ文のページは、観測の通知を待たずに描く。待つと、飛んだ直後に
+    // 真っ白な枠だけが見える時間ができる。
+    drawPage = (pageNumber: number): void => {
+      const container = pdfColumn.querySelector(`.lxv-page[data-page="${pageNumber}"]`);
+      if (container instanceof HTMLElement) void draw(container, pageNumber);
     };
 
     pageObserver = new IntersectionObserver(
@@ -260,10 +305,11 @@ function boot(): void {
           const container = entry.target as HTMLElement;
           const pageNumber = Number(container.dataset['page']);
           if (entry.isIntersecting) void draw(container, pageNumber);
-          else if (Math.abs(entry.boundingClientRect.top) > window.innerHeight * 6) release(container, pageNumber);
         }
       },
-      { root: null, rootMargin: '800px 0px' },
+      // root は実際にスクロールする要素にする。ここを null にすると rootMargin が
+      // 効かず（画面外は段組の overflow で切られている）、先読みが一切起きない。
+      { root: pdfColumn, rootMargin: '900px 0px' },
     );
 
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
@@ -303,6 +349,14 @@ function boot(): void {
       pdfColumn.append(container);
       pageObserver.observe(container);
     }
+  }
+
+  /** 描画が途中で落ちても、理由を画面に出す（白いだけの欄を残さない）。 */
+  function reportRenderFailure(error: unknown): void {
+    pdfColumn.textContent = '';
+    pdfColumn.append(
+      el('p', 'lxv-status', `PDF を表示できませんでした: ${error instanceof Error ? error.message : String(error)}`),
+    );
   }
 
   let resourceWarningShown = false;
@@ -378,14 +432,14 @@ function boot(): void {
     lastWidth = width;
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      void renderPdf().then(applyFilter);
+      void renderPdf().then(applyFilter).catch(reportRenderFailure);
     }, RESIZE_DEBOUNCE_MS);
   });
 
   lastWidth = pdfColumn.clientWidth;
   // ここまで来たら画面は組み上がっている。静的フォールバックを外してよい。
   if (staticFallback) staticFallback.remove();
-  void renderPdf();
+  void renderPdf().catch(reportRenderFailure);
 }
 
 /**

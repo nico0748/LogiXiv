@@ -20,10 +20,6 @@ import { LogiXivClient } from './client.ts';
  *    人間向けの文章に混ぜない。
  */
 
-function textResult(text: string) {
-  return { content: [{ type: 'text' as const, text }] };
-}
-
 function jsonResult(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
 }
@@ -43,18 +39,38 @@ function errorResult(error: unknown) {
  * その後の窓に一度も現れなかった。長い作業で文脈が圧縮されると、
  * 自分で決めた訳語を自分で忘れることになる。
  */
-const lastGlossarySignature = new Map<string, string>();
+type Glossary = { term: string; translation: string; note: string | null }[];
 
-function glossaryIfChanged(
-  documentId: string,
-  glossary: { term: string; translation: string; note: string | null }[],
-  force: boolean,
-): typeof glossary | undefined {
-  if (glossary.length === 0) return undefined;
-  const signature = JSON.stringify(glossary);
-  const changed = lastGlossarySignature.get(documentId) !== signature;
-  lastGlossarySignature.set(documentId, signature);
-  return force || changed ? glossary : undefined;
+function makeGlossaryTracker() {
+  // 接続ごとに持つ。プロセスで共有すると、同じ文書を別のセッションが
+  // 途中から開いたときに「もう送った」扱いになり、用語集が一度も届かない。
+  const seen = new Map<string, string>();
+  return (documentId: string, glossary: Glossary, force: boolean): Glossary | undefined => {
+    const signature = JSON.stringify(glossary);
+    const changed = seen.get(documentId) !== signature;
+    // 空でも記録する。記録せずに帰ると、消して同じ内容に戻したときに
+    // 「変わっていない」と見なされ、以後ずっと送られなくなる。
+    seen.set(documentId, signature);
+    if (glossary.length === 0) return undefined;
+    return force || changed ? glossary : undefined;
+  };
+}
+
+/**
+ * 「同じところで足踏みしていないか」を見る。
+ *
+ * 末尾から先頭へ回り込むようにしたので完了の誤報は消えたが、代わりに
+ * 同じ文を保留し続けると同じ窓を延々と取り直す形になった。進んでいないことは
+ * 呼び出し側より server の方が確実に分かるので、こちらから伝える。
+ */
+function makeProgressWatcher() {
+  const last = new Map<string, { from: number; remaining: number; times: number }>();
+  return (documentId: string, from: number, remaining: number): boolean => {
+    const previous = last.get(documentId);
+    const same = previous !== undefined && previous.from === from && previous.remaining === remaining;
+    last.set(documentId, { from, remaining, times: same ? previous.times + 1 : 0 });
+    return same;
+  };
 }
 
 function fallbackCaveat(document: PaperDocument): string | undefined {
@@ -86,6 +102,8 @@ function sentenceView(document: PaperDocument, sentence: Sentence) {
 
 export function createMcpServer(baseUrl: string): McpServer {
   const client = new LogiXivClient(baseUrl);
+  const glossaryIfChanged = makeGlossaryTracker();
+  const noteProgress = makeProgressWatcher();
   const server = new McpServer(
     { name: 'logixiv', version: LOGIXIV_VERSION },
     {
@@ -116,12 +134,16 @@ export function createMcpServer(baseUrl: string): McpServer {
           client.health().catch(() => null),
         ]);
         if (documents.length === 0) {
-          return textResult(
-            '取り込み済みの論文がありません。LogiXiv の画面（既定では http://127.0.0.1:4173）を開いて PDF をドラッグしてください。' +
+          // 返りの形は常に JSON。1 か所でも平文を混ぜると、素直に JSON.parse する
+          // 呼び出し側がその 1 か所で落ちる。
+          return jsonResult({
+            documents: [],
+            hint:
+              '取り込み済みの論文がありません。LogiXiv の画面（既定では http://127.0.0.1:4173）を開いて PDF をドラッグしてください。' +
               (health?.grobid === 'down'
-                ? '\nGROBID が未接続です。精度の高い文分割には docker compose -f docker/grobid.yml up -d を先に実行してください。'
+                ? ' GROBID が未接続です。精度の高い文分割には docker compose -f docker/grobid.yml up -d を先に実行してください。'
                 : ''),
-          );
+          });
         }
         return jsonResult({
           documents,
@@ -199,13 +221,18 @@ export function createMcpServer(baseUrl: string): McpServer {
         if (section_id) {
           const known = document.structure.sections.some((s) => s.id === section_id);
           if (!known) {
-            return textResult(
-              `節 ${section_id} はこの文書にありません。${
-                document.structure.sections.length === 0
+            return jsonResult({
+              matched: 0,
+              returned: 0,
+              nextFrom: null,
+              sentences: [],
+              sections: document.structure.sections.map((s) => s.id),
+              hint:
+                `節 ${section_id} はこの文書にありません。` +
+                (document.structure.sections.length === 0
                   ? (fallbackCaveat(document) ?? '節が 1 つも検出されていません。')
-                  : `使える節: ${document.structure.sections.map((s) => s.id).join(', ')}`
-              }`,
-            );
+                  : `使える節は sections にあります。`),
+            });
           }
           sentences = sentences.filter((s) => s.sectionId === section_id);
         }
@@ -214,11 +241,20 @@ export function createMcpServer(baseUrl: string): McpServer {
         // from は order。フィルタ後の添字ではない。
         const slice = sentences.filter((s) => s.order >= from).slice(0, limit);
         const last = slice[slice.length - 1];
+        const orders = sentences.map((s) => s.order);
         return jsonResult({
           matched: sentences.length,
           returned: slice.length,
           nextFrom: last && sentences.some((s) => s.order > last.order) ? last.order + 1 : null,
           sentences: slice.map((sentence) => sentenceView(document, sentence)),
+          // 0 件には「該当が無い」と「from が範囲の外」の 2 通りがある。
+          // 区別できないと、呼び出し側は前者だと思って諦める。
+          hint:
+            slice.length > 0
+              ? undefined
+              : sentences.length === 0
+                ? '条件に合う文がありません。'
+                : `from=${from} は範囲の外です（order は ${Math.min(...orders)}〜${Math.max(...orders)}）。`,
         });
       } catch (error) {
         return errorResult(error);
@@ -240,9 +276,13 @@ export function createMcpServer(baseUrl: string): McpServer {
         document_id: z.string(),
         from: z.number().int().min(0).default(0).describe('開始する文の通し番号 (order)'),
         limit: z.number().int().min(1).max(120).default(40).describe('返す文の総数（未訳・既訳の両方を含む）'),
+        include_translations: z
+          .boolean()
+          .default(false)
+          .describe('既訳の訳文も返す。既定は false（自分が書いた訳文を読み返す必要は普通ない）'),
       },
     },
-    async ({ document_id, from, limit }) => {
+    async ({ document_id, from, limit, include_translations }) => {
       try {
         const document = await client.getDocument(document_id);
         const all = document.structure.sentences;
@@ -251,6 +291,7 @@ export function createMcpServer(baseUrl: string): McpServer {
         // 訳は hash に付くので、残件は「異なり文」で数える。延べ数で数えると、
         // 1 つの hash を訳しただけで残りが 15 減り、進捗が説明できなくなる。
         const remainingUnique = new Set(remaining.map((s) => s.hash)).size;
+        const stalled = noteProgress(document_id, from, remainingUnique);
 
         if (window.length === 0) {
           // 返り値の形は必ず JSON にする。ここだけ平文を返すと、
@@ -308,6 +349,11 @@ export function createMcpServer(baseUrl: string): McpServer {
           // 用語集は「変わったとき」に返す。最初の 1 回だけだと、途中で足した訳語が
           // 長い作業の間に一度も戻ってこない。
           glossary: glossaryIfChanged(document_id, document.annotations.glossary, from === 0),
+          /**
+           * 前回と同じ窓を、残件も変わらないまま取り直している。
+           * 保留を続けても先へは進まないので、訳すか skip_sentences に渡すこと。
+           */
+          noProgress: stalled || undefined,
           /** 未訳の延べ数（同じ本文が複数回出ればその数だけ数える）。 */
           remainingUntranslated: remaining.length,
           /** 未訳の異なり文の数。訳はこの単位で付くので、作業量はこちら。 */
@@ -315,12 +361,20 @@ export function createMcpServer(baseUrl: string): McpServer {
           nextFrom: all.some((s) => s.order > last.order) ? last.order + 1 : null,
           /** 次に見るべき位置。末尾まで来たら先頭へ回り込む。null は「未訳ゼロ」。 */
           nextUntranslatedFrom: nextUntranslated?.order ?? null,
-          // 連続する本文。文脈はこの並びそのもの。[order, hash, 原文, 訳?]
+          /**
+           * 連続する本文。文脈はこの並びそのもの。`[order, hash, 原文]`、
+           * 既に訳のある文は `[order, hash, 原文, 1]`（訳文そのものは返さない）。
+           *
+           * 既訳の訳文を毎回返していた頃は、受信の 4 割強が「自分が書いた日本語の
+           * 読み返し」だった。文脈に要るのは原文で、訳語の統一は用語集が担う。
+           * どうしても要るときだけ include_translations で取る。
+           */
           window: window.map((sentence) => {
             const translation = document.annotations.translations[sentence.hash];
-            return translation
+            if (!translation) return [sentence.order, sentence.hash, sentence.text];
+            return include_translations
               ? [sentence.order, sentence.hash, sentence.text, translation.text]
-              : [sentence.order, sentence.hash, sentence.text];
+              : [sentence.order, sentence.hash, sentence.text, 1];
           }),
           // この窓のうち訳す必要があるものの order。同じ本文は最初の 1 つだけ。
           untranslated,
@@ -383,11 +437,18 @@ export function createMcpServer(baseUrl: string): McpServer {
           // 別のセッションが先に訳を入れていたときに、何が置き換わったか分からなくなる。
           hints.push(`${result.overwritten} 件は既にあった訳を置き換えました。`);
         }
+        // 残りを一緒に返す。これが無いと、最後の 1 文を書いた後に「本当に終わったか」
+        // を確かめるためだけの往復が毎回 1 回増える（しかも窓が丸ごと返ってくる）。
+        const after = await client.getDocument(document_id);
+        const left = after.structure.sentences.filter((s) => needsTranslation(after, s));
         return jsonResult({
           applied: result.applied,
           created: result.created,
           overwritten: result.overwritten,
           sentencesAffected: result.sentencesAffected,
+          /** 未訳の異なり文の数。0 になったら翻訳は終わり。 */
+          remainingUnique: new Set(left.map((s) => s.hash)).size,
+          nextUntranslatedFrom: left[0]?.order ?? null,
           // 打ち切らない。120 件上限なので全件出しても小さい。
           skipped: result.skipped,
           hint: hints.length > 0 ? hints.join(' ') : undefined,
@@ -418,7 +479,7 @@ export function createMcpServer(baseUrl: string): McpServer {
         if (!note.applied) {
           return errorResult(new Error(`メモを追加できませんでした: ${note.reason ?? '不明'}`));
         }
-        return textResult(`メモを追加しました (${note.id})`);
+        return jsonResult({ applied: true, noteId: note.id });
       } catch (error) {
         return errorResult(error);
       }
@@ -498,12 +559,18 @@ export function createMcpServer(baseUrl: string): McpServer {
         }
         if (mode === 'replace') {
           const result = await client.replaceGlossary(document_id, entries);
-          return textResult(`用語集を ${result.total} 件で置き換えました（既存の内容は消えました）。`);
+          return jsonResult({
+            total: result.total,
+            hint: `用語集を ${result.total} 件で置き換えました（既存の内容は消えました）。`,
+          });
         }
         const result = await client.addGlossaryEntries(document_id, entries);
-        return textResult(
-          `用語集を更新しました（新規 ${result.added} / 訳語の変更 ${result.updated} / 合計 ${result.total} 件）。`,
-        );
+        return jsonResult({
+          added: result.added,
+          updated: result.updated,
+          total: result.total,
+          hint: `用語集を更新しました（新規 ${result.added} / 訳語の変更 ${result.updated} / 合計 ${result.total} 件）。`,
+        });
       } catch (error) {
         return errorResult(error);
       }
@@ -531,7 +598,14 @@ export function createMcpServer(baseUrl: string): McpServer {
       try {
         if (undo) {
           const result = await client.unskipSentences(document_id, sentence_hashes);
-          return jsonResult({ restored: result.applied, remainingUnique: result.remaining });
+          // 片方の分岐だけ形が違うと、片方を覚えた呼び出し側がもう片方で落ちる。
+          return jsonResult({
+            skipped: 0,
+            restored: result.applied,
+            unknownHashes: [],
+            alreadyTranslated: [],
+            remainingUnique: result.remaining,
+          });
         }
         const result = await client.skipSentences(document_id, sentence_hashes, reason);
         const hints: string[] = [];
@@ -541,11 +615,12 @@ export function createMcpServer(baseUrl: string): McpServer {
         if (result.alreadyTranslated?.length > 0) {
           hints.push(
             `${result.alreadyTranslated.length} 件は既に訳が付いているので対象外にしませんでした` +
-              '（外したいなら先に訳を消す必要があります）。',
+              '（外したいなら、先に画面側で訳を消す必要があります）。',
           );
         }
         return jsonResult({
           skipped: result.applied,
+          restored: 0,
           unknownHashes: result.unknown,
           alreadyTranslated: result.alreadyTranslated ?? [],
           /** 未訳の異なり文の数。get_translation_batch の remainingUnique と同じ数え方。 */
@@ -670,7 +745,9 @@ export function createMcpServer(baseUrl: string): McpServer {
         }
         // 再解析で文の区切りが変わると order も hash も動く。作業中の位置を
         // 平文で「気をつけて」と書いても伝わらないので、再開位置を数で返す。
-        const outline = await client.getDocument(document_id);
+        // 再解析の応答に文書そのものが入っている。取り直すと転送が二重になるうえ、
+        // 2 回の読みの間に別の書き込みが挟まる隙間ができる。
+        const outline = result.document;
         const remaining = outline.structure.sentences.filter((s) => needsTranslation(outline, s));
         lines.push('以前の order と hash は無効です。下の firstUntranslatedOrder から取り直してください。');
         return jsonResult({

@@ -149,3 +149,15 @@ MCP を stdio で起動し、`initialize` → `tools/list`（`TOOL_NAMES` と一
 
 同じ本文の文は `untranslated` に 1 回しか出ない（残りは `duplicateOf` に載る）。
 同じ訳を 2 回作らないためで、1 回書けば全出現に反映される。
+
+窓の行は `[order, hash, 原文]`、既に訳のある文は `[order, hash, 原文, 1]` になる。
+**自分が書いた訳文は返さない。** 返していた頃は受信の 4 割強が日本語の読み返しで、
+文脈として要るのは原文の並びだけだった。訳語の統一は用語集が担う。
+どうしても要るときは `include_translations: true` を渡す。
+
+`set_translations` は書き込みの結果と一緒に `remainingUnique` を返す。
+最後の 1 文を書いたあと、終わったかどうかを確かめるためだけに
+`get_translation_batch` をもう一度呼ぶ必要はない。
+
+同じ位置を残件も変わらないまま取り直すと `noProgress: true` が付く。
+保留を続けても先へは進まないので、訳すか `skip_sentences` に渡すこと。

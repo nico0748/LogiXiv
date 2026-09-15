@@ -1,6 +1,6 @@
 import type { Annotations, PaperDocument } from './types.ts';
 import { EXPORT_DATA_ELEMENT_ID } from './export.ts';
-import { decodeEntities, findTagEnd } from './xml.ts';
+import { decodeEntities } from './xml.ts';
 import { newId } from './hash.ts';
 import { sanitizeAnnotations, sanitizeDocument, emptySanitizeReport, isRecord, type SanitizeReport } from './validate.ts';
 
@@ -53,22 +53,85 @@ function parseHtmlAttrs(source: string): Record<string, string> {
   return attrs;
 }
 
+/**
+ * 開始タグの終わりを探す。**HTML の状態機械に従う。**
+ *
+ * XML 用の findTagEnd は引用符を無条件に区切りとして扱うので、
+ * `id=logixiv-data data-x=a'b>` のように引用符なしの値に `'` が混ざると
+ * そこから引用中だと思い込み、タグの終わりを見失う。
+ * ブラウザは `'` を値の一部として読むので、そこで両者の見え方が割れる。
+ */
+function findHtmlTagEnd(html: string, start: number): number {
+  let quote: '"' | "'" | null = null;
+  let expectingValue = false;
+  for (let i = start; i < html.length; i++) {
+    const ch = html[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '=') {
+      expectingValue = true;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      // 値の開始位置にある引用符だけが区切り。値の途中の `'` はただの文字。
+      if (expectingValue) quote = ch;
+      expectingValue = false;
+      continue;
+    }
+    if (ch === '>') return i;
+    if (!/\s/.test(ch)) expectingValue = false;
+  }
+  return -1;
+}
+
+/**
+ * ブラウザから見えない領域を飛ばす。
+ *
+ * コメントの中と <template> の中は、`document.querySelectorAll` が返さない。
+ * ここを読んでしまうと、ブラウザには 1 つしか見えない文書を
+ * 「データが 2 個あるので取り込めない」と断ったり、逆に仕掛けられた偽の payload を
+ * 本物として読んだりする。生テキスト要素（textarea・title・noscript）も同じ理由で飛ばす。
+ */
+const HIDDEN_REGIONS: { open: RegExp; close: string }[] = [
+  { open: /^<!--/, close: '-->' },
+  { open: /^<template[\s>]/, close: '</template' },
+  { open: /^<textarea[\s>]/, close: '</textarea' },
+  { open: /^<title[\s>]/, close: '</title' },
+  { open: /^<noscript[\s>]/, close: '</noscript' },
+];
+
 function findDataScripts(html: string): FoundScript[] {
   // 走査は小文字化した写しの上で行う（位置は元の文字列と 1 対 1 で対応する）。
   const lower = html.toLowerCase();
   const found: FoundScript[] = [];
   let cursor = 0;
-  for (;;) {
-    const open = lower.indexOf('<script', cursor);
+
+  while (cursor < html.length) {
+    const open = lower.indexOf('<', cursor);
     if (open === -1) break;
-    const tagEnd = findTagEnd(html, open);
-    if (tagEnd === -1) break;
-    // '<script' の直後が名前の続きでないこと（<scripting> のような要素を拾わない）。
-    const afterName = lower[open + 7];
-    if (afterName !== undefined && /[a-z0-9_-]/.test(afterName)) {
+
+    const hidden = HIDDEN_REGIONS.find((region) => region.open.test(lower.slice(open, open + 12)));
+    if (hidden) {
+      const end = lower.indexOf(hidden.close, open + 1);
+      cursor = end === -1 ? html.length : end + hidden.close.length;
+      continue;
+    }
+
+    if (!lower.startsWith('<script', open) || /[a-z0-9_-]/.test(lower[open + 7] ?? '')) {
+      cursor = open + 1;
+      continue;
+    }
+
+    const tagEnd = findHtmlTagEnd(html, open + 7);
+    if (tagEnd === -1) {
+      // 読めないタグでも走査は止めない。1 つの壊れたタグで残り全部が見えなくなると、
+      // その後ろにある本物のデータを見落とす。
       cursor = open + 7;
       continue;
     }
+
     const attrs = parseHtmlAttrs(html.slice(open + 7, tagEnd));
     const close = lower.indexOf('</script', tagEnd + 1);
     const bodyEnd = close === -1 ? html.length : close;

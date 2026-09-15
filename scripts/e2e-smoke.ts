@@ -379,6 +379,42 @@ try {
   assert.ok(typeof beyondPayload.hint === 'string');
   step('範囲外の from でも JSON で返る');
 
+  // set_translations が残件を返すので、「終わったか」を確かめるためだけの往復は要らない。
+  const writeBack = allPayload.untranslated.slice(0, 2).map((order) => {
+    const row = allPayload.window.find((r) => Number(r[0]) === order)!;
+    return { sentenceHash: String(row[1]), text: `訳 ${order}` };
+  });
+  send({
+    jsonrpc: '2.0',
+    id: 13,
+    method: 'tools/call',
+    params: { name: 'set_translations', arguments: { document_id: id, translations: writeBack } },
+  });
+  const written = (await waitFor(13)) as { result: { content: { text: string }[] } };
+  const writtenPayload = JSON.parse(written.result.content[0]!.text) as {
+    applied: number;
+    created: number;
+    remainingUnique: number;
+  };
+  assert.equal(writtenPayload.applied, writeBack.length);
+  assert.equal(writtenPayload.created, writeBack.length);
+  assert.equal(typeof writtenPayload.remainingUnique, 'number', 'set_translations が残件を返していない');
+  step(`set_translations が残件（${writtenPayload.remainingUnique}）まで返す`);
+
+  // 窓は自分が書いた訳文を読み返させない（受信の 4 割強を占めていた）。
+  send({
+    jsonrpc: '2.0',
+    id: 14,
+    method: 'tools/call',
+    params: { name: 'get_translation_batch', arguments: { document_id: id, from: 0, limit: 120 } },
+  });
+  const lean = (await waitFor(14)) as { result: { content: { text: string }[] } };
+  const leanPayload = JSON.parse(lean.result.content[0]!.text) as { window: unknown[][] };
+  const translatedRow = leanPayload.window.find((row) => row.length === 4);
+  assert.ok(translatedRow, '前提: 既訳の行がある');
+  assert.equal(translatedRow![3], 1, '既訳の訳文が窓に載っている（読み返す必要はない）');
+  step('既訳の行は印だけで返る（訳文を読み返させない）');
+
   mcp.kill('SIGTERM');
   sseController.abort();
 } catch (error) {

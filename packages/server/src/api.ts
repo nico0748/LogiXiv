@@ -515,8 +515,10 @@ export class LogiXivApi {
 
   async search(id: string, query: string, limit = 30, from = 0) {
     const document = await this.require(id);
-    // 総数を出すため、上限より多めに取ってから切り出す。
-    const all = searchDocument(document, query, from + limit + 1);
+    // 総数は打ち切らずに数える。以前は from+limit+1 までしか走査していなかったので、
+    // total が limit に連動する（limit=5 なら 6、limit=200 なら 201）ただの上限値だった。
+    // 走査は線形なので、全件見ても論文 1 本ぶんなら問題にならない。
+    const all = searchDocument(document, query, Number.POSITIVE_INFINITY);
     const page = all.slice(from, from + limit);
     return {
       total: all.length,

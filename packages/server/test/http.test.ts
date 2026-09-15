@@ -288,13 +288,51 @@ test('用語集は POST で追記でき、PUT で置換になる', async () => {
   const replaced = await fetch(`${baseUrl}/api/documents/${id}/glossary`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ entries: [] }),
+    body: JSON.stringify({ entries: [{ term: 'only', translation: 'これだけ' }] }),
   });
   assert.equal(replaced.status, 200);
   const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
-    annotations: { glossary: unknown[] };
+    annotations: { glossary: { term: string }[] };
   };
-  assert.equal(document.annotations.glossary.length, 0);
+  assert.deepEqual(
+    document.annotations.glossary.map((entry) => entry.term),
+    ['only'],
+  );
+
+  // 空配列での置換は断る。確認も無く用語集が消えるのは、取り返しがつかない操作。
+  const wiped = await fetch(`${baseUrl}/api/documents/${id}/glossary`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries: [] }),
+  });
+  assert.equal(wiped.status, 400);
+});
+
+test('空の訳は入口で断る（永久に「訳し終わった」ことにしない）', async () => {
+  const id = await ingest();
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  const hash = document.structure.sentences[0]!.hash;
+
+  const single = await fetch(`${baseUrl}/api/documents/${id}/translations/${hash}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: '   ', source: 'human' }),
+  });
+  assert.equal(single.status, 400);
+
+  const batch = await fetch(`${baseUrl}/api/documents/${id}/translations`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries: [{ sentenceHash: hash, text: '' }] }),
+  });
+  assert.equal(batch.status, 400);
+
+  const after = (await (await fetch(`${baseUrl}/api/documents/${id}/untranslated?limit=5`)).json()) as {
+    sentences: { sentenceHash: string }[];
+  };
+  assert.ok(after.sentences.some((s) => s.sentenceHash === hash), '空の訳で未訳から外れている');
 });
 
 test('hash から文を引ける', async () => {
