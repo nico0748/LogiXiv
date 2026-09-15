@@ -2,6 +2,8 @@ import type {
   Annotations,
   DocumentStructure,
   GlossaryEntry,
+  NonBodyKind,
+  NonBodySentence,
   Note,
   PaperDocument,
   Sentence,
@@ -12,6 +14,7 @@ import type {
 import { emptyAnnotations } from './types.ts';
 import { newId } from './hash.ts';
 import { applySentenceEdit, revertSentenceEdit, SentenceEditError } from './edits.ts';
+import { placeNonBody } from './nonbody.ts';
 
 export interface CreateDocumentInput {
   structure: DocumentStructure;
@@ -466,12 +469,23 @@ export function progress(document: PaperDocument): Progress {
  * 文書内の全文検索。原文・訳文・メモを横断する。
  * ヒットには訳文とメモも入れる（訳語の揺れを探すのが主な用途なのに、
  * 原文しか返らないと「どの訳語が使われているか」を確認するためにもう一往復要る）。
+ *
+ * 本文として扱わなかった行（参考文献・キャプション・脚注など）も探す。
+ * これらは画面にカードとして**現に出ている**のに検索だけが拾わず、同じ画面が
+ * 「[1] … NeurIPS, 2024. が在る」と「一致する文がありません」を同時に言っていた。
+ * ただし訳の対象ではないので、呼び出し側が本文と区別できる形で返す（isBody）。
  */
 export interface SearchHit {
   sentence: Sentence;
   where: ('source' | 'translation' | 'note')[];
   translation: string | null;
   notes: string[];
+  /** 訳の対象である本文か。false は参考文献などの「訳さない行」。 */
+  isBody: boolean;
+  /** 本文でないときだけ、その種類（本文なら null）。 */
+  nonBodyKind: NonBodyKind | null;
+  /** 本文でないときだけ、直前に来る本文の通し番号（本文より前なら -1）。 */
+  afterOrder: number | null;
 }
 
 export function searchDocument(document: PaperDocument, query: string, limit = 30): SearchHit[] {
@@ -485,7 +499,27 @@ export function searchDocument(document: PaperDocument, query: string, limit = 3
   }
 
   const hits: SearchHit[] = [];
+  // 結果は読み順に並べる。本文だけ先に全部出して付物を後ろにまとめると、
+  // 「その行が紙面のどこにあるか」が結果からは分からなくなる。
+  const { head, after } = placeNonBody(document.structure.sentences, document.structure.nonBody);
+
+  const pushNonBody = (item: NonBodySentence): void => {
+    if (hits.length >= limit) return;
+    if (!item.text.toLowerCase().includes(needle)) return;
+    hits.push({
+      sentence: item,
+      where: ['source'],
+      translation: null,
+      notes: [],
+      isBody: false,
+      nonBodyKind: item.kind,
+      afterOrder: item.afterOrder,
+    });
+  };
+
+  for (const item of head) pushNonBody(item);
   for (const sentence of document.structure.sentences) {
+    if (hits.length >= limit) break;
     const where: ('source' | 'translation' | 'note')[] = [];
     if (sentence.text.toLowerCase().includes(needle)) where.push('source');
     const translation = document.annotations.translations[sentence.hash] ?? null;
@@ -494,9 +528,17 @@ export function searchDocument(document: PaperDocument, query: string, limit = 3
     const matchedNotes = notes.filter((body) => body.toLowerCase().includes(needle));
     if (matchedNotes.length > 0) where.push('note');
     if (where.length > 0) {
-      hits.push({ sentence, where, translation: translation?.text ?? null, notes: matchedNotes });
+      hits.push({
+        sentence,
+        where,
+        translation: translation?.text ?? null,
+        notes: matchedNotes,
+        isBody: true,
+        nonBodyKind: null,
+        afterOrder: null,
+      });
     }
-    if (hits.length >= limit) break;
+    for (const item of after.get(sentence.id) ?? []) pushNonBody(item);
   }
   return hits;
 }

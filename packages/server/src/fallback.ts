@@ -124,9 +124,12 @@ export async function parseWithPdfJs(
   // nonBody は「PDF には見えているのに右に出てこない行」（参考文献・表・柱・著者行など）。
   // 落とすこと自体は正しいが、落としたことが見えないと
   // 「まだ訳が来ていないのか、自分が見落としたのか」が区別できない。
-  const { sentences, sections, nonBody } = buildSentencesFromChunks(output.chunks, output.pageSizes);
+  const { sentences, sections, nonBody, quality } = buildSentencesFromChunks(output.chunks, output.pageSizes);
 
   const warnings: string[] = [];
+  // 崩れの疑いは、節の件数より先に出す。ここが「簡易解析」の一言で終わっていたせいで、
+  // 完璧に取れた文書と 3 分の 1 しか取れていない文書が同じ顔で並んでいた。
+  if (quality.readingOrderRisk === 'high') warnings.push(`読み順に崩れの疑い: ${quality.reason}`);
   if (sections.length > 0) warnings.push(`節 ${sections.length} 件を検出`);
   if (output.truncatedPages > 0) warnings.push(`先頭 ${limits.maxPages} ページだけを解析（残り ${output.truncatedPages} ページは未処理）`);
   if (output.truncatedChunks) warnings.push('文字数の上限に達したため途中で打ち切り');
@@ -146,5 +149,6 @@ export async function parseWithPdfJs(
     sections,
     sentences,
     nonBody,
+    quality,
   };
 }

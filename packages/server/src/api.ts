@@ -855,12 +855,20 @@ export class LogiXivApi {
       hits: page.map((hit) => ({
         sentenceId: hit.sentence.id,
         sentenceHash: hit.sentence.hash,
-        order: hit.sentence.order,
+        // 本文として扱わなかった行には本文の通し番号が無い。付物の並び順を order として
+        // 返すと本文の番号と混ざるので、null にして afterOrder（直前の本文）で位置を示す。
+        order: hit.isBody ? hit.sentence.order : null,
         page: hit.sentence.page,
         text: hit.sentence.text,
         translation: hit.translation,
         notes: hit.notes,
         where: hit.where,
+        // 訳せる文かどうかを機械的に分かる形で返す。画面には出ているのに
+        // 検索が拾わなかった行（参考文献など）をここで拾えるようにしたぶん、
+        // 受け取った側が「訳してよい文」と取り違えないための印が要る。
+        isBody: hit.isBody,
+        nonBodyKind: hit.nonBodyKind,
+        afterOrder: hit.afterOrder,
       })),
     };
   }

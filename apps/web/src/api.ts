@@ -84,6 +84,11 @@ export interface PaperDocument {
      * 出さないと「左の PDF に見えているのに右に無い」が説明なしに起きる。
      */
     nonBody?: NonBodySentence[];
+    /**
+     * 解析結果の確からしさ。`high` は「読み順が壊れている痕跡が実際に見つかった」。
+     * `low` は痕跡が無かっただけで、崩れが無いことの保証ではない。
+     */
+    quality?: { readingOrderRisk: 'low' | 'high'; reason: string };
   };
   annotations: {
     translations: Record<string, Translation>;

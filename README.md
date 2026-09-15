@@ -62,6 +62,28 @@ docker compose -f docker/grobid.yml up -d      # http://localhost:8070
 `LOGIXIV_GROBID_URL` で別のホストを指せる。GROBID に届かないときは pdf.js による
 簡易解析に自動で切り替わり、その旨が UI のバッジと `parserNote` に出る。
 
+#### 簡易解析で何が起きうるか
+
+簡易解析は当たり外れがある。よく当たるが、**2 段組の左右が語単位で噛み合う**ことがある。
+
+```
+"Standard Retrieval-augmented systems concatenate dozens of doc-
+ attention computes uments into a single prompt, and agentic systems accu-"
+```
+
+こうなると原文そのものが壊れているので、`fix_sentence_boundary`（結合・分割）では戻せない。
+GROBID を立てて再解析するのが唯一の道になる。
+
+**この状態は自動で検出して申告する。** 痕跡が見つかると、ツールバーに
+「読み順に崩れの疑い」が出て、`parserNote`・MCP の `caveat`・書き出し HTML にも乗る。
+検出されないこと（`low`）は崩れが無いことの保証ではないが、
+少なくとも**崩れているのに黙っている**状態は無くしてある。
+
+精度そのものは `npm run measure` で測っている。合成 PDF 14 本に加えて、
+`pdflatex` で組んだ実物の論文 3 本（`scripts/real-papers/`）を正解つきで通す。
+合成 PDF だけを測っていた頃は、実物の壊れ方を 1 つも再現できないまま
+「14 シナリオすべて 100%」と表示していた。
+
 ### Claude から使う（MCP）
 
 **画面の「訳す」ボタンを押すのが確実。** 絶対パス入りの設定と、貼り先のファイル、
@@ -181,7 +203,8 @@ GROBID を上げた状態で確認したいときは `LOGIXIV_GROBID_URL` を指
 ## 既知の制約
 
 - スキャン PDF（画像のみ）は扱えない。先に OCR を通す必要がある
-- 書き出し HTML は大きい（PDF + ビューア約 1.8MB）。PDF 60MB 超は書き出せない
+- 書き出し HTML は大きい（PDF + ビューア約 1.8MB）。PDF 100MB 超は書き出せない
+  （書き出せない文書は、取り込んだ時点で一覧とツールバーに出る）
 - 回転ページや特殊な CropBox で座標がずれ得る
 - フォールバック経路のマーカーは**行単位**。1 行に 2 文あると両方が同じ範囲で光る
   （GROBID 経路は文単位の座標なのでこの制約は無い）

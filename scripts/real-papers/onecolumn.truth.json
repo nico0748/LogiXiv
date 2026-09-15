@@ -1,0 +1,36 @@
+{
+  "expectedSentences": [
+    "These notes collect the design decisions behind the block selection rule.",
+    "They are written for readers who have already seen the main paper and want the details.",
+    "We cover the choice of block size, the treatment of padding and the cost of the selection pass.",
+    "The block size controls the trade off between the cost of selection and the granularity of the pattern.",
+    "Small blocks approximate dense attention closely but make the selection matrix large.",
+    "Large blocks make the selection cheap and force the kernel to read positions it does not need.",
+    "We measured both effects on a single node with eight accelerators.",
+    "A block size of sixty four was the best compromise on that hardware.",
+    "The optimal block size depends on the memory system rather than on the model.",
+    "On a machine with a larger cache the optimum moved to one hundred and twenty eight.",
+    "We therefore expose the block size as a configuration value rather than hard coding it.",
+    "Sequences rarely divide evenly into blocks, so the last block is padded.",
+    "Padded positions are given a summary of zero and a score of negative infinity.",
+    "This keeps the padded block out of the retained set without a separate branch in the kernel.",
+    "The same trick is used for the causal mask inside a retained block.",
+    "The cost of the selection pass is the product of the number of query blocks and key blocks.",
+    "Here n is the sequence length, b is the block size and d is the head dimension.",
+    "The selection rule is simple enough that it can be reimplemented in an afternoon.",
+    "Most of the engineering effort went into the fused kernel rather than into the rule itself.",
+    "We expect better summaries to matter more than a better selection rule [1].",
+    "A learned summary would add parameters, which we wanted to avoid for this release.",
+    "Every number in these notes is the mean of five runs.",
+    "We discard the first run of each configuration because it includes kernel compilation.",
+    "The machine was otherwise idle and the clocks were locked to their base frequency."
+  ],
+  "expectedNonBody": [
+    "Notes on Selecting Attention Blocks",
+    "Mei Tanaka",
+    "Cost of the selection pass in percent of a dense attention call, and accuracy on the held out split.",
+    "Sparse Attention Notes",
+    "[1] M. Tanaka. Block structured kernels. In Proc. ICML, pages 991–1002, 2023.",
+    "[2] R. Roe. Efficient attention in practice. Journal of ML, 12(3):45–67, 2025."
+  ]
+}

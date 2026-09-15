@@ -1,6 +1,6 @@
-import type { NonBodySentence, PageSize, Rect, Sentence, Section } from './types.ts';
+import type { NonBodySentence, PageSize, Rect, Sentence, Section, StructureQuality } from './types.ts';
 import { sentenceHash, sentenceId, stableId } from './hash.ts';
-import { buildLines, classifyLines, type ClassifiedLine } from './layout.ts';
+import { assessReadingOrder, buildLines, classifyLines, type ClassifiedLine } from './layout.ts';
 
 /**
  * GROBID が使えないときのフォールバック経路。
@@ -233,6 +233,13 @@ export interface FallbackResult {
   sections: Section[];
   /** 本文として扱わなかった行。訳の対象ではないが、画面には出せるように残す。 */
   nonBody: NonBodySentence[];
+  /**
+   * 解析結果がどれくらい怪しいかの自己申告。
+   *
+   * 「簡易解析」というバッジだけでは、完璧に取れた文書と 3 分の 1 しか取れていない
+   * 文書に同じものが出る。崩れを直せなくても、崩れていると分かれば読む側は動ける。
+   */
+  quality: StructureQuality;
 }
 
 /** 連結した文字列と、1 文字ずつの出どころ。 */
@@ -461,7 +468,12 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
     }
   }
 
-  return { sentences, sections, nonBody: buildNonBody(lines, hyphenEvidence, sentences, lastLineOf) };
+  return {
+    sentences,
+    sections,
+    nonBody: buildNonBody(lines, hyphenEvidence, sentences, lastLineOf),
+    quality: assessReadingOrder(lines),
+  };
 }
 
 /**

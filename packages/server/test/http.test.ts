@@ -7,6 +7,7 @@ import { connect } from 'node:net';
 
 import { start } from '../src/start.ts';
 import { makeSamplePdf } from '../../../scripts/make-sample-pdf.ts';
+import { makePaperPdf } from '../../../scripts/make-paper-pdf.ts';
 
 /**
  * サーバー層の回帰テスト。
@@ -1124,4 +1125,72 @@ test('訳語の置き換え候補に、構造から外れた幽霊の訳は並�
   assert.equal(preview.shown, preview.total);
   assert.equal(preview.truncated, false);
   assert.ok(preview.limit > 0);
+});
+
+test('画面にカードとして出ている「訳さない行」を、検索も見つける', async () => {
+  // 参考文献・図表キャプションは訳の対象ではないが、画面には理由つきで出ている。
+  // その行を検索が拾わないと、同じ画面が「ある」と「無い」を同時に言うことになる
+  // （サイドバーに [1] … NeurIPS, 2024. が出ているのに「一致する文がありません」）。
+  const response = await fetch(`${baseUrl}/api/documents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/pdf', 'X-File-Name': 'with-references.pdf' },
+    body: makePaperPdf({ pages: 2, twoColumn: false }).pdf,
+  });
+  assert.equal(response.status, 201);
+  const { documentId } = (await response.json()) as { documentId: string };
+
+  const found = (await (
+    await fetch(`${baseUrl}/api/documents/${documentId}/search?q=NeurIPS`)
+  ).json()) as {
+    total: number;
+    hits: { text: string; isBody: boolean; nonBodyKind: string | null; order: number | null; afterOrder: number | null }[];
+  };
+  assert.ok(found.total >= 1, '画面に出ている参考文献を検索が拾えていない');
+  const hit = found.hits[0]!;
+  assert.match(hit.text, /NeurIPS/);
+  // MCP からも使うので、本文かどうかは機械的に分かる形で返す。
+  assert.equal(hit.isBody, false);
+  assert.equal(hit.nonBodyKind, 'reference');
+  assert.equal(hit.order, null, '本文の通し番号が無い行に本文の番号を付けている');
+  assert.equal(typeof hit.afterOrder, 'number', 'どの本文の後ろにある行かが分からない');
+
+  // 本文のヒットは今までどおり本文として返る（見分けが付かないと訳す対象を誤る）。
+  const body = (await (
+    await fetch(`${baseUrl}/api/documents/${documentId}/search?q=attention`)
+  ).json()) as { hits: { isBody: boolean; order: number | null }[] };
+  const bodyHit = body.hits.find((candidate) => candidate.isBody);
+  assert.ok(bodyHit, '本文のヒットが 1 件も無い');
+  assert.equal(typeof bodyHit.order, 'number');
+});
+
+test('書き出した用語集は、JS を切らずに普通に開いた経路（ビューア）でも読める', async () => {
+  // 以前は用語集を静的フォールバック（JS 無効時の素の HTML）の中にしか出していなかった。
+  // ビューアは起動時にその div ごと外すので、普通に開いた人には 1 文字も見えず、
+  // JS を切った人にだけ見えていた。訳語の決め方が伝わらないなら書き出す意味がない。
+  const id = await ingest();
+  const entries = [
+    { term: 'sparse attention', translation: '疎な注意機構', note: '「スパース注意」とは書かない' },
+    { term: 'held-out split', translation: '検証用の分割', note: null },
+  ];
+  const saved = await fetch(`${baseUrl}/api/documents/${id}/glossary`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries }),
+  });
+  assert.equal(saved.status, 200);
+
+  const html = await (await fetch(`${baseUrl}/api/documents/${id}/export`)).text();
+
+  // JS が動かない環境（静的フォールバック）では今までどおり表で読める。
+  assert.ok(html.includes('疎な注意機構'));
+
+  // ビューアが外す div を取り除いても、用語集が残っていること。
+  // ここが空になるなら、普通に開いた人には用語集が存在しない。
+  const staticStart = html.indexOf('<div class="lx-static"');
+  const dataStart = html.indexOf('<script type="application/json"');
+  assert.ok(staticStart > 0 && dataStart > staticStart, '前提: 静的フォールバックの範囲を取れている');
+  const withoutStatic = html.slice(0, staticStart) + html.slice(dataStart);
+  assert.ok(withoutStatic.includes('用語集'), 'ビューアの経路に用語集が出てこない');
+  // ビューアが読むのは埋め込み JSON なので、そちらにも入っていること。
+  assert.ok(withoutStatic.includes('疎な注意機構'));
 });

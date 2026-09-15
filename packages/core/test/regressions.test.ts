@@ -15,6 +15,7 @@ import {
   skipSentences,
 } from '../src/document.ts';
 import { buildExportHtml } from '../src/export.ts';
+import { placeNonBody } from '../src/nonbody.ts';
 import { extractPayloadJson, parseExportHtml, ImportError } from '../src/import.ts';
 import {
   describeSanitizeReport,
@@ -24,7 +25,15 @@ import {
   sanitizeStructure,
 } from '../src/validate.ts';
 import { migrateDocument } from '../src/migrate.ts';
-import { emptyAnnotations, type Annotations, type PaperDocument, type Rect, type Translation } from '../src/types.ts';
+import {
+  emptyAnnotations,
+  type Annotations,
+  type NonBodySentence,
+  type PaperDocument,
+  type Rect,
+  type Sentence,
+  type Translation,
+} from '../src/types.ts';
 import { createHash } from 'node:crypto';
 
 /**
@@ -726,4 +735,155 @@ test('取り込んだ「訳さない」は、自分の残件を減らした数�
   const again = mergeAnnotations(own.annotations, incoming, new Set(structure.sentences.map((s) => s.hash)));
   assert.equal(again.annotations.skipped?.[b!.hash]?.reason, 'mine');
   assert.equal(again.report.skippedAdded, 1, 'c の 1 件だけが新しく移るはず');
+});
+
+// --- 本文として扱わなかった行の差し込み位置 --------------------------------
+
+/**
+ * 同じ本文が 2 回出る文書。結論の 1 文を序論にも置くのは普通の書き方で、
+ * サイドバーにも「同じ本文が前にも出ています」という表示がある＝想定内の入力。
+ *
+ * 参考文献と脚注は**後ろの出現**（order 4）の直後に付いている。
+ */
+function repeatedBodyDocument(): PaperDocument {
+  const texts = [
+    'We introduce a sparse attention scheme.',
+    'Sparse attention closes the gap on long contexts.',
+    'The method is evaluated on three corpora.',
+    'Results improve over the dense baseline.',
+    'Sparse attention closes the gap on long contexts.',
+  ];
+  const sentences: Sentence[] = texts.map((text, order) => ({
+    id: `s${order}`,
+    hash: sentenceHash(text),
+    order,
+    page: order < 3 ? 1 : 2,
+    text,
+    rects: [],
+    sectionId: null,
+  }));
+  const anchor = sentences[4]!;
+  const references: NonBodySentence[] = [
+    '[1] J. Doe and A. Smith. Sparse transformers. In Proc. NeurIPS, 2024.',
+    '[2] R. Roe. Efficient attention. Journal of Attention, 2023.',
+  ].map((text, index) => ({
+    id: `nb${index}`,
+    hash: sentenceHash(text),
+    order: index + 1,
+    page: 2,
+    text,
+    rects: [],
+    sectionId: null,
+    kind: 'reference' as const,
+    afterOrder: anchor.order,
+    afterHash: anchor.hash,
+  }));
+  // 紙面の途中にもひとつ置く（本文と付物が混ざったときの並びを見るため）。
+  const caption: NonBodySentence = {
+    id: 'nbc',
+    hash: sentenceHash('Figure 1: Attention maps for the dense baseline.'),
+    order: 0,
+    page: 1,
+    text: 'Figure 1: Attention maps for the dense baseline.',
+    rects: [],
+    sectionId: null,
+    kind: 'caption',
+    afterOrder: sentences[2]!.order,
+    afterHash: sentences[2]!.hash,
+  };
+  const nonBody: NonBodySentence[] = [caption, ...references];
+  return createDocument({
+    structure: {
+      version: STRUCTURE_VERSION,
+      parser: 'fallback',
+      parserNote: 'テスト',
+      parsedAt: new Date().toISOString(),
+      title: 'Repeated sentence paper',
+      abstract: null,
+      pageSizes: [],
+      sections: [],
+      sentences,
+      nonBody,
+    },
+    sourceFileName: 'repeated.pdf',
+  });
+}
+
+test('同じ本文が 2 回出る文書でも、本文以外の行は afterOrder が指す方の後ろに付く', () => {
+  const document = repeatedBodyDocument();
+  const sentences = document.structure.sentences;
+  const { head, after } = placeNonBody(sentences, document.structure.nonBody);
+
+  assert.equal(head.length, 0, '本文より後ろの行が先頭へ送られている');
+  assert.equal(after.get(sentences[1]!.id), undefined, 'hash の最初の出現に吸い寄せられている');
+  assert.deepEqual(
+    (after.get(sentences[4]!.id) ?? []).map((item) => item.id),
+    ['nb0', 'nb1'],
+    '参考文献が後ろの出現の直後に付いていない',
+  );
+
+  // 書き出しの静的部分も同じ位置に置く（画面・ビューアと並びが違ってはいけない）。
+  const html = exportOf(document);
+  const reference = html.indexOf('Sparse transformers');
+  const third = html.indexOf('The method is evaluated');
+  assert.ok(reference > third, `参考文献が序論の途中に出ている: ${reference} < ${third}`);
+});
+
+test('結合・分割で通し番号がずれても、本文以外の行は近い方の出現に付く', () => {
+  const document = repeatedBodyDocument();
+  // 手前の文が 1 つ結合されて、以後の通し番号が 1 つずつ繰り上がった状態。
+  // nonBody が持つ afterOrder は解析時点のままなので 1 ずれる。
+  const shifted = document.structure.sentences
+    .filter((sentence) => sentence.order !== 0)
+    .map((sentence) => ({ ...sentence, order: sentence.order - 1 }));
+  const { after } = placeNonBody(shifted, document.structure.nonBody);
+  const anchor = shifted.find((sentence) => sentence.order === 3)!;
+  assert.equal(anchor.text, 'Sparse attention closes the gap on long contexts.');
+  assert.equal((after.get(anchor.id) ?? []).length, 2, '番号が 1 ずれただけで手前の出現へ飛んだ');
+});
+
+test('アンカーの文が消えていたら通し番号で探し、無ければ手前でいちばん後ろの文に付ける', () => {
+  const document = repeatedBodyDocument();
+  const sentences = document.structure.sentences;
+  const orphan = (document.structure.nonBody ?? []).map((item) => ({ ...item, afterHash: 'deadbeefdeadbeef' }));
+
+  // hash が当たらなければ通し番号に落ちる。
+  const byOrder = placeNonBody(sentences, orphan);
+  assert.equal((byOrder.after.get(sentences[4]!.id) ?? []).length, 2);
+
+  // その通し番号の文も無くなったら、手前でいちばん後ろの文に付ける。
+  // 見つからないからと先頭へ送ると、末尾の参考文献が丸ごと冒頭に飛ぶ。
+  const truncated = sentences.slice(0, 3);
+  const clamped = placeNonBody(truncated, orphan);
+  assert.equal(clamped.head.length, 0);
+  assert.equal((clamped.after.get(truncated[2]!.id) ?? []).length, 3);
+});
+
+// --- 検索 ---------------------------------------------------------------
+
+test('検索は本文として扱わなかった行も拾い、本文と見分けが付く形で返す', () => {
+  const document = repeatedBodyDocument();
+
+  // 画面にカードとして出ている参考文献が、検索では「ありません」になっていた。
+  const hits = searchDocument(document, 'NeurIPS');
+  assert.equal(hits.length, 1, '画面に出ている行を検索が拾えていない');
+  assert.equal(hits[0]!.isBody, false);
+  assert.equal(hits[0]!.nonBodyKind, 'reference');
+  assert.equal(hits[0]!.afterOrder, 4, 'どの本文の後ろにある行かが分からない');
+  assert.deepEqual(hits[0]!.where, ['source']);
+
+  // 本文のヒットは今までどおり本文として返る。
+  const body = searchDocument(document, 'Results improve');
+  assert.equal(body.length, 1);
+  assert.equal(body[0]!.isBody, true);
+  assert.equal(body[0]!.nonBodyKind, null);
+
+  // 並びは読み順。本文と付物が混ざっても紙面の順序が分かる。
+  // （本文 0・1 → 図キャプション → 本文 4 → 参考文献 [2]）
+  const both = searchDocument(document, 'attention');
+  assert.deepEqual(
+    both.map((hit) => hit.isBody),
+    [true, true, false, true, false],
+    '付物だけが後ろにまとめられている（紙面のどこにあるか分からなくなる）',
+  );
 });

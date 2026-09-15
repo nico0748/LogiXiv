@@ -219,6 +219,75 @@
   opacity: 0.8;
 }
 
+/* 検索に当たった「訳さない行」。本文のヒットと同じ濃さで並ぶと訳し忘れに見えるので、
+   薄いまま印だけ足す。印は当たったときしか出さない。 */
+.lxv-nonbody-match {
+  display: none;
+  margin-left: 0.4rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--lxv-line);
+  border-radius: 999px;
+  font-size: 0.66rem;
+}
+
+.lxv-card.lxv-nonbody.is-match {
+  opacity: 0.9;
+  border-left-color: var(--lxv-accent);
+}
+
+.lxv-card.lxv-nonbody.is-match .lxv-nonbody-match {
+  display: inline;
+}
+
+/* 絞り込みの結果。訳の付かないカードが並ぶ理由をその場に出す。 */
+.lxv-filter-note {
+  margin: 0 0 0.4rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--lxv-line);
+  color: var(--lxv-muted);
+  font-size: 0.75rem;
+}
+
+/* 用語集。数百件になる論文があるので畳めるようにし、開いたときだけ表を出す。 */
+.lxv-glossary {
+  margin: 0 0 0.8rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--lxv-line);
+  border-radius: 6px;
+  background: var(--lxv-bg);
+}
+
+.lxv-glossary-summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--lxv-muted);
+}
+
+.lxv-glossary-table {
+  width: 100%;
+  margin-top: 0.4rem;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.lxv-glossary-table th,
+.lxv-glossary-table td {
+  padding: 0.2rem 0.5rem 0.2rem 0;
+  border-bottom: 1px solid var(--lxv-line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.lxv-glossary-table th {
+  color: var(--lxv-muted);
+  font-weight: 600;
+}
+
+.lxv-glossary-note {
+  color: var(--lxv-muted);
+}
+
 /* 「訳さない」は判断であって訳し忘れではない。（未訳）と見分けが付く形にする。 */
 .lxv-skipped {
   margin: 0 0 0.2rem;

@@ -10,6 +10,7 @@ import type {
   Section,
   Sentence,
   SentenceEdit,
+  StructureQuality,
   SkippedSentence,
   Translation,
 } from './types.ts';
@@ -224,6 +225,21 @@ export function sanitizeStructure(value: unknown, report: SanitizeReport, remap?
     sections,
     sentences,
     nonBody: sanitizeNonBody(source['nonBody'], report, knownSections),
+    // 解析の確からしさは、取り込んだ側にも要る。
+    // 「この書き出しの原文は読み順が崩れているかもしれない」は、
+    // 受け取った人が訳を信用してよいかの判断材料そのもの。
+    // こちらで測り直した値ではないので、そのまま持ち越す。
+    quality: sanitizeQuality(source['quality']),
+  };
+}
+
+function sanitizeQuality(value: unknown): StructureQuality | undefined {
+  if (!isRecord(value)) return undefined;
+  const reason = str(value['reason'], 500);
+  if (reason === null) return undefined;
+  return {
+    readingOrderRisk: value['readingOrderRisk'] === 'high' ? 'high' : 'low',
+    reason,
   };
 }
 

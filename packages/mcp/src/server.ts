@@ -73,9 +73,30 @@ function makeProgressWatcher() {
   };
 }
 
+/**
+ * 簡易解析の文書に付ける但し書き。
+ *
+ * 「節が取れず」と決め打ちしていたが、簡易解析でも節はたいてい取れる
+ * （8 節取れている文書に「節が取れず」と返していた）。実際に取れているものを
+ * 取れないと言うと、呼び出し側は使える手掛かりを使わなくなる。
+ * 読み順の崩れが検出されているときは、そちらの方が重いので先に言う。
+ */
 function fallbackCaveat(document: PaperDocument): string | undefined {
   if (document.structure.parser === 'grobid') return undefined;
-  return 'この文書は簡易解析（pdf.js）で取り込まれています。節が取れず、参考文献・ページ番号・数式の断片が本文に混ざることがあります。GROBID を起動して reparse_document すると改善します。';
+  const parts: string[] = [];
+  if (document.structure.quality?.readingOrderRisk === 'high') {
+    parts.push(
+      `読み順が崩れている疑いがあります（${document.structure.quality.reason}）。` +
+        '原文そのものが壊れている可能性があるので、訳す前に原文を確かめてください。',
+    );
+  }
+  parts.push('この文書は簡易解析（pdf.js）で取り込まれています。');
+  if (document.structure.sections.length === 0) parts.push('節は取れていません。');
+  parts.push(
+    '参考文献・ページ番号・数式の断片が本文に混ざることがあります。' +
+      'GROBID を起動して reparse_document すると改善します。',
+  );
+  return parts.join('');
 }
 
 function sentenceView(document: PaperDocument, sentence: Sentence) {
@@ -516,7 +537,9 @@ export function createMcpServer(baseUrl: string): McpServer {
       title: '文書内検索',
       description:
         '原文・訳文・メモを横断して検索する。ヒットには訳文とメモも入るので、' +
-        '訳語の揺れをこのツールだけで確認できる。直したい文の hash もそのまま返る。',
+        '訳語の揺れをこのツールだけで確認できる。直したい文の hash もそのまま返る。' +
+        '参考文献・図表キャプション・脚注など「本文として扱わなかった行」も探す（画面にも出ている）。' +
+        'それらは isBody:false・nonBodyKind 付きで返る。訳の対象ではないので set_translations に渡さないこと。',
       inputSchema: {
         document_id: z.string(),
         query: z.string().min(1),
@@ -527,6 +550,9 @@ export function createMcpServer(baseUrl: string): McpServer {
     async ({ document_id, query, limit, from }) => {
       try {
         const result = await client.search(document_id, query, limit, from);
+        // 本文でないヒット（参考文献・キャプションなど）は訳せない。件数を添えておかないと、
+        // 一致したのだからと set_translations に渡され、「該当する文がありません」で弾かれる。
+        const nonBody = result.hits.filter((hit) => hit.isBody === false).length;
         // 返りは常に JSON。「1 件も無い」と「from が末尾を越えた」は別の話なので、
         // 0 件のときも total を返して区別できるようにする。
         return jsonResult({
@@ -539,7 +565,9 @@ export function createMcpServer(baseUrl: string): McpServer {
               ? `「${query}」に一致する箇所はありませんでした。`
               : result.hits.length === 0
                 ? `from=${from} は末尾を越えています（全 ${result.total} 件）。`
-                : undefined,
+                : nonBody > 0
+                  ? `このうち ${nonBody} 件は本文として扱わなかった行（isBody:false）です。訳の対象ではありません。`
+                  : undefined,
         });
       } catch (error) {
         return errorResult(error);
@@ -613,8 +641,15 @@ export function createMcpServer(baseUrl: string): McpServer {
         document_id: z.string(),
         sentence_hashes: z.array(z.string()).min(1).max(500),
         reason: z
-          .enum(['reference', 'figure', 'table', 'equation', 'header', 'footer', 'other'])
-          .default('other'),
+          // `unreadable` は「解析が失敗していて、そもそも文として読めない」。
+          // 簡易解析でいちばん多い理由なのに値が無く、other に押し込むしかなかった。
+          // 後から「解析を直せば訳せる文」だけを拾い直せるように、独立させる。
+          .enum(['reference', 'figure', 'table', 'equation', 'header', 'footer', 'unreadable', 'other'])
+          .default('other')
+          .describe(
+            '訳さない理由。unreadable は「解析が崩れていて文として読めない」。' +
+              '再解析で直ったときに拾い直せるよう、他と分けてある。',
+          ),
         undo: z.boolean().default(false).describe('true にすると「訳さない」を取り消す'),
       },
     },

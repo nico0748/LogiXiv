@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiError, subscribe, type Health, type PaperDocument, type Sentence } from './api.ts';
+import {
+  api,
+  ApiError,
+  subscribe,
+  type Health,
+  type NonBodySentence,
+  type PaperDocument,
+  type Sentence,
+} from './api.ts';
 import { PdfPane } from './PdfPane.tsx';
 import { Sidebar } from './Sidebar.tsx';
 import { GlossaryPanel } from './GlossaryPanel.tsx';
@@ -308,6 +316,21 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     () => (filter.trim().length === 0 ? null : new Set(visibleSentences.map((s) => s.id))),
     [filter, visibleSentences],
   );
+
+  /**
+   * 絞り込みに当たった「本文として扱わなかった行」（参考文献・キャプションなど）。
+   *
+   * 検索の対象から外していたので、画面に現に出ているカードを検索が
+   * 「一致する文がありません」と言っていた。同じ画面が「ある」と「無い」を
+   * 同時に言っている状態だったので、本文と同じ検索語で当てる。
+   * 訳・メモは付かない行なので、当てるのは原文だけでよい。
+   */
+  const visibleNonBody: NonBodySentence[] = useMemo(() => {
+    const all = paper?.structure.nonBody ?? [];
+    const needle = filter.trim().toLowerCase();
+    if (needle.length === 0) return all;
+    return all.filter((item) => item.text.toLowerCase().includes(needle));
+  }, [paper, filter]);
 
   /**
    * 文から文へキーで移動する。
@@ -639,6 +662,14 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
         <span className={`badge${paper.structure.parser === 'grobid' ? ' is-good' : ' is-warn'}`}>
           {paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}
         </span>
+        {/* 完璧に取れた文書にも崩れた文書にも同じバッジを出していた。
+            だから読み手は、今日の訳を信用してよいのかを毎回自分で検算することになる。
+            崩れを直せなくても、崩れていると分かれば道具として成立する。 */}
+        {paper.structure.quality?.readingOrderRisk === 'high' && (
+          <span className="badge is-danger" title={paper.structure.quality.reason}>
+            読み順に崩れの疑い
+          </span>
+        )}
         {/* 訳は「異なり文」に付くので分母はその数。ところがサイドバーには
             延べで並ぶので、数が合わないように見える（202 文と言いながら 273 行）。
             食い違うときだけ、延べの数も一緒に出して種明かしをする。 */}
@@ -878,6 +909,7 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           selectedId={selectedId}
           filter={filter}
           visibleSentences={visibleSentences}
+          visibleNonBody={visibleNonBody}
           onSelect={select}
           scrollTarget={sidebarScrollTarget}
           onSaveTranslation={saveTranslation}

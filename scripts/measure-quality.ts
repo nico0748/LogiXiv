@@ -3,7 +3,12 @@
  *
  * 単体テストは「この入力でこう壊れないこと」を固定するが、
  * 「実際の論文でどれくらい正しく読めているか」は測れない。
- * こちらは正解が分かっている論文風 PDF を作って突き合わせる。
+ * こちらは正解が分かっている PDF を突き合わせる。入力は 2 系統ある:
+ *
+ *   - 合成 PDF（make-paper-pdf.ts）… 回帰の網。壊れ方を狙って作れる。
+ *   - 実物の論文（scripts/real-papers/）… pdflatex で組んだ本物。PDF と正解を
+ *     リポジトリに入れてあるので、pdflatex が無い環境でも測れる。
+ *     組み直しは `node --experimental-strip-types scripts/build-real-papers.ts`。
  *
  *   npm run measure
  *
@@ -22,11 +27,21 @@
  * 6. 正規化ハッシュが一致しても**字面**が違えば別に数える。normalizeSentence は
  *    語中のハイフンを畳むので（`long-range` も `longrange` も同じハッシュになる）、
  *    再現率だけ見ていると「本来のハイフンを黙って消した」壊れ方が 100% のまま通る。
+ * 7. **合成 PDF だけで満足しない。** 合成は自分で座標を置くので、自分が想定した
+ *    壊れ方しか再現できない。実際に報告された崩れ（1 ページ目で左右の段が語単位に
+ *    混ざる、付録が丸ごと参考文献になる、擬似コードの途中の行が題名になる）は、
+ *    合成 14 シナリオが全部 100% のまま素通りしていた。実物を入れて初めて落ちた。
+ *    実物の正解は .tex の `\s{...}` から機械的に作る（scripts/real-paper-truth.ts）。
+ *    **PDF から取り出した結果を正解にしてはいけない** — それでは何も測れない。
  */
 
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { normalizeSentence } from '../packages/core/src/index.ts';
 import { parseWithPdfJs } from '../packages/server/src/fallback.ts';
 import { makePaperPdf, type PaperSpec } from './make-paper-pdf.ts';
+import type { PaperTruth } from './real-paper-truth.ts';
 
 /** これを下回ったら失敗にする。段組を見ない実装では 2 段組が 30% まで落ちていた。 */
 const MIN_RECALL = 0.9;
@@ -56,6 +71,8 @@ interface Result {
   sentences: number;
   sections: number;
   ms: number;
+  /** core が自己申告した読み順の危うさ。high なら「怪しい」と自分で言えている。 */
+  readingOrderRisk: 'low' | 'high';
 }
 
 /** 多重集合の一致数。同じ文が n 回出るなら n 回数える。 */
@@ -107,10 +124,9 @@ function orderScore(expected: readonly string[], got: readonly string[]): number
   return tails.length / sequence.length;
 }
 
-async function measure(label: string, spec: PaperSpec): Promise<Result> {
-  const paper = makePaperPdf(spec);
+async function score(label: string, pdf: Uint8Array, paper: PaperTruth): Promise<Result> {
   const started = Date.now();
-  const structure = await parseWithPdfJs(paper.pdf);
+  const structure = await parseWithPdfJs(pdf);
   const ms = Date.now() - started;
 
   const got = structure.sentences.map((s) => normalizeSentence(s.text));
@@ -141,7 +157,36 @@ async function measure(label: string, spec: PaperSpec): Promise<Result> {
     sentences: structure.sentences.length,
     sections: structure.sections.length,
     ms,
+    readingOrderRisk: structure.quality?.readingOrderRisk ?? 'low',
   };
+}
+
+async function measure(label: string, spec: PaperSpec): Promise<Result> {
+  const paper = makePaperPdf(spec);
+  return score(label, paper.pdf, paper);
+}
+
+/**
+ * pdflatex で組んだ実物の論文を測る。
+ *
+ * 合成 PDF（makePaperPdf）は自分で座標を置くので、**自分が想定した壊れ方しか再現できない**。
+ * 実際に報告された崩れ（1 ページ目で左右の段が語単位に混ざる、付録が丸ごと参考文献になる）は、
+ * 合成 14 シナリオが全部 100% のまま素通りしていた。だからここは実物を入れる。
+ *
+ * PDF と正解はリポジトリに入れてある（scripts/real-papers/）。正解は .tex の `\s{...}` から
+ * 機械的に作ったもので、PDF から取り出した結果ではない。組み直しは
+ * `node --experimental-strip-types scripts/build-real-papers.ts`（pdflatex が要る）。
+ */
+async function measureRealPapers(): Promise<Result[]> {
+  const dir = join(fileURLToPath(new URL('.', import.meta.url)), 'real-papers');
+  const names = readdirSync(dir).filter((name) => name.endsWith('.pdf')).sort();
+  const out: Result[] = [];
+  for (const name of names) {
+    const base = name.replace(/\.pdf$/, '');
+    const truth = JSON.parse(readFileSync(join(dir, `${base}.truth.json`), 'utf8')) as PaperTruth;
+    out.push(await score(`実物 / ${base}`, new Uint8Array(readFileSync(join(dir, name))), truth));
+  }
+  return out;
 }
 
 const results = [
@@ -168,20 +213,30 @@ const results = [
   await measure('文末で折り返すキャプション', { pages: 6, columns: 2, splitCaption: true }),
 ];
 
-console.log('レイアウト             再現率   読順  余分  混入  ハイフン  書換  文数  節  解析');
-console.log('---------------------------------------------------------------------------------');
-for (const r of results) {
-  console.log(
-    `${r.label.padEnd(20)} ${`${Math.round(r.recall * 100)}%`.padStart(5)} (${r.found}/${r.expected})  ` +
-      `${`${Math.round(r.order * 100)}%`.padStart(4)} ` +
-      `${String(r.spurious).padStart(4)} ${String(r.leaks).padStart(5)} ` +
-      `${String(r.hyphenated).padStart(7)} ${String(r.rewritten).padStart(5)} ` +
-      `${String(r.sentences).padStart(5)} ` +
-      `${String(r.sections).padStart(3)} ${String(r.ms).padStart(6)}ms`,
-  );
+const realResults = await measureRealPapers();
+
+function table(title: string, rows: Result[]): void {
+  console.log(`\n${title}`);
+  console.log('レイアウト             再現率   読順  余分  混入  ハイフン  書換  文数  節  申告   解析');
+  console.log('-----------------------------------------------------------------------------------------');
+  for (const r of rows) {
+    console.log(
+      `${r.label.padEnd(20)} ${`${Math.round(r.recall * 100)}%`.padStart(5)} (${r.found}/${r.expected})  ` +
+        `${`${Math.round(r.order * 100)}%`.padStart(4)} ` +
+        `${String(r.spurious).padStart(4)} ${String(r.leaks).padStart(5)} ` +
+        `${String(r.hyphenated).padStart(7)} ${String(r.rewritten).padStart(5)} ` +
+        `${String(r.sentences).padStart(5)} ` +
+        `${String(r.sections).padStart(3)} ${r.readingOrderRisk.padStart(5)} ${String(r.ms).padStart(6)}ms`,
+    );
+  }
 }
 
-const failures = results.filter(
+table('合成 PDF（回帰の網）', results);
+table('実物の論文（pdflatex で組んだもの）', realResults);
+
+const all = [...results, ...realResults];
+
+const failures = all.filter(
   (r) =>
     r.recall < MIN_RECALL ||
     r.order < MIN_ORDER ||
@@ -190,19 +245,37 @@ const failures = results.filter(
     r.rewritten > MAX_REWRITTEN ||
     r.spurious > Math.ceil(r.expected * MAX_SPURIOUS_RATIO),
 );
-if (failures.length > 0) {
-  console.error(
-    `\n品質が基準を下回りました（再現率 >= ${MIN_RECALL * 100}% / 読順 >= ${MIN_ORDER * 100}% / ` +
-      `混入 <= ${MAX_LEAKS} / ハイフン残り <= ${MAX_HYPHEN_ARTEFACTS} / 書換 <= ${MAX_REWRITTEN} / ` +
-      `余分 <= ${MAX_SPURIOUS_RATIO * 100}%）:\n` +
-      failures
-        .map(
-          (f) =>
-            `  ${f.label}: 再現率 ${Math.round(f.recall * 100)}% / 読順 ${Math.round(f.order * 100)}% / ` +
-            `余分 ${f.spurious} / 混入 ${f.leaks} / ハイフン ${f.hyphenated} / 書換 ${f.rewritten}`,
-        )
-        .join('\n'),
-  );
+
+/**
+ * 「崩れていない文書に高リスクの申告を出していないか」も門にする。
+ *
+ * 自己申告は、当たらないより**誤って鳴る方**が害が大きい。全部に警告を出す実装は
+ * 「簡易解析」バッジ 1 種類だったときと同じで、見分けが付かないという問題を戻すだけ。
+ * 再現率が十分高い（＝実際には崩れていない）文書で high が出たら、それは誤検出。
+ */
+const falseAlarms = all.filter((r) => r.readingOrderRisk === 'high' && r.recall >= MIN_RECALL);
+
+if (failures.length > 0 || falseAlarms.length > 0) {
+  if (failures.length > 0) {
+    console.error(
+      `\n品質が基準を下回りました（再現率 >= ${MIN_RECALL * 100}% / 読順 >= ${MIN_ORDER * 100}% / ` +
+        `混入 <= ${MAX_LEAKS} / ハイフン残り <= ${MAX_HYPHEN_ARTEFACTS} / 書換 <= ${MAX_REWRITTEN} / ` +
+        `余分 <= ${MAX_SPURIOUS_RATIO * 100}%）:\n` +
+        failures
+          .map(
+            (f) =>
+              `  ${f.label}: 再現率 ${Math.round(f.recall * 100)}% / 読順 ${Math.round(f.order * 100)}% / ` +
+              `余分 ${f.spurious} / 混入 ${f.leaks} / ハイフン ${f.hyphenated} / 書換 ${f.rewritten}`,
+          )
+          .join('\n'),
+    );
+  }
+  if (falseAlarms.length > 0) {
+    console.error(
+      '\n読み順の自己申告が誤って鳴っています（十分に取れている文書に high）:\n' +
+        falseAlarms.map((f) => `  ${f.label}: 再現率 ${Math.round(f.recall * 100)}%`).join('\n'),
+    );
+  }
   process.exit(1);
 }
 console.log('\n基準を満たしています。');

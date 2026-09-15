@@ -79,6 +79,8 @@ export interface ExportPayload {
        * 出さないと、左の PDF に見えているものが右に 1 行も無い状態になる。
        */
       nonBody?: NonBodySentence[];
+      /** 解析の確からしさ。`high` は読み順が壊れている痕跡が見つかったという意味。 */
+      quality?: { readingOrderRisk: 'low' | 'high'; reason: string };
     };
     annotations: {
       translations: Record<string, Translation>;

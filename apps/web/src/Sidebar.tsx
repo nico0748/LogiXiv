@@ -1,5 +1,8 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { NonBodySentence, Note, PaperDocument, Sentence, Translation } from './api.ts';
+// 差し込み位置の規則は core と共有する。ここ・書き出し・ビューアで並びが違うと、
+// 同じ論文を 3 通りの順序で見せることになる。
+import { placeNonBody } from '../../../packages/core/src/nonbody.ts';
 
 /**
  * 1 文 = 1 カードのサイドバー。
@@ -33,6 +36,14 @@ interface Props {
   selectedId: string | null;
   filter: string;
   visibleSentences: Sentence[];
+  /**
+   * 絞り込みに一致した「本文として扱わなかった行」。絞り込んでいないときは全件。
+   *
+   * 検索から外していたので、画面に現に出ているカード（参考文献など）を
+   * 検索が「一致する文がありません」と言い、さらに絞り込むとそのカード自体が
+   * 消えて「なぜ右に無いのか」の説明まで失われていた。
+   */
+  visibleNonBody: NonBodySentence[];
   onSelect: (sentenceId: string, origin: 'pdf' | 'sidebar' | 'keyboard') => void;
   onSaveTranslation: (hash: string, text: string) => Promise<boolean>;
   onAddNote: (hash: string, body: string) => Promise<boolean>;
@@ -45,7 +56,7 @@ interface Props {
 }
 
 export function Sidebar(props: Props): React.JSX.Element {
-  const { document: paper, selectedId, visibleSentences, scrollTarget } = props;
+  const { document: paper, selectedId, visibleSentences, visibleNonBody, scrollTarget } = props;
 
   const notesByHash = useMemo(() => {
     const map = new Map<string, Note[]>();
@@ -71,30 +82,22 @@ export function Sidebar(props: Props): React.JSX.Element {
    * はじめて使った人はそこで「まだ訳が来ていないのか、自分が見落としたのか」
    * を判断できず、しかもヘッダーは「26 / 27 文」と完了したように出る。
    *
-   * 位置はまず hash で探す（区切りを直すと通し番号は振り直されるため）。
+   * どの文の後ろに置くかの規則は core と共有する（placeNonBody）。
+   * 同じ本文が 2 回出る論文で「hash の最初の出現」を採ると、末尾の参考文献が
+   * 序論の途中に出た。書き出し・ビューアにも同じ写しがあって同じようにずれていた。
    */
-  const nonBodyAfter = useMemo(() => {
-    const map = new Map<string, NonBodySentence[]>();
-    const byOrder = new Map<number, string>();
-    for (const sentence of paper.structure.sentences) {
-      if (!byOrder.has(sentence.order)) byOrder.set(sentence.order, sentence.id);
-    }
-    const byHash = new Map<string, string>();
-    for (const sentence of paper.structure.sentences) {
-      if (!byHash.has(sentence.hash)) byHash.set(sentence.hash, sentence.id);
-    }
-    for (const item of paper.structure.nonBody ?? []) {
-      const anchor =
-        (item.afterHash ? byHash.get(item.afterHash) : undefined) ??
-        byOrder.get(item.afterOrder) ??
-        // 本文より前にあるもの（表題・著者行）は先頭の文の前に置く。
-        HEAD_ANCHOR;
-      const list = map.get(anchor);
-      if (list) list.push(item);
-      else map.set(anchor, [item]);
-    }
-    return map;
-  }, [paper.structure.nonBody, paper.structure.sentences]);
+  const placement = useMemo(
+    () => placeNonBody(paper.structure.sentences, paper.structure.nonBody),
+    [paper.structure.nonBody, paper.structure.sentences],
+  );
+
+  /** いま出してよい本文の文（絞り込み結果）。並びは本文の並びのまま引く。 */
+  const visibleSentenceIds = useMemo(
+    () => new Set(visibleSentences.map((sentence) => sentence.id)),
+    [visibleSentences],
+  );
+  /** いま出してよい本文以外の行。絞り込んでいないときは全件が入る。 */
+  const visibleNonBodyIds = useMemo(() => new Set(visibleNonBody.map((item) => item.id)), [visibleNonBody]);
 
   /**
    * 区切りを直す操作の相手と、それが何か所に効くか。
@@ -166,13 +169,15 @@ export function Sidebar(props: Props): React.JSX.Element {
     };
   }, [scrollTarget]);
 
-  if (visibleSentences.length === 0) {
+  const filtering = props.filter.trim().length > 0;
+
+  if (visibleSentences.length === 0 && (!filtering || visibleNonBody.length === 0)) {
     // 「一致しない」と「そもそも文が無い」は原因も対処も違う。
     // スキャン PDF を開いた人に検索の話をしても仕方がない。
     return (
       <div className="sidebar">
         <p className="pane-message">
-          {props.filter.trim().length > 0
+          {filtering
             ? '一致する文がありません。'
             : 'この PDF からは文を取り出せませんでした。画像だけのスキャン PDF は先に OCR を通してください。'}
         </p>
@@ -181,19 +186,39 @@ export function Sidebar(props: Props): React.JSX.Element {
   }
 
   let lastSection: string | null | undefined;
-  // 絞り込み中は本文以外を出さない。検索は本文に当てるものなので、
-  // 引っかからなかった行が混ざると「一致した結果」として読まれる。
-  const filtering = props.filter.trim().length > 0;
 
   return (
     <div className="sidebar">
-      {/* 本文より前にあるもの（表題・著者行）。検索で絞り込んでいるときは出さない。 */}
-      {!filtering &&
-        (nonBodyAfter.get(HEAD_ANCHOR) ?? []).map((item) => (
-          <NonBodyCard key={item.id} item={item} />
+      {/* 絞り込み中は「何に当たったか」を先に言う。本文以外の行も出すので、
+          訳が付かないカードが並ぶ理由がここで分かるようにしておく。 */}
+      {filtering && (
+        <p className="sidebar-filter-note">
+          一致: 本文 {visibleSentences.length} 件
+          {visibleNonBody.length > 0 && ` ／ 訳さない行 ${visibleNonBody.length} 件（参考文献・図表など）`}
+        </p>
+      )}
+
+      {/* 本文より前にあるもの（表題・著者行）。絞り込み中は一致したものだけ出す。 */}
+      {placement.head
+        .filter((item) => visibleNonBodyIds.has(item.id))
+        .map((item) => (
+          <NonBodyCard key={item.id} item={item} matched={filtering} />
         ))}
 
-      {visibleSentences.map((sentence) => {
+      {/* 並びは**本文の並び**でたどる。絞り込みで本文が隠れても、一致した
+          本文以外の行がもとの位置のまま出るようにするため。 */}
+      {paper.structure.sentences.map((sentence) => {
+        const nonBody = (placement.after.get(sentence.id) ?? []).filter((item) => visibleNonBodyIds.has(item.id));
+        if (!visibleSentenceIds.has(sentence.id)) {
+          if (nonBody.length === 0) return null;
+          return (
+            <Fragment key={sentence.id}>
+              {nonBody.map((item) => (
+                <NonBodyCard key={item.id} item={item} matched={filtering} />
+              ))}
+            </Fragment>
+          );
+        }
         const heading = sentence.sectionId !== lastSection ? sectionTitles.get(sentence.sectionId ?? '') : undefined;
         lastSection = sentence.sectionId;
         const next = relations.nextById.get(sentence.id) ?? null;
@@ -219,19 +244,15 @@ export function Sidebar(props: Props): React.JSX.Element {
               onMergeWithNext={props.onMergeWithNext}
               onSplit={props.onSplit}
             />
-            {!filtering &&
-              (nonBodyAfter.get(sentence.id) ?? []).map((item) => (
-                <NonBodyCard key={item.id} item={item} />
-              ))}
+            {nonBody.map((item) => (
+              <NonBodyCard key={item.id} item={item} matched={filtering} />
+            ))}
           </Fragment>
         );
       })}
     </div>
   );
 }
-
-/** 本文より前にあるものを束ねる、実在しない文 id。 */
-const HEAD_ANCHOR = '\u0000head';
 
 const KIND_LABELS: Record<NonBodySentence['kind'], string> = {
   frontMatter: '表題・著者',
@@ -248,11 +269,23 @@ const KIND_LABELS: Record<NonBodySentence['kind'], string> = {
 /**
  * 本文として扱わなかった行。訳の対象ではないので、操作は付けずに「在ること」だけ示す。
  * ここに本文が紛れ込んでいたら、それは解析の誤りなので、種類を出して気づけるようにする。
+ *
+ * 検索に当たって出ているときは印を付ける。訳が付かないカードなので、
+ * 本文のヒットと同じ見た目で並ぶと「訳し忘れの一致」に見えてしまう。
  */
-const NonBodyCard = memo(function NonBodyCard({ item }: { item: NonBodySentence }): React.JSX.Element {
+const NonBodyCard = memo(function NonBodyCard({
+  item,
+  matched,
+}: {
+  item: NonBodySentence;
+  matched: boolean;
+}): React.JSX.Element {
   return (
-    <article className="card is-nonbody" data-card-for={item.id}>
-      <p className="card-nonbody-kind">{KIND_LABELS[item.kind]}（訳しません）</p>
+    <article className={`card is-nonbody${matched ? ' is-match' : ''}`} data-card-for={item.id}>
+      <p className="card-nonbody-kind">
+        {KIND_LABELS[item.kind]}（訳しません）
+        {matched && <span className="card-nonbody-match">検索に一致</span>}
+      </p>
       <p className="card-source" lang="en">
         {item.text}
       </p>

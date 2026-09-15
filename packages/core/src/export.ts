@@ -1,6 +1,7 @@
 import type { ExportPayload, NonBodySentence, PaperDocument, Sentence } from './types.ts';
 import { escapeHtml, escapeJsonForScript } from './escape.ts';
 import { progress } from './document.ts';
+import { placeNonBody } from './nonbody.ts';
 import { LOGIXIV_VERSION } from './hash.ts';
 
 /**
@@ -62,25 +63,9 @@ function staticFallback(document: PaperDocument): string {
   const sectionTitles = new Map(document.structure.sections.map((s) => [s.id, s.title]));
 
   // 本文として扱わなかった行を、直前の本文の後ろに差し込む。
-  // 位置はまず hash で探す（区切りを直すと通し番号は振り直されるため）。
-  const nonBodyAfter = new Map<string, NonBodySentence[]>();
-  const byHash = new Map<string, string>();
-  const byOrder = new Map<number, string>();
-  for (const sentence of document.structure.sentences) {
-    if (!byHash.has(sentence.hash)) byHash.set(sentence.hash, sentence.id);
-    if (!byOrder.has(sentence.order)) byOrder.set(sentence.order, sentence.id);
-  }
-  const head: NonBodySentence[] = [];
-  for (const item of document.structure.nonBody ?? []) {
-    const anchor = (item.afterHash ? byHash.get(item.afterHash) : undefined) ?? byOrder.get(item.afterOrder);
-    if (anchor === undefined) {
-      head.push(item);
-      continue;
-    }
-    const list = nonBodyAfter.get(anchor);
-    if (list) list.push(item);
-    else nonBodyAfter.set(anchor, [item]);
-  }
+  // 割り付けの規則は画面・ビューアと共有する（nonbody.ts）。3 か所で並びが違うと、
+  // 同じ論文を 3 通りの順序で見せることになる。
+  const { head, after: nonBodyAfter } = placeNonBody(document.structure.sentences, document.structure.nonBody);
 
   const rows: string[] = head.map(renderNonBody);
   let lastSection: string | null = null;
@@ -184,6 +169,7 @@ const STATIC_STYLE = `
   .lx-glossary th { color: #6b7280; font-weight: 600; }
   .lx-nonbody { opacity: .6; }
   .lx-nonbody-kind { margin: 0 0 .1rem; font-size: .72rem; color: #6b7280; }
+  .lx-banner.lx-risk { border-left: 3px solid #b3261e; font-weight: 600; }
 `;
 
 export function buildExportHtml(input: BuildExportInput): string {
@@ -197,6 +183,12 @@ export function buildExportHtml(input: BuildExportInput): string {
     dateStyle: 'medium',
     timeStyle: 'short',
   });
+  // 読み順が崩れている疑いは、受け取った側がいちばん先に知るべきこと。
+  // 訳が正しくても、その訳が付いている原文が壊れていることがある。
+  const riskLine =
+    input.document.structure.quality?.readingOrderRisk === 'high'
+      ? `<p class="lx-banner lx-risk">読み順に崩れの疑い: ${escapeHtml(input.document.structure.quality.reason)}</p>`
+      : '';
   const progressLine = escapeHtml(
     `${stats.uniqueSentences} 文中 ${stats.translated} 文訳済み` +
       (stats.skipped > 0 ? `・${stats.skipped} 文は訳さない判断` : '') +
@@ -218,6 +210,7 @@ export function buildExportHtml(input: BuildExportInput): string {
 <div class="lx-static" id="lx-static">
 <h1>${title}</h1>
 <p class="lx-banner">${progressLine}</p>
+${riskLine}
 <p class="lx-banner">この HTML は LogiXiv の書き出しです。JavaScript が動く環境では PDF と対訳が並んだビューアが開きます。動かない環境では以下の対訳がそのまま読めます。<br>（未訳）＝まだ訳していない文、（訳さない）＝参考文献や数式など訳す対象から外した文、✓ ＝人が手を入れた訳です。</p>
 ${staticFallback(input.document)}
 ${glossarySection(input.document)}

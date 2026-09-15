@@ -141,14 +141,27 @@ MCP サーバーはファイルを直接触らず、本体へ HTTP で話しか�
 | `update_glossary` | `{ "term": "原語", "translation": "訳語", "note": "なぜその訳か（任意）" }` |
 | `add_note` | `{ "document_id": "…", "sentence_hash": "…", "body": "メモ本文" }` |
 | `skip_sentences` | `{ "document_id": "…", "sentence_hashes": ["…"], "reason": "…" }` |
+| `fix_sentence_boundary` | `{ "document_id": "…", "action": "merge"｜"split"｜"undo", "sentence_hashes": ["…"], "offsets": [12] }` |
+
+`skip_sentences` の `reason` は自由文字列ではなく、次のどれか:
+`reference` / `figure` / `table` / `equation` / `header` / `footer` / `unreadable` / `other`。
+**`unreadable` は「解析が崩れていて文として読めない」**で、簡易解析ではいちばん多い理由になる。
+他と分けてあるのは、再解析で直ったときにそれだけを拾い直せるようにするため。
 
 間違えたときのエラーも直し方を返す。`set_translations` に `translation` と書くと
 「訳の項目名は text です（translation ではありません）」と、正しい形の例が返る。
 
 ### 解析方式による制約はその場で伝える
 
-GROBID 未接続で取り込んだ文書は節が取れない。`get_document_outline` と
-`get_sentences` は、そのとき `caveat` に理由と対処（`reparse_document`）を入れて返す。
+簡易解析で取り込んだ文書は、`get_document_outline` と `get_sentences` が
+`caveat` に理由と対処（`reparse_document`）を入れて返す。節が取れなかったときだけ
+「節は取れていません」が付く（簡易解析でも節はたいてい取れるので、
+取れているものを取れないと言わない）。
+
+**読み順が崩れている疑いが検出されているときは、それを先に言う。** 2 段組の左右が
+語単位で噛み合うと、訳が正しくても原文そのものが壊れている。この状態は
+`fix_sentence_boundary` では戻せない（結合と分割では噛み合った語をほどけない）ので、
+訳す前に原文を確かめ、GROBID を立てて `reparse_document` するのが唯一の道になる。
 
 ## プロンプト
 

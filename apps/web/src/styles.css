@@ -273,6 +273,18 @@ textarea {
   border-color: currentColor;
 }
 
+.badge.is-danger {
+  color: #b3261e;
+  border-color: currentColor;
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .badge.is-danger {
+    color: #f87171;
+  }
+}
+
 .badge.is-warn {
   color: var(--warn);
   border-color: currentColor;
@@ -693,6 +705,36 @@ textarea {
   margin: 0 0 0.1rem;
   font-size: 0.7rem;
   color: var(--muted);
+}
+
+/* 検索に当たって出ている「訳さない行」。本文のヒットと同じ濃さで並ぶと
+   訳し忘れに見えるので、薄いまま印だけ足す。 */
+.card.is-nonbody.is-match {
+  opacity: 0.85;
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.card-nonbody-match {
+  margin-left: 0.4rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.65rem;
+}
+
+/* 絞り込みの結果に「何が何件当たったか」を出す。訳の付かないカードが
+   並ぶ理由がここで分かる。 */
+.sidebar-filter-note {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 0 0.4rem;
+  padding: 0.3rem 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 /* どの文の訳かを突き合わせるための原文と位置。訳文だけでは見分けが付かない。 */

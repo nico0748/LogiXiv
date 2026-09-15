@@ -1,4 +1,4 @@
-import type { NonBodyKind, PageSize } from './types.ts';
+import type { NonBodyKind, PageSize, StructureQuality } from './types.ts';
 import type { TextChunk } from './sentences.ts';
 
 /**
@@ -321,8 +321,32 @@ export function buildLines(chunks: TextChunk[]): Line[] {
       const to = columns[i + 1]!.from;
       if (Number.isFinite(from) && Number.isFinite(to) && to > from) gutters.push({ from, to });
     }
-    const spansGutter = (chunk: TextChunk): boolean =>
+    const crossesGutter = (chunk: TextChunk): boolean =>
       gutters.some((gutter) => chunk.x <= gutter.from + 1 && chunk.x + chunk.w >= gutter.to - 1);
+
+    /**
+     * 段抜きかどうかは、文字片ごとではなく**行ごと**に決める。
+     *
+     * pdf.js は 1 行を 1 個の文字片で返すとは限らない。両端揃えで語間が伸びた箇所、
+     * 書体の切り替わり（インライン数式・`\texttt`）、脚注記号の前後で切れる。
+     * 段抜きの行がそうして割れると、段間をまたぐ断片だけが「段抜き」に、
+     * 残りの断片は「段の中の行」に振り分けられる。読み順は帯（段抜き）→ 段の順なので、
+     * 行の左半分が右半分より**後ろ**に回り、1 つの文の中で語が入れ替わる。
+     *
+     * 実測（pdflatex の 2 段組・段抜きアブストラクト、インライン数式あり）:
+     *   "… reused for both Training with the sparse kernel from scratch … training and inference."
+     * ここで期待される 2 文は "The kernel is implemented once and reused for both training
+     * and inference." と "Training with the sparse kernel from scratch …"。
+     * `fix_sentence_boundary` は結合と文字位置での分割しかできないので、
+     * こうして語単位で噛み合った文字列は道具の中では二度と戻せない。
+     *
+     * 同じ y に並ぶ文字片のうち 1 つでも段間をまたいでいれば、その行は紙の上で
+     * 段抜きの行。行に属する文字片を全部まとめて段抜き扱いにする。
+     * 本物の 2 段組の行は左右が段間で切れているので、またぐ文字片は 1 つも無い。
+     */
+    const fullWidthRows = new Set<number>();
+    for (const chunk of pageChunks) if (crossesGutter(chunk)) fullWidthRows.add(rowKey(chunk));
+    const spansGutter = (chunk: TextChunk): boolean => fullWidthRows.has(rowKey(chunk));
 
     const fullWidth = pageChunks.filter(spansGutter).sort((a, b) => a.y - b.y || a.x - b.x);
     const inColumns = pageChunks.filter((chunk) => !spansGutter(chunk));
@@ -417,6 +441,25 @@ const KNOWN_HEADINGS = new Set([
 const TAIL_HEADINGS = new Set(['references', 'bibliography', 'acknowledgments', 'acknowledgements']);
 
 /**
+ * 付録の始まりらしい見出しか。
+ *
+ * LaTeX の `\appendix` は章番号を英字に切り替えるので、付録の見出しは
+ * "A Additional Sweeps" / "B Implementation Notes" / "Appendix A Proofs" の形で出る。
+ * 数字だけを見る `headingNumber` では拾えない。
+ *
+ * 参考文献のエントリ（"M. Tanaka. Block structured kernels. In Proc. ICML, 2023."）と
+ * 見分ける決め手は、**英字の直後にピリオドが無いこと**。人名のイニシャルには必ず点が付く。
+ * 念のため、西暦や掲載誌のような参考文献らしい手掛かりがある行も外す。
+ */
+function isAppendixHeading(text: string): boolean {
+  if (text.length > 60) return false;
+  if (REFERENCE_SHAPE.test(text)) return false;
+  const bare = bareHeading(text);
+  if (bare === 'appendix' || bare === 'appendices') return true;
+  return /^(?:Appendix\s+)?[A-Z](?:\.\d+)*\s+\p{Lu}/u.test(text);
+}
+
+/**
  * 図表のキャプションか。出版社ごとに区切りが違う:
  *   "Figure 1: ..."（多数） / "Fig. 2 Overview"（Springer） /
  *   "FIGURE 3 Accuracy"（Wiley） / "Figure 4 | Latency"（Nature） / "Table 2. ..."
@@ -444,6 +487,20 @@ function isCaption(text: string): boolean {
  */
 const REFERENCE_ENTRY = /^\[\d+\]\s*\p{Lu}/u;
 const REFERENCE_SHAPE = /\b(?:19|20)\d{2}\b|\bIn\s+Proc|\barXiv|\bJournal\b|\bpp?\.\s*\d|\bpages?\s+\d|\d+\(\d+\):\d/;
+
+/**
+ * 擬似コードの行番号（`algorithmic` / `algpseudocode` が付ける "1:" "2:" …）。
+ *
+ * 版面だけでは擬似コードを本文と切り分けられない。実測（`algorithm` + `algpseudocode`、
+ * 段の中に固定したフロート）で、演算子を含む 1〜4 行目は数式として落ちるのに、
+ * `5: end for` と `6: return M` だけが本文に残り、しかも文書の先頭に来るので
+ * `\title` の無い PDF では**それが題名**になっていた（一覧にもタブにも `5: end for 6: return M`）。
+ *
+ * 論文の本文が "12: " のような形で始まることは無いので、この形自体が十分に強い手掛かり。
+ * それでも 1 行だけで判断せず、同じ段で隣り合う行にも同じ形があることを求める
+ * （擬似コードは必ず複数行あり、偶然の一致はここで消える）。
+ */
+const PSEUDOCODE_LINE = /^\d{1,3}:\s/;
 
 /** 行末の式番号 "(3)" / "(3a)" / "[12]"。幅と数式らしさの評価から外す。 */
 const EQUATION_NUMBER = /\s*[([]\d+[a-z]?[)\]]\s*$/;
@@ -583,17 +640,39 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     return line.right >= right - Math.max(2, width * 0.03);
   };
 
-  // 柱・ノンブルの候補: ページ内で最初か最後の行で、隣の行との間隔が広いもの。
+  /**
+   * 柱・ノンブルの候補: ページの上端か下端にあって、次の行との間隔が広いもの。
+   *
+   * 「端の 1 行」ではなく「端に並ぶ**帯**」で見る。fancyhdr の柱は
+   * `\fancyhead[L]{…}` と `\fancyhead[R]{…}` が同じ y に左右で並ぶので、
+   * 1 行目だけを見ると「すぐ下（＝同じ y）に行がある」ことになり、
+   * 間隔が 0 と評価されて柱が柱と判定されない。
+   * 実測（pdflatex + fancyhdr の 2 段組）で "Preprint. Under review." が本文に混ざり、
+   * ページをまたぐ文が 2 つ、柱を挟んで真っ二つに壊れていた。
+   */
   const edgeCandidate = new Set<number>();
+  const sameRow = (a: Line, b: Line): boolean =>
+    Math.abs(a.y - b.y) <= Math.max(2, Math.min(a.height, b.height) * 0.6);
   for (const [page, pageLines] of byPage) {
     const spacing = stats.get(page)!.spacing;
     const sorted = [...pageLines].sort((a, b) => a.y - b.y);
-    const first = sorted[0];
-    const second = sorted[1];
-    const last = sorted[sorted.length - 1];
-    const secondLast = sorted[sorted.length - 2];
-    if (first && (!second || second.y - first.y > spacing * 1.2)) edgeCandidate.add(first.index);
-    if (last && (!secondLast || last.y - secondLast.y > spacing * 1.2)) edgeCandidate.add(last.index);
+    /** 端から数えて、同じ y に並ぶ行のかたまり。`step` が 1 なら上端、-1 なら下端。 */
+    const edgeBand = (step: 1 | -1): Line[] => {
+      const band: Line[] = [];
+      for (let i = step === 1 ? 0 : sorted.length - 1; i >= 0 && i < sorted.length; i += step) {
+        const line = sorted[i]!;
+        if (band.length === 0 || sameRow(band[0]!, line)) band.push(line);
+        else break;
+      }
+      return band;
+    };
+    for (const step of [1, -1] as const) {
+      const band = edgeBand(step);
+      if (band.length === 0) continue;
+      const next = sorted[step === 1 ? band.length : sorted.length - 1 - band.length];
+      if (next !== undefined && Math.abs(next.y - band[0]!.y) <= spacing * 1.2) continue;
+      for (const line of band) edgeCandidate.add(line.index);
+    }
   }
 
   const repeated = new Map<string, Set<number>>();
@@ -628,6 +707,52 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       break;
     }
   }
+
+  /**
+   * 本文に紛れ込む脚注記号（肩付きの数字・記号）を外すための材料。
+   *
+   * pdf.js は肩付きの記号もただの文字片として返すので、`…in all remaining experiments.` の
+   * 直後に `1` が続いた文字列になる。文の分割器は「終端記号の後ろに空白が要る」ので
+   * ここで切れず、実測（pdflatex の 2 段組）では脚注の付いた文とその次の文が
+   * 1 枚のカードに同居し、正解 2 文がまとめて取れなくなっていた。
+   *
+   * 「小さくて上に浮いた数字」だけを手掛かりにすると、本文中の指数（`O(n2)`）まで
+   * 消してしまう。そこで**同じページの脚注の番号と一致すること**を条件に加える。
+   * 脚注はすでに版面から検出できているので、対応する脚注が無い肩付き数字には手を触れない。
+   */
+  const footnoteMarks = new Map<number, Set<string>>();
+  for (const line of lines) {
+    if (!footnote.has(line.index)) continue;
+    const mark = /^(\d{1,3}|[*†‡§¶]{1,3})/.exec(line.text)?.[1];
+    if (mark === undefined) continue;
+    const set = footnoteMarks.get(line.page);
+    if (set) set.add(mark);
+    else footnoteMarks.set(line.page, new Set([mark]));
+  }
+
+  /** 行から脚注記号の文字片を外した写しを返す。外すものが無ければ元の行をそのまま返す。 */
+  const withoutFootnoteMarks = (line: Line): Line => {
+    const marks = footnoteMarks.get(line.page);
+    if (marks === undefined || line.chunks.length < 2) return line;
+    const baseY = median(line.chunks.map((chunk) => chunk.y));
+    const kept = line.chunks.filter((chunk, at) => {
+      if (at === 0) return true; // 行頭の記号は脚注本文そのもの
+      const text = chunk.text.trim();
+      if (!marks.has(text)) return true;
+      if (chunk.h >= line.height * 0.85) return true; // 小さくない＝本文の数字
+      // 上へ浮いていなければ本文の一部。浮いていれば肩付きの記号なので外す。
+      return chunk.y >= baseY - Math.max(0.3, line.height * 0.05);
+    });
+    if (kept.length === line.chunks.length) return line;
+    return {
+      ...line,
+      chunks: kept,
+      text: kept.map((chunk) => chunk.text).join('').replace(/\s+/g, ' ').trim(),
+      left: Math.min(...kept.map((chunk) => chunk.x)),
+      right: Math.max(...kept.map((chunk) => chunk.x + chunk.w)),
+      height: median(kept.map((chunk) => chunk.h)),
+    };
+  };
 
   // 同じ段の直前の行。段落の途中かどうかの判定に使う。
   const previousByColumn = new Map<string, Line>();
@@ -777,9 +902,21 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         for (let j = i + step; j >= 0 && j < ordered.length; j += step) {
           const line = ordered[j]!;
           if (line.page !== anchor.page || line.column !== anchor.column) break;
-          if (Math.abs(line.y - previous.y) > spacing * 1.6) break;
+          const gap = Math.abs(line.y - previous.y);
+          if (gap > spacing * 1.6) break;
+          /**
+           * 別行立ての構成要素（分数の分子と分母、大きな括弧、行列の段）は、
+           * 本文の行送りより明らかに**詰まって**積まれる。字下げは揃わないので、
+           * 左端の一致だけを見ていると、真ん中の段（＝式の本体）だけが本文に残る。
+           *
+           * 実測（pdflatex の 2 段組、`\frac` を含む `equation`）: 分子 `QK⊤` と
+           * 分母 `d` は落ちるのに、間の `Attention(Q, K,V ) = softmax √ V, (1)` だけが
+           * 本文になり、次の文と 1 枚のカードに同居していた。
+           * 段幅の 70% という「短さ」の門も、右にぶら下がる式番号のぶんで通り抜けている。
+           */
+          const stacked = gap < spacing * 0.8;
           // 本文行は段の左端に揃うので、字下げの揃った行だけが表の続きになりうる。
-          if (Math.abs(line.left - anchor.left) > 2) break;
+          if (!stacked && Math.abs(line.left - anchor.left) > 2) break;
           displayBlock.add(line.index);
           previous = line;
         }
@@ -787,12 +924,48 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     }
   }
 
-  // 参考文献より後ろは本文にしない。
-  let tailFrom = Number.POSITIVE_INFINITY;
-  for (const line of lines) {
-    if (TAIL_HEADINGS.has(bareHeading(line.text)) && line.text.length <= 40) {
-      tailFrom = line.index;
-      break;
+  // 擬似コードの行。同じ段で隣り合う行にも行番号があるものだけを塊として落とす。
+  const pseudocode = new Set<number>();
+  {
+    const byIndex = new Map<number, Line>();
+    for (const line of lines) if (PSEUDOCODE_LINE.test(line.text)) byIndex.set(line.index, line);
+    for (const [index, line] of byIndex) {
+      const neighbour = [byIndex.get(index - 1), byIndex.get(index + 1)].find(
+        (other) => other !== undefined && other.page === line.page && other.column === line.column,
+      );
+      if (neighbour !== undefined) pseudocode.add(index);
+    }
+  }
+
+  /**
+   * 参考文献より後ろは本文にしない。ただし**付録が始まったら終わる**。
+   *
+   * 以前は「TAIL_HEADINGS に最初に当たった行より後ろは全部 reference」だった。
+   * ML 系の論文は `\appendix` を `\end{thebibliography}` の後ろに置くのが普通なので、
+   * これだと付録の本文が丸ごと `nonBody.kind='reference'` になり、
+   * `structure.sentences` に 1 文も入らない。しかも進捗は「34 / 34 文」＝完了と出るので
+   * 最後まで気づけず、「参考文献だから訳さない」という**嘘の理由**まで付く。
+   * 実測（pdflatex、付録を参考文献の後ろに置いた 2 段組）で 8 文、
+   * 1 段組の版で 3 文が、検索にも MCP にも届かない場所へ消えていた。
+   */
+  const inTail = new Set<number>();
+  {
+    let tail = false;
+    for (const line of lines) {
+      const bare = bareHeading(line.text);
+      // 見出しらしい大きさか。参考文献の本文は本文より小さく組まれることがあるので、
+      // 「本文と同じかそれ以上の大きさ」を見出しの最低条件にする。
+      const headingLike = line.text.length <= 60 && line.height >= bodyHeight * 0.98;
+      if (headingLike && TAIL_HEADINGS.has(bare) && line.text.length <= 40) {
+        tail = true;
+        continue; // 見出しの行そのものは従来どおり（見出しとして拾わせる）
+      }
+      // 付録・限界・倫理声明のような、参考文献の**後ろに置かれる本文**の始まり。
+      if (tail && headingLike && (isAppendixHeading(line.text) || (KNOWN_HEADINGS.has(bare) && !TAIL_HEADINGS.has(bare)))) {
+        tail = false;
+        continue;
+      }
+      if (tail) inTail.add(line.index);
     }
   }
 
@@ -825,12 +998,38 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     }
   }
 
-  return lines.map((line) => {
+  /**
+   * 前付そのもの（表題・著者・所属・連絡先）の行。
+   *
+   * 「最初の節見出しより前」だけでは広すぎる。`[t]` のフロートは 1 ページ目の段の頭に
+   * 載るので、擬似コードや表のセルまでこの範囲に入ってしまう。
+   * 前付は**ページの先頭から途切れずに続く**ので、1 ページ目の先頭から
+   * 「文として閉じた行」が出るまでを前付とする。表題・著者・所属は文末記号で
+   * 終わらないが、アブストラクトの各文は終わる — 見出しの無いアブストラクトを
+   * 持つ論文で本文を丸ごと落とさないための歯止めでもある。
+   */
+  const frontMatterLines = new Set<number>();
+  for (const line of lines) {
+    if (line.page !== 1 || line.index >= frontMatterUntil) break;
+    // 複数ページで繰り返される柱とノンブルは版面の付物。表題の上に出ていても
+    // 前付を終わらせない（種類は別のところで決まるので、ここでは読み飛ばす）。
+    // 「端にある行」だけで読み飛ばすと、表題そのものが素通りして本文に残る。
+    const repeatedOn = repeated.get(line.text.replace(/\d+/g, '#'))?.size ?? 0;
+    if (/^\d{1,4}$/.test(line.text) || (edgeCandidate.has(line.index) && repeatedOn >= 2)) continue;
+    if (/[.!?]["'’”)\]]?$/.test(line.text)) break;
+    frontMatterLines.add(line.index);
+  }
+
+  return lines.map((original) => {
+    // 肩付きの脚注記号を外した写しで判定する。記号が本文の文字列に残ると、
+    // 文末の直後に数字が続いて文が切れなくなる（詳細は footnoteMarks の説明）。
+    const line = withoutFootnoteMarks(original);
     const pageStats = stats.get(line.page)!;
     const span = Math.max(1, pageStats.bottom - pageStats.top);
     const relative = (line.y - pageStats.top) / span;
     const nearEdge = relative <= 0.15 || relative >= 0.85;
-    const key = line.text.replace(/\d+/g, '#');
+    // 柱の照合は、記号を外す前の文字列で行う（repeated はそちらで作ってある）。
+    const key = original.text.replace(/\d+/g, '#');
     const seenOn = repeated.get(key)?.size ?? 0;
 
     /** 付物として落とす。種類は画面が「なぜ右に無いか」を言うために持たせる。 */
@@ -852,7 +1051,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     // ノンブル。位置と形で先に決めてしまう（種類が版面の都合で入れ替わらないように）。
     const isPageNumber = nearEdge && /^\d{1,4}$/.test(line.text);
 
-    if (line.index > tailFrom) return drop(isPageNumber ? 'pageNumber' : 'reference');
+    if (inTail.has(line.index)) return drop(isPageNumber ? 'pageNumber' : 'reference');
     if (footnote.has(line.index)) return drop('footnote');
     if (continuation.has(line.index)) return drop(continuationKind.get(line.index) ?? 'caption');
     if (startsCaption(line)) return drop('caption');
@@ -866,6 +1065,24 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       return drop('pageNumber');
     }
 
+    /**
+     * 前付の行（表題・著者・所属・連絡先）。
+     *
+     * これまで落ちていたのは、版面の規則で表や数式に化けた行だけだった。
+     * 表題は普通の 1 行なのでどの規則にも当たらず、**本文の 1 文目**として出ていた。
+     * 実測（pdflatex の 2 段組）で `order = 0` の文が
+     * "Block Sparse Attention for Long Documents Department of Computer Science, …"
+     * になり、題名と著者と所属が 1 枚のカードに同居していた。
+     *
+     * 落とす範囲は「1 ページ目の、最初の節見出しより前」に限る。そのうえで
+     * **文として閉じていない行だけ**にする。見出しの無いアブストラクトを持つ論文で
+     * 本文を丸ごと落とさないための歯止め — 表題・著者・所属は文末記号で終わらないが、
+     * アブストラクトの各文は終わる。
+     */
+    if (frontMatterLines.has(line.index)) {
+      return drop('frontMatter');
+    }
+
     const width = columnWidth.get(`${line.page}:${line.column}`) ?? line.right - line.left;
     // 式番号ぶんを差し引いた実効幅で「短さ」を測る。右端の "(3)" のせいで
     // 数式行が段幅いっぱいになり、数式として落とせていなかった。
@@ -874,6 +1091,13 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       line.text.length === 0 ? 0 : ((line.right - line.left) * stripped.length) / line.text.length;
     const isShort = width > 0 && effectiveWidth < width * 0.7;
     const endsOpen = !/[.!?:;,]$/.test(line.text);
+
+    // 擬似コードの行。版面では本文と見分けが付かないので、行番号の形で決める
+    // （説明は PSEUDOCODE_LINE を参照）。数式の判定より先に見る — 塊の中の行が
+    // 「演算子のある行だけ数式、残りは本文」と割れると、かえって読めない断片が並ぶ。
+    if (pseudocode.has(line.index)) {
+      return drop('other');
+    }
 
     // 数式は幅で門を作らない。段が狭いほど数式は段幅いっぱいになるので、
     // 「短いこと」を条件にすると 3 段組で軒並み本文に混ざり、しかも終端記号が
@@ -902,7 +1126,15 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       if (monotonic.has(line.index)) score += 1;
       if (previous && line.y - previous.y > pageStats.spacing * 1.4) score += 1;
       // 直前が文として閉じていなければ段落の途中。見出しではなく箇条書きの可能性が高い。
-      if (previous && !/[.!?]$/.test(previous.text)) score -= 1;
+      //
+      // ただし直前の行が**隣接しているとき**だけ。上の行との間が空いていれば、
+      // そこにあるのは別の要素（フロートの最終行・前の段落）なので、文として
+      // 閉じていなくてもこの行とは関係がない。実測（`algorithm` を段の中に固定した
+      // 2 段組）で、擬似コードの `6: return M` の直後に来た小見出し
+      // `1.2 Cost of the Selection Pass` が -1 で本文に落ち、次の文と癒着していた。
+      // 本文と同じ大きさの小見出し（IEEE / ACL 系の体裁）では文字高の +1 が無いので、
+      // この -1 がそのまま判定をひっくり返す。
+      else if (previous && !/[.!?]$/.test(previous.text)) score -= 1;
       if (score >= 2) return { ...line, role: 'heading' as const };
     }
 
@@ -934,13 +1166,29 @@ export function guessTitleFromChunks(chunks: TextChunk[]): string | null {
   const body = median(lines.map((line) => line.height));
   if (body <= 0) return null;
 
-  const largest = Math.max(...lines.map((line) => line.height));
+  /**
+   * 探す範囲は「最初の節見出しより前」だけにする。
+   *
+   * 表題は前付にしかない。範囲を切らずに「1 ページ目でいちばん大きな文字」を取ると、
+   * 表題を持たない PDF（技術報告・付録だけの抜き刷り）で**節見出しが題名になる**。
+   * 実測（`\title` の無い pdflatex の 2 段組）で題名が
+   * "4 Limitations 1 Greedy Block Selection" になり、一覧にもタブにもそれが出ていた。
+   * 節見出しより前に何も無ければ、そこで諦めて null を返す方が正しい。
+   */
+  const frontMatter: Line[] = [];
+  for (const line of lines) {
+    if (KNOWN_HEADINGS.has(bareHeading(line.text)) || headingNumber(line.text) !== null) break;
+    frontMatter.push(line);
+  }
+  if (frontMatter.length === 0) return null;
+
+  const largest = Math.max(...frontMatter.map((line) => line.height));
   // 本文と同じ大きさしか無いページでは、表題を見分けられない。
   if (largest < body * 1.15) return null;
 
   const TOLERANCE = 0.9;
   const parts: string[] = [];
-  for (const line of lines) {
+  for (const line of frontMatter) {
     if (line.height >= largest * TOLERANCE) {
       parts.push(line.text.trim());
       continue;
@@ -953,4 +1201,114 @@ export function guessTitleFromChunks(chunks: TextChunk[]): string | null {
   // 短すぎるもの（柱やページ番号）と、長すぎるもの（表題ではない何か）は使わない。
   if (title.length < 8 || title.length > 300) return null;
   return title;
+}
+
+/**
+ * 「同じ位置で割れている行」と認める空白の幅を、字送りの何倍で測るか。
+ *
+ * 左右の段が 1 行に連結されると、その行の中に**柱間そのものの幅の空白**が残る。
+ * 語間は両端揃えで伸びても字送りの 1 倍前後なので、1.6 倍あれば語間ではない。
+ *
+ * ここを厳しく（3 倍などに）すると、`\columnsep` 既定の 10pt（10pt 本文なら
+ * 字送りの 2.3 倍）が拾えなくなる — arXiv のプレプリントで最も多い値なので、
+ * いちばん見つけたい崩れを取り逃がす。緩めたぶんは「同じ x に何行そろうか」で担保する。
+ */
+const MERGED_GAP_ADVANCES = 1.6;
+/** 空白の位置をまとめる粒度（pt）。両端揃えで柱間の位置は数 pt 揺れる。 */
+const MERGED_GAP_BIN = 4;
+/**
+ * 同じ位置で割れている本文行が、1 ページに何行あったら「段の連結」と言うか。
+ *
+ * 本当に連結していれば、そのページのほぼ全ての本文行（数十行）が該当する。
+ * 一方、偶然そろうもの（本文中に紛れた表の数行、著者名を並べた行）はせいぜい数行。
+ * 8 行にしておけば、どちらの側にも十分な余裕がある。
+ */
+const MERGED_GAP_LINES = 8;
+
+/**
+ * 読み順が崩れていないかを、解析結果そのものから点検する。
+ *
+ * ここで探すのは「2 段組の左右が 1 行に連結された」痕跡。これがこの経路でいちばん重い
+ * 壊れ方で、しかも**道具の中では回復できない**（`fix_sentence_boundary` は結合と
+ * 文字位置での分割しかできないので、語単位で噛み合った文字列は戻せない）。
+ *
+ * 手掛かりは版面だけで取れるものにする。段の検出が成功していれば、左段と右段は
+ * 別々の行になるので、行の中に柱間ぶんの空白は残らない。逆に検出が失敗して
+ * 連結されると、そのページのほぼ全ての本文行が**同じ x** で割れる。
+ * だから「同じ位置に大きな空白がある本文行が、1 ページに何行あるか」を数えれば、
+ * 段の検出とは独立した方法で連結を見つけられる。
+ *
+ * 誤検出を避けるための絞り込み:
+ *   - 本文の行だけを見る（表・擬似コード・著者行は付物なので最初から外れる）
+ *   - 空白の両側に十分な長さの文字があること（行末の字下げや式番号を数えない）
+ *   - 空白の位置が版面の中ほどにあること（段間は真ん中付近にしか来ない）
+ */
+export function assessReadingOrder(lines: readonly ClassifiedLine[]): StructureQuality {
+  const clean: StructureQuality = {
+    readingOrderRisk: 'low',
+    reason: '段の連結など、読み順が崩れている痕跡は見つかりませんでした（崩れが無いことの保証ではありません）。',
+  };
+
+  const body = lines.filter((line) => line.role === 'body' && line.chunks.length >= 2);
+  if (body.length === 0) return clean;
+
+  const advance = charAdvance(body.flatMap((line) => line.chunks));
+  const threshold = Math.max(4, advance * MERGED_GAP_ADVANCES);
+
+  /** ページごとの版面の x 範囲。段間は必ずこの中ほどに来る。 */
+  const extent = new Map<number, { min: number; max: number }>();
+  for (const line of body) {
+    const found = extent.get(line.page);
+    if (found === undefined) extent.set(line.page, { min: line.left, max: line.right });
+    else {
+      found.min = Math.min(found.min, line.left);
+      found.max = Math.max(found.max, line.right);
+    }
+  }
+
+  /** ページ → 空白の位置（ビン）→ その位置で割れている本文行の数。 */
+  const gapsByPage = new Map<number, Map<number, number>>();
+  for (const line of body) {
+    const span = extent.get(line.page)!;
+    const width = span.max - span.min;
+    if (width <= 0) continue;
+    const ordered = [...line.chunks].sort((a, b) => a.x - b.x);
+    let before = 0;
+    for (let i = 1; i < ordered.length; i++) {
+      before += ordered[i - 1]!.text.trim().length;
+      const gap = ordered[i]!.x - (ordered[i - 1]!.x + ordered[i - 1]!.w);
+      if (gap < threshold) continue;
+      // 空白の両側に、ひとまとまりの文章と言える長さがあるか。
+      const after = ordered.slice(i).reduce((sum, chunk) => sum + chunk.text.trim().length, 0);
+      if (before < 10 || after < 10) continue;
+      const center = ordered[i - 1]!.x + ordered[i - 1]!.w + gap / 2;
+      const relative = (center - span.min) / width;
+      if (relative < 0.2 || relative > 0.8) continue;
+      const bins = gapsByPage.get(line.page) ?? new Map<number, number>();
+      const bin = Math.round(center / MERGED_GAP_BIN);
+      bins.set(bin, (bins.get(bin) ?? 0) + 1);
+      gapsByPage.set(line.page, bins);
+    }
+  }
+
+  const hits: { page: number; count: number }[] = [];
+  for (const [page, bins] of gapsByPage) {
+    // 隣り合うビンは同じ柱間。1 つ隣まで足して数える。
+    let best = 0;
+    for (const [bin, count] of bins) best = Math.max(best, count + (bins.get(bin + 1) ?? 0));
+    if (best >= MERGED_GAP_LINES) hits.push({ page, count: best });
+  }
+  if (hits.length === 0) return clean;
+
+  hits.sort((a, b) => a.page - b.page);
+  const pages = hits.map((hit) => hit.page);
+  const shown = pages.slice(0, 5).join(', ') + (pages.length > 5 ? ' ほか' : '');
+  const total = hits.reduce((sum, hit) => sum + hit.count, 0);
+  return {
+    readingOrderRisk: 'high',
+    reason:
+      `${shown} ページで、左右の段が 1 行に連結された疑いがあります` +
+      `（同じ位置で割れている本文行が ${total} 行）。` +
+      '語の順番が入れ替わっている可能性が高く、文の区切りを直しても戻せません。原文と PDF を見比べてください。',
+  };
 }

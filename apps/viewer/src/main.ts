@@ -1,5 +1,8 @@
 import './style.css';
 import type { ExportPayload, NonBodySentence, Note, Section, Sentence } from './types.ts';
+// 本文以外の行をどの文の後ろに置くかは、画面・書き出しの静的部分と同じ規則を使う。
+// 規則を写し持っていたせいで、3 か所とも同じずれ方をしていた。
+import { placeNonBody } from '../../../packages/core/src/nonbody.ts';
 import {
   base64ToBytes,
   isWorkerAvailable,
@@ -93,9 +96,6 @@ function countLabel(
   return `${translated} / ${hashes.size} 文${notTranslated}${repeats}`;
 }
 
-/** 本文より前にあるものを束ねる、実在しない文 id。 */
-const HEAD_ANCHOR = '\u0000head';
-
 const NON_BODY_LABELS: Record<NonBodySentence['kind'], string> = {
   frontMatter: '表題・著者',
   runningHead: '柱',
@@ -107,6 +107,55 @@ const NON_BODY_LABELS: Record<NonBodySentence['kind'], string> = {
   table: '表',
   other: '本文以外',
 };
+
+/**
+ * 用語集は何件までなら開いたまま出すか。
+ *
+ * 論文によっては数百件あるので、全部開くと対訳が下へ追いやられる。
+ * かといって既定で畳むと、少数の用語集は「無い」のと変わらない。
+ */
+const GLOSSARY_OPEN_MAX = 20;
+
+/**
+ * 用語集をビューアにも出す。
+ *
+ * これまで用語集は静的フォールバック（JS が動かない環境用の素の HTML）の中にしか
+ * 出力されておらず、ビューアは起動時にその div ごと外していた。つまり普通に開いた
+ * 人には 1 文字も見えず、**JS を切った人にだけ**見えていた。
+ * 訳語をどう決めたかが伝わらないと受け取った側は同じ語を別の訳で書き直すので、
+ * 用語集を書き出す意味そのものが無くなる。
+ *
+ * 埋め込みデータは他人から来たファイルなので、ここでも textContent にしか入れない。
+ */
+function glossaryPanel(entries: ExportPayload['document']['annotations']['glossary']): HTMLElement {
+  const panel = el('details', 'lxv-glossary');
+  const list = (Array.isArray(entries) ? entries : []).filter(
+    (entry) => entry && typeof entry === 'object' && typeof entry.term === 'string',
+  );
+  if (list.length === 0) {
+    panel.hidden = true;
+    return panel;
+  }
+  panel.open = list.length <= GLOSSARY_OPEN_MAX;
+  const summary = el('summary', 'lxv-glossary-summary', `用語集（${list.length}）`);
+  panel.append(summary);
+
+  const table = el('table', 'lxv-glossary-table');
+  const head = el('tr');
+  for (const label of ['原語', '訳語', 'メモ']) head.append(el('th', undefined, label));
+  table.append(head);
+  for (const entry of list) {
+    const row = el('tr');
+    const term = el('td', 'lxv-glossary-term', entry.term);
+    term.lang = 'en';
+    row.append(term);
+    row.append(el('td', undefined, typeof entry.translation === 'string' ? entry.translation : ''));
+    row.append(el('td', 'lxv-glossary-note', typeof entry.note === 'string' && entry.note ? entry.note : ''));
+    table.append(row);
+  }
+  panel.append(table);
+  return panel;
+}
 
 function boot(): void {
   const payload = readPayload();
@@ -141,7 +190,11 @@ function boot(): void {
   const meta = el(
     'span',
     'lxv-meta',
-    countLabel(paper, sentences) + ` · ${paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}`,
+    countLabel(paper, sentences) +
+      ` · ${paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}` +
+      // 受け取った側にも、原文が信用できるかどうかは要る。
+      // 崩れを直せなくても、崩れていると分かれば読み方を変えられる。
+      (paper.structure.quality?.readingOrderRisk === 'high' ? ' · 読み順に崩れの疑い' : ''),
   );
   header.append(title, search, meta);
 
@@ -149,6 +202,9 @@ function boot(): void {
   const sidebar = el('aside', 'lxv-sidebar');
   const emptyMessage = el('p', 'lxv-empty', '一致する文がありません。');
   emptyMessage.hidden = true;
+  /** 絞り込みの結果に「何が何件当たったか」。訳の付かないカードが並ぶ理由をその場に出す。 */
+  const filterNote = el('p', 'lxv-filter-note');
+  filterNote.hidden = true;
   layout.append(header, pdfColumn, sidebar);
   root.append(layout);
 
@@ -160,29 +216,20 @@ function boot(): void {
   groups.push(currentGroup);
 
   /**
-   * 本文として扱わなかった行を、直前の本文の後ろに差し込むための索引。
-   * 位置はまず hash で探す（区切りを直すと通し番号は振り直されるため）。
+   * 本文として扱わなかった行を、直前の本文の後ろに差し込む。
+   * 位置の決め方は core と共有する（同じ本文が 2 回出る論文で、手前の出現に
+   * 吸い寄せられて参考文献が序論の途中に出ていた）。
    */
-  const nonBodyAfter = new Map<string, NonBodySentence[]>();
-  {
-    const byHash = new Map<string, string>();
-    const byOrder = new Map<number, string>();
-    for (const sentence of sentences) {
-      if (!byHash.has(sentence.hash)) byHash.set(sentence.hash, sentence.id);
-      if (!byOrder.has(sentence.order)) byOrder.set(sentence.order, sentence.id);
-    }
-    for (const item of paper.structure.nonBody ?? []) {
-      const anchor =
-        (item.afterHash ? byHash.get(item.afterHash) : undefined) ?? byOrder.get(item.afterOrder) ?? HEAD_ANCHOR;
-      const list = nonBodyAfter.get(anchor);
-      if (list) list.push(item);
-      else nonBodyAfter.set(anchor, [item]);
-    }
-  }
+  const placement = placeNonBody(sentences, paper.structure.nonBody);
+
+  /** 本文以外のカード。検索でも当てるので、本文と別に持っておく。 */
+  const nonBodyCards: { item: NonBodySentence; card: HTMLElement }[] = [];
 
   let lastSection: string | null | undefined;
+  sidebar.append(glossaryPanel(paper.annotations.glossary));
+  sidebar.append(filterNote);
   sidebar.append(emptyMessage);
-  for (const item of nonBodyAfter.get(HEAD_ANCHOR) ?? []) {
+  for (const item of placement.head) {
     const card = buildNonBodyCard(item);
     currentGroup.cards.push(card);
     sidebar.append(card);
@@ -201,7 +248,7 @@ function boot(): void {
     const card = buildCard(sentence);
     currentGroup.cards.push(card);
     sidebar.append(card);
-    for (const item of nonBodyAfter.get(sentence.id) ?? []) {
+    for (const item of placement.after.get(sentence.id) ?? []) {
       const extra = buildNonBodyCard(item);
       currentGroup.cards.push(extra);
       sidebar.append(extra);
@@ -211,8 +258,13 @@ function boot(): void {
   function buildNonBodyCard(item: NonBodySentence): HTMLElement {
     const card = el('article', 'lxv-card lxv-nonbody');
     card.dataset['id'] = item.id;
-    card.append(el('p', 'lxv-nonbody-kind', `${NON_BODY_LABELS[item.kind]}（訳しません）`));
+    const kind = el('p', 'lxv-nonbody-kind', `${NON_BODY_LABELS[item.kind]}（訳しません）`);
+    // 検索に当たったときの印。訳が付かないカードなので、本文のヒットと
+    // 同じ見た目で並ぶと「訳し忘れの一致」に読まれる。
+    kind.append(el('span', 'lxv-nonbody-match', '検索に一致'));
+    card.append(kind);
     card.append(el('p', 'lxv-source', item.text));
+    nonBodyCards.push({ item, card });
     return card;
   }
 
@@ -470,11 +522,17 @@ function boot(): void {
     if (needle.length === 0) {
       visibleIds = null;
       for (const card of cards.values()) card.hidden = false;
+      // 絞り込みを解いたら、本文以外の行も元どおり全部出す。
+      for (const entry of nonBodyCards) {
+        entry.card.hidden = false;
+        entry.card.classList.remove('is-match');
+      }
       for (const group of groups) if (group.heading) group.heading.hidden = false;
       for (const list of markers.values()) {
         for (const marker of list) marker.classList.remove('is-filtered-out', 'is-match');
       }
       emptyMessage.hidden = true;
+      filterNote.hidden = true;
       return;
     }
 
@@ -494,6 +552,17 @@ function boot(): void {
       if (matched) visibleIds.add(sentence.id);
     }
 
+    // 本文以外の行も同じ検索語で当てる。画面に現に出ているカードを検索が
+    // 「ありません」と言う状態を作らないため。訳の対象ではないので、
+    // 当たったカードには印を付けて本文のヒットと見分けが付くようにする。
+    let nonBodyMatches = 0;
+    for (const entry of nonBodyCards) {
+      const matched = entry.item.text.toLowerCase().includes(needle);
+      entry.card.hidden = !matched;
+      entry.card.classList.toggle('is-match', matched);
+      if (matched) nonBodyMatches++;
+    }
+
     // 配下が全部消えた見出しは一緒に隠す（見出しだけが宙に浮くのを防ぐ）。
     for (const group of groups) {
       if (!group.heading) continue;
@@ -508,7 +577,11 @@ function boot(): void {
         marker.classList.toggle('is-match', matched);
       }
     }
-    emptyMessage.hidden = visibleIds.size > 0;
+    filterNote.hidden = false;
+    filterNote.textContent =
+      `一致: 本文 ${visibleIds.size} 件` +
+      (nonBodyMatches > 0 ? ` ／ 訳さない行 ${nonBodyMatches} 件（参考文献・図表など）` : '');
+    emptyMessage.hidden = visibleIds.size + nonBodyMatches > 0;
   }
 
   search.addEventListener('input', applyFilter);

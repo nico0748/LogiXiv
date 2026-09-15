@@ -37,12 +37,19 @@ export interface SkippedWrite {
 export interface SearchHit {
   sentenceId: string;
   sentenceHash: string;
-  order: number;
+  /** 本文の通し番号。本文として扱わなかった行には無いので null。 */
+  order: number | null;
   page: number;
   text: string;
   translation: string | null;
   notes: string[];
   where: string[];
+  /** 訳の対象になる本文か。false は参考文献・キャプション・脚注など。 */
+  isBody: boolean;
+  /** 本文でないときだけ、その種類。 */
+  nonBodyKind: string | null;
+  /** 本文でないときだけ、直前に来る本文の通し番号（本文より前なら -1）。 */
+  afterOrder: number | null;
 }
 
 export interface SentenceView {

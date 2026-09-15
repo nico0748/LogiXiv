@@ -107,6 +107,32 @@ export interface NonBodySentence extends Sentence {
 
 export type ParserKind = 'grobid' | 'fallback';
 
+/**
+ * 解析結果がどれくらい怪しいか、という**解析側からの自己申告**。
+ *
+ * これが無かったとき、画面に出るのは「簡易解析」バッジの一択だった。
+ * 完璧に取れた文書にも、本文 45 文のうち 15 文しか原形で取れていない文書にも、
+ * 同じものが出る。読む側には見分けようがなく、崩れたまま最後まで訳し進められる。
+ *
+ * ここで足りないのは精度ではなく、**精度についての正直さ**の方。
+ * 崩れを直せなくても、崩れていると分かれば読む側は原文を見に行ける。
+ *
+ * 誤検出（きれいに取れた文書に警告を出す）は害が大きい。全部に警告を出す実装は
+ * バッジ 1 種類だったときと同じで、見分けが付かないという問題をそのまま戻す。
+ * だから判定は「実際に測れる痕跡があるときだけ」に絞ってある。
+ */
+export interface StructureQuality {
+  /**
+   * 読み順（特に 2 段組の左右の取り違え）が崩れている疑い。
+   *
+   * - `low`  … 自動で検出できる痕跡は無かった。**崩れが無いことの保証ではない**。
+   * - `high` … 段の連結など、読み順が壊れている痕跡が実際に見つかった。
+   */
+  readingOrderRisk: 'low' | 'high';
+  /** なぜそう判断したか。画面にそのまま出せる日本語の一文。 */
+  reason: string;
+}
+
 export interface DocumentStructure {
   /** 構造スキーマのバージョン。hash.ts の STRUCTURE_VERSION と揃える。 */
   version: number;
@@ -126,6 +152,13 @@ export interface DocumentStructure {
    * 画面に「PDF には見えているのに右に無い」を作らないためだけに持つ。
    */
   nonBody?: NonBodySentence[];
+  /**
+   * 解析結果の確からしさについての自己申告。古い保存データと GROBID 経路には無いので省略可。
+   *
+   * 注意: 書き出し HTML の取り込み（sanitizeStructure）では復元されない。
+   * 取り込んだ文書は別の環境で解析されたものなので、こちらで測り直した値ではない。
+   */
+  quality?: StructureQuality;
 }
 
 export type TranslationSource = 'claude' | 'human' | 'import';
