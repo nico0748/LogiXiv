@@ -101,7 +101,7 @@ GROBID に `segmentSentences=1` と `teiCoordinates=s` を付けて投げると�
 ```
 packages/core     型・TEIパーサ・文分割・検証・エクスポート/インポート・マージ・移行（唯一の真実、外部依存ゼロ）
 packages/server   ローカル API（GROBIDプロキシ、ファイルストア、SSE、解析ワーカー）
-packages/mcp      Claude 用 MCP サーバー（stdio、ツール9個＋プロンプト1個）
+packages/mcp      Claude 用 MCP サーバー（stdio、ツール10個＋プロンプト1個）
 apps/web          Vite + React の本体 UI
 apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア（pdf.js 同梱）
 ```
@@ -124,6 +124,8 @@ apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア�
 - **フォールバックでもレイアウトを読む。** 段組を検出してから行を組むので、
   2 段組で左右が混ざらない。柱・ノンブル・図表キャプション・数式・参考文献は本文から外し、
   節見出しも拾う（`npm run measure` で 2 段組の再現率 100% / 混入 0 を確認している）
+- **「訳さない」を記録できる。** 参考文献の断片のように訳す対象でないものを
+  飛ばすだけだと、翻訳の手順が永久に終わらない
 - **`consolidateHeader=0`。** GROBID の既定値 1 は CrossRef へ問い合わせに行く。未公開原稿のタイトルを外部に出さない
 
 詳しくは [docs/architecture.md](docs/architecture.md) と [docs/mcp.md](docs/mcp.md)。
@@ -132,7 +134,7 @@ apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア�
 
 ```bash
 npm run typecheck   # 全パッケージ（apps/ 含む）の型チェック
-npm test            # core 60 本 + server 15 本のユニット/API テスト
+npm test            # core 72 本 + server 18 本のユニット/API テスト
 npm run test:e2e    # 取り込み→翻訳→SSE→書き出し→取り込み→MCP 起動の通し確認
 npm run measure     # 論文風 PDF を生成して、解析の再現率と混入率を実測
 ```

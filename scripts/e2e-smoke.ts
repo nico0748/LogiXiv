@@ -239,16 +239,43 @@ try {
   const batch = (await waitFor(5)) as { result: { content: { text: string }[] } };
   const batchPayload = JSON.parse(batch.result.content[0]!.text) as {
     window: unknown[][];
-    untranslated: [number, string][];
+    untranslated: number[];
+    nextUntranslatedFrom: number | null;
   };
   assert.ok(batchPayload.window.length > 0, '文脈の窓が空');
   assert.ok(batchPayload.untranslated.length > 0, '未訳の一覧が空');
   // 文脈が重複展開されていないこと（原文 1 文につき 1 回だけ現れる）。
   const raw = batch.result.content[0]!.text;
-  const firstText = String(batchPayload.window[0]![1]);
+  const firstText = String(batchPayload.window[0]![2]);
   const occurrences = raw.split(firstText.slice(0, 30)).length - 1;
   assert.equal(occurrences, 1, `文脈が重複して展開されている（${occurrences} 回出現）`);
   step(`MCP の get_translation_batch が重複なしで ${batchPayload.window.length} 文を返した`);
+
+  // 訳さないと記録した文は、未訳として返ってこなくなる。
+  const targetHash = String(batchPayload.window[0]![1]);
+  send({
+    jsonrpc: '2.0',
+    id: 6,
+    method: 'tools/call',
+    params: { name: 'skip_sentences', arguments: { document_id: id, sentence_hashes: [targetHash], reason: 'reference' } },
+  });
+  const skipResult = (await waitFor(6)) as { result: { content: { text: string }[] } };
+  assert.ok(JSON.parse(skipResult.result.content[0]!.text).skipped >= 1, '訳さない記録が効いていない');
+
+  send({
+    jsonrpc: '2.0',
+    id: 7,
+    method: 'tools/call',
+    params: { name: 'get_translation_batch', arguments: { document_id: id, from: 0, limit: 5 } },
+  });
+  const afterSkip = (await waitFor(7)) as { result: { content: { text: string }[] } };
+  const afterPayload = JSON.parse(afterSkip.result.content[0]!.text) as {
+    window: unknown[][];
+    untranslated: number[];
+  };
+  const skippedOrder = Number(batchPayload.window[0]![0]);
+  assert.ok(!afterPayload.untranslated.includes(skippedOrder), '訳さないと記録した文がまた未訳で返っている');
+  step('MCP の skip_sentences で未訳から外れることを確認');
 
   mcp.kill('SIGTERM');
   sseController.abort();

@@ -283,7 +283,7 @@ test('用語集は POST で追記でき、PUT で置換になる', async () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ entries: [{ term: 'kernel', translation: 'カーネル' }] }),
   });
-  assert.deepEqual(await appended.json(), { added: 1, total: 2 });
+  assert.deepEqual(await appended.json(), { added: 1, updated: 0, total: 2 });
 
   const replaced = await fetch(`${baseUrl}/api/documents/${id}/glossary`, {
     method: 'PUT',
@@ -311,6 +311,84 @@ test('hash から文を引ける', async () => {
   const result = (await response.json()) as { sentences: { text: string; order: number }[] };
   assert.equal(result.sentences.length, 1);
   assert.equal(result.sentences[0]!.text, target.text);
+});
+
+test('訳さないと記録した文が未訳から外れる', async () => {
+  const id = await ingest();
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  const hash = document.structure.sentences[0]!.hash;
+
+  const before = (await (await fetch(`${baseUrl}/api/documents/${id}/untranslated?limit=50`)).json()) as {
+    sentences: { sentenceHash: string }[];
+  };
+  assert.ok(before.sentences.some((s) => s.sentenceHash === hash));
+
+  const skipped = await fetch(`${baseUrl}/api/documents/${id}/skip`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hashes: [hash], reason: 'reference' }),
+  });
+  assert.equal(skipped.status, 200);
+  assert.equal(((await skipped.json()) as { applied: number }).applied, 1);
+
+  const after = (await (await fetch(`${baseUrl}/api/documents/${id}/untranslated?limit=50`)).json()) as {
+    sentences: { sentenceHash: string }[];
+  };
+  assert.ok(!after.sentences.some((s) => s.sentenceHash === hash), '訳さない記録が効いていない');
+
+  // 取り消せる。
+  const undone = await fetch(`${baseUrl}/api/documents/${id}/skip`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hashes: [hash], undo: true }),
+  });
+  assert.equal(((await undone.json()) as { applied: number }).applied, 1);
+  const restored = (await (await fetch(`${baseUrl}/api/documents/${id}/untranslated?limit=50`)).json()) as {
+    sentences: { sentenceHash: string }[];
+  };
+  assert.ok(restored.sentences.some((s) => s.sentenceHash === hash));
+});
+
+test('同じ hash を重複して送ると 1 件として扱われ、波及件数が返る', async () => {
+  const id = await ingest();
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  const hash = document.structure.sentences[0]!.hash;
+  const response = await fetch(`${baseUrl}/api/documents/${id}/translations`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source: 'claude',
+      entries: [
+        { sentenceHash: hash, text: '訳A' },
+        { sentenceHash: hash, text: '訳B' },
+      ],
+    }),
+  });
+  const result = (await response.json()) as { applied: number; duplicates: string[]; sentencesAffected: number };
+  assert.equal(result.applied, 1, '重複が 2 件と数えられている');
+  assert.deepEqual(result.duplicates, [hash]);
+  assert.ok(result.sentencesAffected >= 1);
+
+  const after = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    annotations: { translations: Record<string, { text: string }> };
+  };
+  assert.equal(after.annotations.translations[hash]!.text, '訳B', '後勝ちになっていない');
+});
+
+test('検索に総数と打ち切りフラグが付く', async () => {
+  const id = await ingest();
+  const result = (await (await fetch(`${baseUrl}/api/documents/${id}/search?q=the&limit=2`)).json()) as {
+    total: number;
+    truncated: boolean;
+    hits: unknown[];
+  };
+  assert.ok(result.hits.length <= 2);
+  assert.equal(typeof result.total, 'number');
+  assert.equal(typeof result.truncated, 'boolean');
 });
 
 test('検索結果に訳文が入る', async () => {

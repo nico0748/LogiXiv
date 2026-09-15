@@ -8,6 +8,7 @@ import type {
   Rect,
   Section,
   Sentence,
+  SkippedSentence,
   Translation,
 } from './types.ts';
 import { STRUCTURE_VERSION, newId, sentenceHash, sentenceId } from './hash.ts';
@@ -223,7 +224,19 @@ export function sanitizeAnnotations(value: unknown, report: SanitizeReport): Ann
     }
   }
 
-  return { translations, notes, glossary };
+  const skipped: Record<string, SkippedSentence> = {};
+  if (isRecord(source['skipped'])) {
+    for (const [hash, raw] of Object.entries(source['skipped'])) {
+      if (!/^[0-9a-f]{4,64}$/.test(hash) || !isRecord(raw)) continue;
+      skipped[hash] = {
+        sentenceHash: hash,
+        reason: str(raw['reason'], 200) ?? 'other',
+        at: isoDate(raw['at'], EPOCH),
+      };
+    }
+  }
+
+  return { translations, notes, glossary, skipped };
 }
 
 /** 外から来た document を丸ごと安全な PaperDocument に落とす。id は呼び出し側が付け直す前提。 */

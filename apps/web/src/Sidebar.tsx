@@ -22,6 +22,7 @@ interface Props {
   onSaveTranslation: (hash: string, text: string) => Promise<boolean>;
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;
+  onToggleSkip: (hash: string, skip: boolean) => Promise<boolean>;
   scrollTarget: { id: string; token: number } | null;
 }
 
@@ -71,6 +72,7 @@ export function Sidebar(props: Props): React.JSX.Element {
               onSaveTranslation={props.onSaveTranslation}
               onAddNote={props.onAddNote}
               onDeleteNote={props.onDeleteNote}
+              onToggleSkip={props.onToggleSkip}
             />
           </Fragment>
         );
@@ -88,11 +90,13 @@ interface CardProps {
   onSaveTranslation: (hash: string, text: string) => Promise<boolean>;
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;
+  onToggleSkip: (hash: string, skip: boolean) => Promise<boolean>;
 }
 
 function SentenceCard(props: CardProps): React.JSX.Element {
   const { sentence, document: paper, notes, active } = props;
   const translation = paper.annotations.translations[sentence.hash];
+  const isSkipped = Boolean(paper.annotations.skipped?.[sentence.hash]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(translation?.text ?? '');
   const [noteDraft, setNoteDraft] = useState('');
@@ -118,7 +122,7 @@ function SentenceCard(props: CardProps): React.JSX.Element {
   return (
     <article
       data-card-for={sentence.id}
-      className={`card${active ? ' is-active' : ''}`}
+      className={`card${active ? ' is-active' : ''}${isSkipped ? ' is-skipped' : ''}`}
       // カードは「文を選ぶ」操作なので、マウスにもキーボードにも同じ入口を出す。
       role="button"
       tabIndex={0}
@@ -164,7 +168,7 @@ function SentenceCard(props: CardProps): React.JSX.Element {
             setEditing(true);
           }}
         >
-          {translation?.text ?? '（未訳）'}
+          {translation?.text ?? (isSkipped ? '（訳さない）' : '（未訳）')}
         </p>
       )}
 
@@ -233,6 +237,13 @@ function SentenceCard(props: CardProps): React.JSX.Element {
         </button>
         <button type="button" onClick={() => setNoteOpen(true)}>
           メモ
+        </button>
+        <button
+          type="button"
+          title={isSkipped ? '訳す対象に戻す' : '訳す対象から外す（参考文献・数式など）'}
+          onClick={() => void props.onToggleSkip(sentence.hash, !isSkipped)}
+        >
+          {isSkipped ? '訳す対象に戻す' : '訳さない'}
         </button>
         <span className="card-page">p.{sentence.page}</span>
       </div>

@@ -30,17 +30,24 @@ interface Placed {
   size: number;
 }
 
-const BODY_SENTENCES = [
-  'Sparse attention reduces the quadratic cost of self-attention.',
-  'We evaluate on the test. We then report results in Table 1.',
-  'Our block-sparse kernel outperforms the dense baseline by a wide margin.',
-  'Prior work by Smith et al. introduced a related decomposition.',
-  'We report 3.14 as the reference value for all experiments.',
-  'The state-of-the-art model uses a hierarchical routing scheme.',
-  'We call this variant method X. It converges faster than the baseline.',
-  'Does the improvement hold at scale? Yes, up to 32k tokens.',
-  'Information retrieval benefits from the same sparsity pattern.',
-  'Large systems benefit most. Smaller ones see little change.',
+/**
+ * 本文の型。`n` を差し込んで**一文ずつ異なる文**にする。
+ *
+ * 同じ文を使い回すと、正規化ハッシュが同じになって注釈が共有され、
+ * 「543 文あるのに異なり文は 14 個」という状態になる。そうなると
+ * どこか 1 箇所が壊れても別の出現に隠れて、測定が意味を失う。
+ */
+const BODY_TEMPLATES: ((n: number) => string)[] = [
+  (n) => `Sparse attention reduces the quadratic cost of self-attention in setting ${n}.`,
+  (n) => `We evaluate configuration ${n} on the test. We then report results in Table 1.`,
+  (n) => `Our block-sparse kernel outperforms the dense baseline by ${n} points overall.`,
+  (n) => `Prior work by Smith et al. introduced a related decomposition in run ${n}.`,
+  (n) => `We report ${n}.14 as the reference value for every experiment in this block.`,
+  (n) => `The state-of-the-art model uses a hierarchical routing scheme with ${n} levels.`,
+  (n) => `We call this variant method X. It converges faster than baseline ${n} does.`,
+  (n) => `Does the improvement hold at scale ${n}? Yes, it holds up to 32k tokens.`,
+  (n) => `Information retrieval benefits from the same sparsity pattern at depth ${n}.`,
+  (n) => `Large systems benefit most from stage ${n}. Smaller ones see little change.`,
 ];
 
 const NON_BODY = [
@@ -155,7 +162,8 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
       sectionIndex++;
     }
     for (let i = 0; i < 3; i++) {
-      emit(BODY_SENTENCES[(block * 3 + i) % BODY_SENTENCES.length]!, 'body');
+      const index = block * 3 + i;
+      emit(BODY_TEMPLATES[index % BODY_TEMPLATES.length]!(index), 'body');
       if (placedLines >= capacity - reserve) break;
     }
     if (block % 3 === 2 && placedLines < capacity - reserve) {

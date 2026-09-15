@@ -67,6 +67,8 @@ export interface PaperDocument {
     translations: Record<string, Translation>;
     notes: Note[];
     glossary: { term: string; translation: string; note: string | null }[];
+    /** 訳さないと判断した文（キーは hash）。古い保存データには無い。 */
+    skipped?: Record<string, { sentenceHash: string; reason: string; at: string }>;
   };
 }
 
@@ -137,6 +139,20 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sentenceHash, body, author: 'me' }),
+    }),
+
+  skipSentence: (id: string, hash: string, reason = 'other') =>
+    request<{ applied: number; remaining: number }>(`/api/documents/${id}/skip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hashes: [hash], reason }),
+    }),
+
+  unskipSentence: (id: string, hash: string) =>
+    request<{ applied: number; remaining: number }>(`/api/documents/${id}/skip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hashes: [hash], undo: true }),
     }),
 
   deleteNote: (id: string, noteId: string) =>

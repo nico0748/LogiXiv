@@ -25,6 +25,7 @@ export interface DocumentSummary {
   parser: string;
   total: number;
   translated: number;
+  remaining: number;
 }
 
 export interface SkippedWrite {
@@ -100,9 +101,31 @@ export class LogiXivClient {
     return this.request<PaperDocument>(`/api/documents/${encodeURIComponent(id)}`);
   }
 
-  search(id: string, query: string) {
-    return this.request<{ hits: SearchHit[] }>(
-      `/api/documents/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`,
+  search(id: string, query: string, limit = 30, from = 0) {
+    return this.request<{ total: number; truncated: boolean; hits: SearchHit[] }>(
+      `/api/documents/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}&limit=${limit}&from=${from}`,
+    );
+  }
+
+  skipSentences(id: string, hashes: string[], reason: string) {
+    return this.request<{ applied: number; unknown: string[]; remaining: number }>(
+      `/api/documents/${encodeURIComponent(id)}/skip`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hashes, reason }),
+      },
+    );
+  }
+
+  unskipSentences(id: string, hashes: string[]) {
+    return this.request<{ applied: number; remaining: number }>(
+      `/api/documents/${encodeURIComponent(id)}/skip`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hashes, undo: true }),
+      },
     );
   }
 
@@ -115,7 +138,12 @@ export class LogiXivClient {
   }
 
   setTranslations(id: string, entries: { sentenceHash: string; text: string }[]) {
-    return this.request<{ applied: number; skipped: SkippedWrite[] }>(
+    return this.request<{
+      applied: number;
+      sentencesAffected: number;
+      duplicates: string[];
+      skipped: SkippedWrite[];
+    }>(
       `/api/documents/${encodeURIComponent(id)}/translations`,
       {
         method: 'PUT',
@@ -138,7 +166,7 @@ export class LogiXivClient {
 
   /** 追記。既存の用語集を消さない。 */
   addGlossaryEntries(id: string, entries: { term: string; translation: string; note?: string | null }[]) {
-    return this.request<{ added: number; total: number }>(`/api/documents/${encodeURIComponent(id)}/glossary`, {
+    return this.request<{ added: number; updated: number; total: number }>(`/api/documents/${encodeURIComponent(id)}/glossary`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ entries }),

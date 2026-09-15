@@ -415,6 +415,15 @@ textarea {
   font-size: 0.85rem;
 }
 
+/* 訳す対象から外した文。残しつつ、読むときは沈める。 */
+.card.is-skipped {
+  opacity: 0.55;
+}
+
+.card.is-skipped .card-target {
+  font-style: italic;
+}
+
 .card-target.is-human::after {
   content: " ✓";
   color: var(--good);

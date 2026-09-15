@@ -284,7 +284,32 @@ async function handle(
     }
     if (rest === '/search' && method === 'GET') {
       const query = url.searchParams.get('q') ?? '';
-      sendJson(response, 200, { hits: await api.search(id, query) });
+      const limit = Number.parseInt(url.searchParams.get('limit') ?? '30', 10);
+      const from = Number.parseInt(url.searchParams.get('from') ?? '0', 10);
+      sendJson(
+        response,
+        200,
+        await api.search(
+          id,
+          query,
+          Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 200) : 30,
+          Number.isFinite(from) && from > 0 ? from : 0,
+        ),
+      );
+      return;
+    }
+
+    if (rest === '/skip' && method === 'POST') {
+      const body = await readJson<{ hashes?: unknown; reason?: unknown; undo?: unknown }>(request);
+      if (!Array.isArray(body.hashes)) throw new BadRequestError('hashes が配列ではありません');
+      if (body.hashes.length > 500) throw new BadRequestError('hashes は 500 件までです');
+      const hashes = body.hashes.map((raw, index) => requireString(raw, `hashes[${index}]`, 64));
+      if (body.undo === true) {
+        sendJson(response, 200, await api.unskipSentences(id, hashes));
+      } else {
+        const reason = optionalString(body.reason, 'reason', 200) ?? 'other';
+        sendJson(response, 200, await api.skipSentences(id, hashes, reason));
+      }
       return;
     }
     if (rest === '/untranslated' && method === 'GET') {

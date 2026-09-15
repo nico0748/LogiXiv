@@ -214,7 +214,7 @@ test('setTranslation は人手修正済みを機械訳で上書きしない', ()
   assert.equal(missing.applied, false);
 
   const stats = progress(document);
-  assert.equal(stats.total, 4);
+  assert.equal(stats.uniqueSentences, 4);
   assert.equal(stats.translated, 1);
   assert.equal(stats.revisedByHuman, 1);
 });

@@ -11,6 +11,9 @@ import {
   searchDocument,
   sentencesByHash,
   setTranslation,
+  skipSentences,
+  skippedOf,
+  unskipSentences,
   structureSummary,
   untranslatedSentences,
   updateNote,
@@ -108,7 +111,15 @@ export class LogiXivApi {
   }
 
   async listDocuments(): Promise<
-    { id: string; title: string; updatedAt: string; parser: string; total: number; translated: number }[]
+    {
+      id: string;
+      title: string;
+      updatedAt: string;
+      parser: string;
+      total: number;
+      translated: number;
+      remaining: number;
+    }[]
   > {
     const documents = await this.store.list();
     const rows = [];
@@ -121,8 +132,9 @@ export class LogiXivApi {
           title: document.title,
           updatedAt: document.updatedAt,
           parser: document.structure.parser,
-          total: stats.total,
+          total: stats.uniqueSentences,
           translated: stats.translated,
+          remaining: stats.remaining,
         });
       } catch {
         rows.push({
@@ -132,6 +144,7 @@ export class LogiXivApi {
           parser: 'unknown',
           total: 0,
           translated: 0,
+          remaining: 0,
         });
       }
     }
@@ -238,24 +251,48 @@ export class LogiXivApi {
     id: string,
     entries: { sentenceHash: string; text: string }[],
     options: { source?: 'claude' | 'human'; revisedByHuman?: boolean } = {},
-  ): Promise<{ applied: number; skipped: { sentenceHash: string; reason: string; code: SkipCode }[] }> {
+  ): Promise<{
+    applied: number;
+    /** 訳が付いた文の延べ数。同じ文が複数回出る文書では applied より大きくなる。 */
+    sentencesAffected: number;
+    /** 同じ hash が 1 回の呼び出しに複数回入っていたもの。 */
+    duplicates: string[];
+    skipped: { sentenceHash: string; reason: string; code: SkipCode }[];
+  }> {
     let applied = 0;
+    let sentencesAffected = 0;
+    const duplicates: string[] = [];
     const skipped: { sentenceHash: string; reason: string; code: SkipCode }[] = [];
+
+    // 同じ hash が 2 回来たら後勝ちで 1 件として扱う。訳は hash に付くので、
+    // 重複を 2 件と数えると進捗が実際より進んで見える。
+    const unique = new Map<string, string>();
+    for (const entry of entries) {
+      if (unique.has(entry.sentenceHash)) duplicates.push(entry.sentenceHash);
+      unique.set(entry.sentenceHash, entry.text);
+    }
+
     await this.mutate(id, (current) => {
       let working = current;
-      for (const entry of entries) {
-        const result = setTranslation(working, entry.sentenceHash, entry.text, options);
+      const occurrences = new Map<string, number>();
+      for (const sentence of current.structure.sentences) {
+        occurrences.set(sentence.hash, (occurrences.get(sentence.hash) ?? 0) + 1);
+      }
+      for (const [sentenceHash, text] of unique) {
+        const result = setTranslation(working, sentenceHash, text, options);
         working = result.document;
-        if (result.applied) applied++;
-        else {
+        if (result.applied) {
+          applied++;
+          sentencesAffected += occurrences.get(sentenceHash) ?? 1;
+        } else {
           const reason = result.reason ?? '不明';
-          skipped.push({ sentenceHash: entry.sentenceHash, reason, code: skipCodeOf(reason) });
+          skipped.push({ sentenceHash, reason, code: skipCodeOf(reason) });
         }
       }
       return working;
     });
     if (applied > 0) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'translations' });
-    return { applied, skipped };
+    return { applied, sentencesAffected, duplicates, skipped };
   }
 
   async addNote(
@@ -309,8 +346,12 @@ export class LogiXivApi {
   }
 
   /** 用語集に追記する（既存の語は上書きせず残す）。 */
-  async addGlossaryEntries(id: string, entries: GlossaryEntry[]): Promise<{ added: number; total: number }> {
+  async addGlossaryEntries(
+    id: string,
+    entries: GlossaryEntry[],
+  ): Promise<{ added: number; updated: number; total: number }> {
     let added = 0;
+    let updated = 0;
     let total = 0;
     await this.mutate(id, (current) => {
       const glossary = [...current.annotations.glossary];
@@ -323,6 +364,8 @@ export class LogiXivApi {
           glossary.push(entry);
           added++;
         } else {
+          // 既存語の訳語を差し替える。added に数えないので、別途 updated で報告する。
+          if (glossary[at]!.translation !== entry.translation) updated++;
           glossary[at] = entry;
         }
       }
@@ -330,21 +373,71 @@ export class LogiXivApi {
       return { ...current, updatedAt: new Date().toISOString(), annotations: { ...current.annotations, glossary } };
     });
     this.bus.publish({ type: 'document.updated', documentId: id, reason: 'glossary' });
-    return { added, total };
+    return { added, updated, total };
   }
 
-  async search(id: string, query: string, limit = 30) {
+  /** 「これは訳す対象ではない」と記録する。未訳の集計から外れる。 */
+  async skipSentences(
+    id: string,
+    sentenceHashes: string[],
+    reason: string,
+  ): Promise<{ applied: number; unknown: string[]; remaining: number }> {
+    let applied = 0;
+    let unknown: string[] = [];
+    let remaining = 0;
+    await this.mutate(id, (current) => {
+      const result = skipSentences(current, sentenceHashes, reason);
+      applied = result.applied;
+      unknown = result.unknown;
+      remaining = progress(result.document).remaining;
+      return result.document;
+    });
+    if (applied > 0) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'skip' });
+    return { applied, unknown, remaining };
+  }
+
+  async unskipSentences(id: string, sentenceHashes: string[]): Promise<{ applied: number; remaining: number }> {
+    let applied = 0;
+    let remaining = 0;
+    await this.mutate(id, (current) => {
+      const result = unskipSentences(current, sentenceHashes);
+      applied = result.applied;
+      remaining = progress(result.document).remaining;
+      return result.document;
+    });
+    if (applied > 0) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'skip' });
+    return { applied, remaining };
+  }
+
+  /** 訳す必要がある最初の文の通し番号。再開の起点に使う。 */
+  async firstUntranslatedOrder(id: string): Promise<number | null> {
     const document = await this.require(id);
-    return searchDocument(document, query, limit).map((hit) => ({
-      sentenceId: hit.sentence.id,
-      sentenceHash: hit.sentence.hash,
-      order: hit.sentence.order,
-      page: hit.sentence.page,
-      text: hit.sentence.text,
-      translation: hit.translation,
-      notes: hit.notes,
-      where: hit.where,
-    }));
+    const skipped = skippedOf(document);
+    const found = document.structure.sentences.find(
+      (s) => !document.annotations.translations[s.hash] && !skipped[s.hash],
+    );
+    return found?.order ?? null;
+  }
+
+  async search(id: string, query: string, limit = 30, from = 0) {
+    const document = await this.require(id);
+    // 総数を出すため、上限より多めに取ってから切り出す。
+    const all = searchDocument(document, query, from + limit + 1);
+    const page = all.slice(from, from + limit);
+    return {
+      total: all.length,
+      truncated: all.length > from + limit,
+      hits: page.map((hit) => ({
+        sentenceId: hit.sentence.id,
+        sentenceHash: hit.sentence.hash,
+        order: hit.sentence.order,
+        page: hit.sentence.page,
+        text: hit.sentence.text,
+        translation: hit.translation,
+        notes: hit.notes,
+        where: hit.where,
+      })),
+    };
   }
 
   async sentencesByHash(id: string, hashes: string[]) {
@@ -440,7 +533,7 @@ export class LogiXivApi {
   async summary(id: string): Promise<string> {
     const document = await this.require(id);
     const stats = progress(document);
-    return `${document.title} — ${structureSummary(document.structure)} translated=${stats.translated}/${stats.total} human=${stats.revisedByHuman}`;
+    return `${document.title} — ${structureSummary(document.structure)} translated=${stats.translated}/${stats.uniqueSentences} human=${stats.revisedByHuman} skipped=${stats.skipped}`;
   }
 }
 

@@ -172,8 +172,7 @@ function collectInlineHyphenated(lines: ClassifiedLine[]): Set<string> {
  * 正解の文が取れた割合が 60%（1 段組）から 30%（2 段組）まで落ちていた。
  */
 export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[]): FallbackResult {
-  const pageCount = pages.length > 0 ? pages.length : new Set(chunks.map((c) => c.page)).size;
-  const lines = classifyLines(buildLines(chunks), pageCount);
+  const lines = classifyLines(buildLines(chunks), pages);
   const inlineHyphenated = collectInlineHyphenated(lines);
 
   const sections: Section[] = [];

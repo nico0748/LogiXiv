@@ -99,10 +99,10 @@ test('柱の帯に入る本文の 1 行目を落とさない', () => {
     pages.map((page) => ({ page, width: 595, height: 842 })),
   );
   const texts = sentences.map((s) => s.text);
+  // 本文の 1 行目は残る。位置の帯だけで判定していた頃はここが消えていた。
   assert.ok(texts.includes('Body line 0 on page 1 of the document.'), JSON.stringify(texts.slice(0, 3)));
-  // 柱が本文ブロックに密着している場合は落とさない。
-  // 「本文の 1 行目を消す」より「柱が 1 行混ざる」方が害が小さい、という寄せ方。
-  assert.ok(texts.some((t) => t.includes('Preprint')));
+  // 柱は本文から一行ぶん以上離れているので落ちる。
+  assert.ok(!texts.some((t) => t.includes('Preprint')), JSON.stringify(texts.slice(0, 3)));
 });
 
 test('1 ページしかない文書では柱を落とさない（判定できないため）', () => {
@@ -199,7 +199,7 @@ test('段をまたぐ行末ハイフネーションを結合しない', () => {
 
 test('行の分類が buildLines の順序（ページ→段→行）を保つ', () => {
   const chunks = [...twoColumnPage(2, ['p2 left.'], ['p2 right.']), ...twoColumnPage(1, ['p1 left.'], ['p1 right.'])];
-  const classified = classifyLines(buildLines(chunks), 2);
+  const classified = classifyLines(buildLines(chunks), [{ page: 1, width: 595, height: 842 }, { page: 2, width: 595, height: 842 }]);
   assert.deepEqual(
     classified.map((l) => l.text.trim()),
     ['p1 left.', 'p1 right.', 'p2 left.', 'p2 right.'],

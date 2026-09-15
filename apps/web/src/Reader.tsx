@@ -102,9 +102,16 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
 
   const stats = useMemo(() => {
     if (!paper) return null;
-    const total = paper.structure.sentences.length;
-    const translated = paper.structure.sentences.filter((s) => paper.annotations.translations[s.hash]).length;
-    return { total, translated };
+    // 訳は「異なり文」単位で付く。文の総数を分母にすると 100% にならない。
+    const hashes = new Set(paper.structure.sentences.map((s) => s.hash));
+    const skipped = paper.annotations.skipped ?? {};
+    let translated = 0;
+    let skippedCount = 0;
+    for (const hash of hashes) {
+      if (paper.annotations.translations[hash]) translated++;
+      else if (skipped[hash]) skippedCount++;
+    }
+    return { total: hashes.size, translated, skipped: skippedCount };
   }, [paper]);
 
   if (error && !paper) {
@@ -166,8 +173,9 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
         <span className={`badge${paper.structure.parser === 'grobid' ? ' is-good' : ' is-warn'}`}>
           {paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}
         </span>
-        <span className="toolbar-progress">
+        <span className="toolbar-progress" title="訳は同じ本文ごとに 1 つ付きます">
           {stats.translated} / {stats.total} 文
+          {stats.skipped > 0 && `（訳さない ${stats.skipped}）`}
         </span>
 
         <input
@@ -267,6 +275,14 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           onDeleteNote={(noteId) =>
             run('メモの削除', async () => {
               await api.deleteNote(documentId, noteId);
+              await reload();
+              return null;
+            })
+          }
+          onToggleSkip={(hash, skip) =>
+            run(skip ? '訳さない設定' : '訳す対象への復帰', async () => {
+              if (skip) await api.skipSentence(documentId, hash);
+              else await api.unskipSentence(documentId, hash);
               await reload();
               return null;
             })

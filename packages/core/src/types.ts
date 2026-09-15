@@ -88,11 +88,26 @@ export interface GlossaryEntry {
   note: string | null;
 }
 
+/** 「これは訳す対象ではない」と判断した文の記録。 */
+export interface SkippedSentence {
+  sentenceHash: string;
+  /** なぜ訳さないのか。参考文献・図表・数式・柱など。 */
+  reason: string;
+  at: string;
+}
+
 export interface Annotations {
   /** キーは文の hash。 */
   translations: Record<string, Translation>;
   notes: Note[];
   glossary: GlossaryEntry[];
+  /**
+   * 訳さないと判断した文（キーは hash）。未訳の集計から外れる。
+   *
+   * これが無いと「参考文献の断片なので訳さない」と決めた文が毎回未訳として返り、
+   * 翻訳の手順が永久に終わらない。古い保存データには無いので任意。
+   */
+  skipped?: Record<string, SkippedSentence>;
 }
 
 export interface PaperDocument {
@@ -128,5 +143,5 @@ export interface MergeReport {
 }
 
 export function emptyAnnotations(): Annotations {
-  return { translations: {}, notes: [], glossary: [] };
+  return { translations: {}, notes: [], glossary: [], skipped: {} };
 }
