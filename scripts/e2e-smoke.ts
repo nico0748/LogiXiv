@@ -257,7 +257,10 @@ try {
   step(`MCP の get_translation_batch が重複なしで ${batchPayload.window.length} 文を返した`);
 
   // 訳さないと記録した文は、未訳として返ってこなくなる。
-  const targetHash = String(batchPayload.window[0]![1]);
+  // 既に訳の付いた文は対象外にできない仕様なので、未訳の文から選ぶ。
+  const skipOrder = batchPayload.untranslated[0]!;
+  const skipRow = batchPayload.window.find((row) => Number(row[0]) === skipOrder)!;
+  const targetHash = String(skipRow[1]);
   send({
     jsonrpc: '2.0',
     id: 6,
@@ -278,7 +281,7 @@ try {
     window: unknown[][];
     untranslated: number[];
   };
-  const skippedOrder = Number(batchPayload.window[0]![0]);
+  const skippedOrder = skipOrder;
   assert.ok(!afterPayload.untranslated.includes(skippedOrder), '訳さないと記録した文がまた未訳で返っている');
   step('MCP の skip_sentences で未訳から外れることを確認');
 
@@ -328,6 +331,53 @@ try {
     '取り消しで元の文が戻っていない',
   );
   step('MCP の fix_sentence_boundary で区切りを元に戻せることを確認');
+
+  // 保留した文が手前にあると、「次」を前方だけで探す実装は完了を誤報する。
+  // 末尾から呼んでも、残っている文の位置が返ってくること。
+  send({
+    jsonrpc: '2.0',
+    id: 10,
+    method: 'tools/call',
+    params: { name: 'get_translation_batch', arguments: { document_id: id, from: 0, limit: 120 } },
+  });
+  const all = (await waitFor(10)) as { result: { content: { text: string }[] } };
+  const allPayload = JSON.parse(all.result.content[0]!.text) as {
+    window: unknown[][];
+    untranslated: number[];
+    remainingUnique: number;
+  };
+  const lastOrder = Number(allPayload.window[allPayload.window.length - 1]![0]);
+  send({
+    jsonrpc: '2.0',
+    id: 11,
+    method: 'tools/call',
+    params: { name: 'get_translation_batch', arguments: { document_id: id, from: lastOrder, limit: 1 } },
+  });
+  const tail = (await waitFor(11)) as { result: { content: { text: string }[] } };
+  const tailPayload = JSON.parse(tail.result.content[0]!.text) as {
+    remainingUnique: number;
+    nextUntranslatedFrom: number | null;
+  };
+  assert.ok(tailPayload.remainingUnique > 0, '前提: まだ未訳が残っている');
+  assert.notEqual(
+    tailPayload.nextUntranslatedFrom,
+    null,
+    '未訳が残っているのに nextUntranslatedFrom が null（完了と誤報する）',
+  );
+  step('末尾から呼んでも未訳の位置が返る（完了の誤報がない）');
+
+  // from が末尾を越えても JSON で返ること（平文だと呼び出し側の JSON.parse が落ちる）。
+  send({
+    jsonrpc: '2.0',
+    id: 12,
+    method: 'tools/call',
+    params: { name: 'get_translation_batch', arguments: { document_id: id, from: 99999 } },
+  });
+  const beyond = (await waitFor(12)) as { result: { content: { text: string }[] } };
+  const beyondPayload = JSON.parse(beyond.result.content[0]!.text) as { window: unknown[]; hint?: string };
+  assert.deepEqual(beyondPayload.window, [], '範囲外の呼び出しが JSON で返っていない');
+  assert.ok(typeof beyondPayload.hint === 'string');
+  step('範囲外の from でも JSON で返る');
 
   mcp.kill('SIGTERM');
   sseController.abort();

@@ -36,6 +36,27 @@ function errorResult(error: unknown) {
 }
 
 /** 解析方式によって取れないものがあることを、その場で伝える。 */
+/**
+ * 用語集は「変わったとき」に返す。
+ *
+ * 最初の 1 回だけに絞っていたので、作業中に update_glossary で足した訳語が、
+ * その後の窓に一度も現れなかった。長い作業で文脈が圧縮されると、
+ * 自分で決めた訳語を自分で忘れることになる。
+ */
+const lastGlossarySignature = new Map<string, string>();
+
+function glossaryIfChanged(
+  documentId: string,
+  glossary: { term: string; translation: string; note: string | null }[],
+  force: boolean,
+): typeof glossary | undefined {
+  if (glossary.length === 0) return undefined;
+  const signature = JSON.stringify(glossary);
+  const changed = lastGlossarySignature.get(documentId) !== signature;
+  lastGlossarySignature.set(documentId, signature);
+  return force || changed ? glossary : undefined;
+}
+
 function fallbackCaveat(document: PaperDocument): string | undefined {
   if (document.structure.parser === 'grobid') return undefined;
   return 'この文書は簡易解析（pdf.js）で取り込まれています。節が取れず、参考文献・ページ番号・数式の断片が本文に混ざることがあります。GROBID を起動して reparse_document すると改善します。';
@@ -212,7 +233,9 @@ export function createMcpServer(baseUrl: string): McpServer {
       description:
         '翻訳作業の入口。指定位置以降の連続した文を平文の配列で返し、そのうち未訳のものを別に列挙する。' +
         '文脈は配列そのもの（重複が無い）ので、前後関係を見ながら訳せる。' +
-        '訳す対象でない文に当たったら、返ってきた nextFrom を from に入れて呼び直せば飛ばせる。',
+        '**終了条件は remainingUnique が 0 になること。** nextUntranslatedFrom は次に見るべき位置の案内で、' +
+        '末尾まで行くと先頭へ回り込む。訳す対象でない文は skip_sentences に渡すこと' +
+        '（from を進めて飛ばすだけでは、いつまでも残り続ける）。',
       inputSchema: {
         document_id: z.string(),
         from: z.number().int().min(0).default(0).describe('開始する文の通し番号 (order)'),
@@ -225,26 +248,72 @@ export function createMcpServer(baseUrl: string): McpServer {
         const all = document.structure.sentences;
         const window = all.filter((s) => s.order >= from).slice(0, limit);
         const remaining = all.filter((s) => needsTranslation(document, s));
+        // 訳は hash に付くので、残件は「異なり文」で数える。延べ数で数えると、
+        // 1 つの hash を訳しただけで残りが 15 減り、進捗が説明できなくなる。
+        const remainingUnique = new Set(remaining.map((s) => s.hash)).size;
 
         if (window.length === 0) {
-          return textResult(
-            remaining.length === 0
-              ? '未訳の文はありません。翻訳は完了しています。'
-              : `order ${from} 以降に文がありません（この文書の order は 0〜${all.length - 1}）。` +
-                  `まだ ${remaining.length} 文残っているので、from=${remaining[0]!.order} から呼び直してください。`,
-          );
+          // 返り値の形は必ず JSON にする。ここだけ平文を返すと、
+          // 素直に JSON.parse する呼び出し側が末端で必ず落ちる。
+          return jsonResult({
+            remainingUntranslated: remaining.length,
+            remainingUnique,
+            nextFrom: null,
+            nextUntranslatedFrom: remaining[0]?.order ?? null,
+            window: [],
+            untranslated: [],
+            hint:
+              remaining.length === 0
+                ? '未訳の文はありません。翻訳は完了しています。'
+                : `order ${from} 以降に文がありません（この文書の order は 0〜${all.length - 1}）。` +
+                  `まだ ${remainingUnique} 文（延べ ${remaining.length}）残っているので、` +
+                  `nextUntranslatedFrom から呼び直してください。`,
+          });
         }
 
         const last = window[window.length - 1]!;
-        // 「窓の次の位置」と「次に訳す必要がある位置」は別物。後者が終了条件。
-        const nextUntranslated = remaining.find((s) => s.order > last.order);
+        /**
+         * 次に見る位置。**末尾まで来たら先頭へ回り込む。**
+         *
+         * 前へ進むだけにしていたので、途中で保留した文があると
+         * 「まだ残っているのに null（＝完了）」を返していた。指示どおりに
+         * 動く呼び出し側ほど、穴の空いた論文を「訳し終えた」と信じて終わる。
+         */
+        const nextUntranslated = remaining.find((s) => s.order > last.order) ?? remaining[0];
+
+        // 同じ本文は 1 回訳せば全出現に反映される。窓の中の重複を先に畳んでおかないと、
+        // 同じ文の訳を 2 回生成して、書き込み時に「重複でした」と後から言われる。
+        const byOrder = new Map(all.map((sentence) => [sentence.order, sentence]));
+        const seen = new Set<string>();
+        const untranslated: number[] = [];
+        const duplicateOf = new Map<number, number>();
+        for (const sentence of window) {
+          if (!needsTranslation(document, sentence)) continue;
+          if (seen.has(sentence.hash)) {
+            const head = untranslated.find((order) => byOrder.get(order)?.hash === sentence.hash);
+            if (head !== undefined) duplicateOf.set(sentence.order, head);
+            continue;
+          }
+          seen.add(sentence.hash);
+          untranslated.push(sentence.order);
+        }
+
+        const withNotes = window
+          .filter((s) => document.annotations.notes.some((note) => note.sentenceHash === s.hash))
+          .map((s) => s.order);
+
         return jsonResult({
           // 解析方式の注意は最初の呼び出しにだけ付ける（毎回返すと受信の 6% を食う）。
           caveat: from === 0 ? fallbackCaveat(document) : undefined,
-          glossary: from === 0 && document.annotations.glossary.length > 0 ? document.annotations.glossary : undefined,
+          // 用語集は「変わったとき」に返す。最初の 1 回だけだと、途中で足した訳語が
+          // 長い作業の間に一度も戻ってこない。
+          glossary: glossaryIfChanged(document_id, document.annotations.glossary, from === 0),
+          /** 未訳の延べ数（同じ本文が複数回出ればその数だけ数える）。 */
           remainingUntranslated: remaining.length,
+          /** 未訳の異なり文の数。訳はこの単位で付くので、作業量はこちら。 */
+          remainingUnique,
           nextFrom: all.some((s) => s.order > last.order) ? last.order + 1 : null,
-          /** 次に訳す必要がある文の order。null なら翻訳は終わり。 */
+          /** 次に見るべき位置。末尾まで来たら先頭へ回り込む。null は「未訳ゼロ」。 */
           nextUntranslatedFrom: nextUntranslated?.order ?? null,
           // 連続する本文。文脈はこの並びそのもの。[order, hash, 原文, 訳?]
           window: window.map((sentence) => {
@@ -253,8 +322,12 @@ export function createMcpServer(baseUrl: string): McpServer {
               ? [sentence.order, sentence.hash, sentence.text, translation.text]
               : [sentence.order, sentence.hash, sentence.text];
           }),
-          // この窓のうち、訳す必要があるものの order。hash は window から引く。
-          untranslated: window.filter((s) => needsTranslation(document, s)).map((s) => s.order),
+          // この窓のうち訳す必要があるものの order。同じ本文は最初の 1 つだけ。
+          untranslated,
+          // 本文が同じなので訳さなくてよい order → 代表の order。
+          duplicateOf: duplicateOf.size > 0 ? Object.fromEntries(duplicateOf) : undefined,
+          // メモが付いている文（保留の理由などを書いた場所）。
+          withNotes: withNotes.length > 0 ? withNotes : undefined,
         });
       } catch (error) {
         return errorResult(error);
@@ -276,11 +349,15 @@ export function createMcpServer(baseUrl: string): McpServer {
           .array(
             z.object({
               sentenceHash: z.string().describe('get_translation_batch の untranslated が返した hash'),
-              text: z.string().describe('日本語訳'),
+              // 空の訳を通すと、その文は「訳し終わった」ことになって二度と出てこない。
+              // 生成が途中で切れたときに静かに欠落するので、ここで断る。
+              text: z.string().trim().min(1).describe('日本語訳（空にはできない）'),
             }),
           )
           .min(1)
-          .max(100),
+          // get_translation_batch の limit と揃える。窓いっぱい訳したのに
+          // 書き戻せない、という噛み合わせの悪さを作らない。
+          .max(120),
       },
     },
     async ({ document_id, translations }) => {
@@ -301,10 +378,17 @@ export function createMcpServer(baseUrl: string): McpServer {
             `同じ本文が複数回現れるため、${result.applied} 件の訳が ${result.sentencesAffected} 箇所に反映されました。`,
           );
         }
+        if (result.overwritten > 0) {
+          // 上書きは黙って起きてはいけない。別の窓と重なって呼んだときや、
+          // 別のセッションが先に訳を入れていたときに、何が置き換わったか分からなくなる。
+          hints.push(`${result.overwritten} 件は既にあった訳を置き換えました。`);
+        }
         return jsonResult({
           applied: result.applied,
+          created: result.created,
+          overwritten: result.overwritten,
           sentencesAffected: result.sentencesAffected,
-          // 打ち切らない。100 件上限なので全件出しても小さい。
+          // 打ち切らない。120 件上限なので全件出しても小さい。
           skipped: result.skipped,
           hint: hints.length > 0 ? hints.join(' ') : undefined,
         });
@@ -358,12 +442,19 @@ export function createMcpServer(baseUrl: string): McpServer {
     async ({ document_id, query, limit, from }) => {
       try {
         const result = await client.search(document_id, query, limit, from);
-        if (result.hits.length === 0) return textResult(`「${query}」に一致する箇所はありませんでした。`);
+        // 返りは常に JSON。「1 件も無い」と「from が末尾を越えた」は別の話なので、
+        // 0 件のときも total を返して区別できるようにする。
         return jsonResult({
           total: result.total,
           truncated: result.truncated,
           nextFrom: result.truncated ? from + result.hits.length : null,
           hits: result.hits,
+          hint:
+            result.total === 0
+              ? `「${query}」に一致する箇所はありませんでした。`
+              : result.hits.length === 0
+                ? `from=${from} は末尾を越えています（全 ${result.total} 件）。`
+                : undefined,
         });
       } catch (error) {
         return errorResult(error);
@@ -398,12 +489,16 @@ export function createMcpServer(baseUrl: string): McpServer {
     },
     async ({ document_id, entries, mode }) => {
       try {
+        if (entries.length === 0) {
+          // replace で空配列を通すと、確認も無く用語集が消える。
+          // append では断っているのに replace では通る、という非対称は事故のもと。
+          return errorResult(
+            new Error('entries が空です。用語集を空にしたい場合も、意図が読めないので受け付けません。'),
+          );
+        }
         if (mode === 'replace') {
           const result = await client.replaceGlossary(document_id, entries);
           return textResult(`用語集を ${result.total} 件で置き換えました（既存の内容は消えました）。`);
-        }
-        if (entries.length === 0) {
-          return errorResult(new Error('entries が空です。追加する語を渡してください。'));
         }
         const result = await client.addGlossaryEntries(document_id, entries);
         return textResult(
@@ -436,17 +531,26 @@ export function createMcpServer(baseUrl: string): McpServer {
       try {
         if (undo) {
           const result = await client.unskipSentences(document_id, sentence_hashes);
-          return jsonResult({ restored: result.applied, remainingUntranslated: result.remaining });
+          return jsonResult({ restored: result.applied, remainingUnique: result.remaining });
         }
         const result = await client.skipSentences(document_id, sentence_hashes, reason);
+        const hints: string[] = [];
+        if (result.unknown.length > 0) {
+          hints.push(`${result.unknown.length} 件の hash がこの文書にありません。`);
+        }
+        if (result.alreadyTranslated?.length > 0) {
+          hints.push(
+            `${result.alreadyTranslated.length} 件は既に訳が付いているので対象外にしませんでした` +
+              '（外したいなら先に訳を消す必要があります）。',
+          );
+        }
         return jsonResult({
           skipped: result.applied,
           unknownHashes: result.unknown,
-          remainingUntranslated: result.remaining,
-          hint:
-            result.unknown.length > 0
-              ? `${result.unknown.length} 件の hash がこの文書にありません。`
-              : undefined,
+          alreadyTranslated: result.alreadyTranslated ?? [],
+          /** 未訳の異なり文の数。get_translation_batch の remainingUnique と同じ数え方。 */
+          remainingUnique: result.remaining,
+          hint: hints.length > 0 ? hints.join(' ') : undefined,
         });
       } catch (error) {
         return errorResult(error);
@@ -462,7 +566,7 @@ export function createMcpServer(baseUrl: string): McpServer {
         '文の切れ目がおかしいときに直す。merge は連続する 2 文以上を 1 文にまとめ、split は 1 文を文字位置で割る。' +
         '訳が「前半だけ」「2 文ぶん」になってしまう原因はほぼここなので、訳す前に直す方が手戻りが少ない。' +
         '同じ本文が複数箇所にあるときは、そのすべてに同じ区切りが適用される（訳は本文のハッシュに付くため）。' +
-        '直した内容は記録され、再解析しても流し直される。undo_edit_id か undo=true で取り消せる。',
+        '直した内容は記録され、再解析しても流し直される。action=\'undo\' で取り消せる（特定の編集だけなら undo_edit_id も指定する）。',
       inputSchema: {
         document_id: z.string(),
         action: z.enum(['merge', 'split', 'undo']),
@@ -483,15 +587,19 @@ export function createMcpServer(baseUrl: string): McpServer {
       try {
         if (action === 'undo') {
           const result = await client.undoSentenceEdit(document_id, undo_edit_id);
-          return result.applied
-            ? textResult('区切りの変更を取り消しました。')
-            : textResult(`取り消せませんでした: ${result.reason ?? '理由不明'}`);
+          return jsonResult({
+            applied: result.applied,
+            hint: result.applied ? '区切りの変更を取り消しました。' : `取り消せませんでした: ${result.reason ?? '理由不明'}`,
+          });
         }
         if (action === 'merge' && sentence_hashes.length < 2) {
-          return textResult('merge には本文の順に並んだ 2 件以上の sentence_hashes が要ります。');
+          return jsonResult({ applied: false, hint: 'merge には本文の順に並んだ 2 件以上の sentence_hashes が要ります。' });
         }
         if (action === 'split' && (sentence_hashes.length !== 1 || offsets.length === 0)) {
-          return textResult('split には sentence_hashes を 1 件と、offsets を 1 件以上指定してください。');
+          return jsonResult({
+            applied: false,
+            hint: 'split には sentence_hashes を 1 件と、offsets を 1 件以上指定してください。',
+          });
         }
 
         const result = await client.editSentenceBoundary(document_id, {
@@ -500,10 +608,11 @@ export function createMcpServer(baseUrl: string): McpServer {
           ...(action === 'split' ? { offsets } : {}),
         });
         if (!result.applied) {
-          return textResult(
-            `直せませんでした: ${result.reason ?? '理由不明'}\n` +
-              'get_sentences で今の区切りとハッシュを取り直してからやり直してください。',
-          );
+          return jsonResult({
+            applied: false,
+            reason: result.reason,
+            hint: 'get_sentences で今の区切りとハッシュを取り直してからやり直してください。',
+          });
         }
         // 直すと文のハッシュが変わる。古いハッシュのまま訳を書くと素通りするので必ず伝える。
         const detached = result.detached;
@@ -557,12 +666,24 @@ export function createMcpServer(baseUrl: string): McpServer {
         }
         if (result.warning) lines.push(result.warning);
         if (result.orphaned > 0) {
-          lines.push(
-            '対応が見つからなかった注釈も削除はされていません。文の区切りが変わった可能性があるので、' +
-              'get_document_outline で文数を確認してください。',
-          );
+          lines.push('対応が見つからなかった注釈も削除はされていません。');
         }
-        return textResult(lines.join('\n'));
+        // 再解析で文の区切りが変わると order も hash も動く。作業中の位置を
+        // 平文で「気をつけて」と書いても伝わらないので、再開位置を数で返す。
+        const outline = await client.getDocument(document_id);
+        const remaining = outline.structure.sentences.filter((s) => needsTranslation(outline, s));
+        lines.push('以前の order と hash は無効です。下の firstUntranslatedOrder から取り直してください。');
+        return jsonResult({
+          rebound: result.rebound,
+          orphaned: result.orphaned,
+          editsReapplied: result.editsReapplied,
+          editsDropped: result.editsDropped,
+          sentences: outline.structure.sentences.length,
+          remainingUnique: new Set(remaining.map((s) => s.hash)).size,
+          firstUntranslatedOrder: remaining[0]?.order ?? null,
+          warning: result.warning ?? undefined,
+          hint: lines.join(' '),
+        });
       } catch (error) {
         return errorResult(error);
       }
@@ -591,16 +712,19 @@ export function createMcpServer(baseUrl: string): McpServer {
               '手順:',
               '1. get_document_outline で節構成・解析方式・用語集を確認する。firstUntranslatedOrder が再開位置。',
               '2. get_translation_batch を from=firstUntranslatedOrder（無ければ 0）で呼ぶ。',
-              '   window は [order, hash, 原文, 訳?] の並び。untranslated がそのうち訳すべき order。',
+              '   window は [order, hash, 原文, 訳?] の並び。untranslated がそのうち訳すべき order',
+              '   （同じ本文は最初の 1 つだけ。残りは duplicateOf に出る）。',
               '3. 訳を set_translations でまとめて書き戻す（hash は window から引く）。',
-              '4. 返ってきた nextUntranslatedFrom を from に入れて 2 に戻る。null になったら終わり。',
-              '   nextFrom ではなく nextUntranslatedFrom を見ること。前者は「窓の次」なので、',
-              '   訳し終わった後も最後まで空振りし続ける。',
+              '4. 返ってきた nextUntranslatedFrom を from に入れて 2 に戻る。',
+              '   **終わりの判定は remainingUnique が 0 になったとき。** nextUntranslatedFrom は',
+              '   末尾まで行くと先頭へ回り込むので、保留した文があれば必ずもう一度回ってくる。',
               '5. 訳す対象でないと判断した文は skip_sentences に渡してから進む。',
               '   飛ばすだけでは未訳として残り続け、手順が終わらない。',
               '6. 1 文が途中で切れている・2 文が 1 枚に入っている、と気づいたら',
               '   fix_sentence_boundary で直してから訳す。直すとハッシュが変わるので、',
-              '   その窓は取り直すこと。',
+              '   resultHashes を使うか、その窓を取り直すこと。',
+              '7. reparse_document を途中で使ったら、order も hash も変わる。',
+              '   返ってきた firstUntranslatedOrder から取り直すこと。',
               '',
               '訳し方の方針:',
               '- 1 文は 1 文として訳す。読みやすさのために 2 文に割ったり、隣の文と混ぜたりしない（画面上で原文と 1 対 1 に並ぶため）。',

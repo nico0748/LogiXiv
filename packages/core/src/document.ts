@@ -151,10 +151,11 @@ export function skipSentences(
   document: PaperDocument,
   sentenceHashes: readonly string[],
   reason = 'other',
-): { document: PaperDocument; applied: number; unknown: string[] } {
+): { document: PaperDocument; applied: number; unknown: string[]; alreadyTranslated: string[] } {
   const known = new Set(document.structure.sentences.map((s) => s.hash));
   const skipped = { ...skippedOf(document) };
   const unknown: string[] = [];
+  const alreadyTranslated: string[] = [];
   const at = new Date().toISOString();
   let applied = 0;
   for (const hash of sentenceHashes) {
@@ -162,11 +163,17 @@ export function skipSentences(
       unknown.push(hash);
       continue;
     }
+    // 既に訳が付いている文は記録しない。記録しても未訳の集計は 1 件も減らないので、
+    // 「n 件を対象外にした」という返事だけが嘘になる。
+    if (document.annotations.translations[hash]) {
+      alreadyTranslated.push(hash);
+      continue;
+    }
     if (skipped[hash]) continue;
     skipped[hash] = { sentenceHash: hash, reason, at };
     applied++;
   }
-  if (applied === 0) return { document, applied, unknown };
+  if (applied === 0) return { document, applied, unknown, alreadyTranslated };
   return {
     document: {
       ...document,
@@ -175,6 +182,7 @@ export function skipSentences(
     },
     applied,
     unknown,
+    alreadyTranslated,
   };
 }
 
@@ -346,11 +354,15 @@ export function progress(document: PaperDocument): Progress {
   let revisedByHuman = 0;
   let skippedCount = 0;
   for (const hash of hashes) {
-    if (skipped[hash]) skippedCount++;
     const translation = document.annotations.translations[hash];
-    if (!translation) continue;
-    translated++;
-    if (translation.revisedByHuman) revisedByHuman++;
+    if (translation) {
+      translated++;
+      if (translation.revisedByHuman) revisedByHuman++;
+      continue;
+    }
+    // 訳と「訳さない」を二重に数えない。両方が付いた古いデータで
+    // translated + skipped + remaining が異なり文の数を超えていた。
+    if (skipped[hash]) skippedCount++;
   }
   const remaining = [...hashes].filter((h) => !document.annotations.translations[h] && !skipped[h]).length;
   return {

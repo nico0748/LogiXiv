@@ -273,6 +273,10 @@ export class LogiXivApi {
     options: { source?: 'claude' | 'human'; revisedByHuman?: boolean } = {},
   ): Promise<{
     applied: number;
+    /** 新しく訳が付いた数。 */
+    created: number;
+    /** 既にあった訳を置き換えた数。 */
+    overwritten: number;
     /** 訳が付いた文の延べ数。同じ文が複数回出る文書では applied より大きくなる。 */
     sentencesAffected: number;
     /** 同じ hash が 1 回の呼び出しに複数回入っていたもの。 */
@@ -280,6 +284,8 @@ export class LogiXivApi {
     skipped: { sentenceHash: string; reason: string; code: SkipCode }[];
   }> {
     let applied = 0;
+    let created = 0;
+    let overwritten = 0;
     let sentencesAffected = 0;
     const duplicates: string[] = [];
     const skipped: { sentenceHash: string; reason: string; code: SkipCode }[] = [];
@@ -299,10 +305,13 @@ export class LogiXivApi {
         occurrences.set(sentence.hash, (occurrences.get(sentence.hash) ?? 0) + 1);
       }
       for (const [sentenceHash, text] of unique) {
+        const had = Boolean(working.annotations.translations[sentenceHash]);
         const result = setTranslation(working, sentenceHash, text, options);
         working = result.document;
         if (result.applied) {
           applied++;
+          if (had) overwritten++;
+          else created++;
           sentencesAffected += occurrences.get(sentenceHash) ?? 1;
         } else {
           const reason = result.reason ?? '不明';
@@ -312,7 +321,7 @@ export class LogiXivApi {
       return working;
     });
     if (applied > 0) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'translations' });
-    return { applied, sentencesAffected, duplicates, skipped };
+    return { applied, created, overwritten, sentencesAffected, duplicates, skipped };
   }
 
   async addNote(
@@ -401,19 +410,21 @@ export class LogiXivApi {
     id: string,
     sentenceHashes: string[],
     reason: string,
-  ): Promise<{ applied: number; unknown: string[]; remaining: number }> {
+  ): Promise<{ applied: number; unknown: string[]; alreadyTranslated: string[]; remaining: number }> {
     let applied = 0;
     let unknown: string[] = [];
+    let alreadyTranslated: string[] = [];
     let remaining = 0;
     await this.mutate(id, (current) => {
       const result = skipSentences(current, sentenceHashes, reason);
       applied = result.applied;
       unknown = result.unknown;
+      alreadyTranslated = result.alreadyTranslated;
       remaining = progress(result.document).remaining;
       return result.document;
     });
     if (applied > 0) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'skip' });
-    return { applied, unknown, remaining };
+    return { applied, unknown, alreadyTranslated, remaining };
   }
 
   async unskipSentences(id: string, sentenceHashes: string[]): Promise<{ applied: number; remaining: number }> {

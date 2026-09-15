@@ -12,6 +12,7 @@ import {
   sentenceEditsOf,
   sentenceHash,
   setTranslation,
+  skipSentences,
   splitSentence,
   undoSentenceEdit,
   type DocumentStructure,
@@ -468,4 +469,38 @@ test('段組の柱間（12pt）は結合しても 1 本の枠にならない', (
     const merged = mergeSentences(base, [base.sentences[0]!.hash, base.sentences[1]!.hash]);
     assert.equal(merged.structure.sentences[0]!.rects.length, 2, `h=${height} gap=${gap} で柱間を跨いだ`);
   }
+});
+
+// --- サイクル6：進捗の数え方 --------------------------------------------
+
+test('訳の付いた文は「訳さない」に記録しない', () => {
+  // 記録しても未訳は 1 件も減らないので、「n 件を対象外にした」という返事だけが嘘になる。
+  const base = structureOf(['Alpha.', 'Beta.']);
+  let document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  document = setTranslation(document, base.sentences[0]!.hash, 'アルファ。').document;
+
+  const result = skipSentences(document, [base.sentences[0]!.hash, base.sentences[1]!.hash], 'other');
+  assert.equal(result.applied, 1);
+  assert.deepEqual(result.alreadyTranslated, [base.sentences[0]!.hash]);
+
+  const stats = progress(result.document);
+  assert.equal(stats.translated + stats.skipped + stats.remaining, stats.uniqueSentences);
+});
+
+test('訳と「訳さない」が両方付いた古いデータでも、合計が文数を超えない', () => {
+  const base = structureOf(['Alpha.', 'Beta.', 'Gamma.']);
+  const document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  const hash = base.sentences[0]!.hash;
+  const legacy = {
+    ...document,
+    annotations: {
+      ...document.annotations,
+      translations: {
+        [hash]: { sentenceHash: hash, text: 'アルファ。', revisedByHuman: false, source: 'claude' as const, updatedAt: new Date().toISOString() },
+      },
+      skipped: { [hash]: { sentenceHash: hash, reason: 'other', at: new Date().toISOString() } },
+    },
+  };
+  const stats = progress(legacy);
+  assert.equal(stats.translated + stats.skipped + stats.remaining, stats.uniqueSentences);
 });

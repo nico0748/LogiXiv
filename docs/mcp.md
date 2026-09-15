@@ -128,3 +128,24 @@ npm run test:e2e
 MCP を stdio で起動し、`initialize` → `tools/list`（`TOOL_NAMES` と一致するか）→
 `prompts/list` → `tools/call` まで通ることと、`get_translation_batch` の応答に
 文脈の重複が無いことを確認する。
+
+## 翻訳の終わりをどう判定するか
+
+**`remainingUnique` が 0 になったときだけが終わり。**
+
+`get_translation_batch` が返す `nextUntranslatedFrom` は「次に見るべき位置」であって、
+終了条件ではない。末尾まで行くと先頭に回り込むので、途中で保留した文があれば
+必ずもう一度回ってくる。
+
+以前はこれを前方にしか探しておらず、「手前に未訳が残っているのに null（＝完了）」を
+返していた。指示どおりに動く呼び出し側ほど、穴の空いた論文を訳し終えたと信じて終わる。
+
+数え方が 2 つあることにも注意がいる。
+
+| 値 | 意味 |
+| --- | --- |
+| `remainingUnique` | 未訳の**異なり文**の数。訳はこの単位で付くので、作業量はこちら |
+| `remainingUntranslated` | 未訳の**延べ**数。同じ本文が 15 回出ればその 15 回を数える |
+
+同じ本文の文は `untranslated` に 1 回しか出ない（残りは `duplicateOf` に載る）。
+同じ訳を 2 回作らないためで、1 回書けば全出現に反映される。

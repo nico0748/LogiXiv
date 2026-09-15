@@ -108,7 +108,7 @@ export class LogiXivClient {
   }
 
   skipSentences(id: string, hashes: string[], reason: string) {
-    return this.request<{ applied: number; unknown: string[]; remaining: number }>(
+    return this.request<{ applied: number; unknown: string[]; alreadyTranslated: string[]; remaining: number }>(
       `/api/documents/${encodeURIComponent(id)}/skip`,
       {
         method: 'POST',
@@ -140,6 +140,8 @@ export class LogiXivClient {
   setTranslations(id: string, entries: { sentenceHash: string; text: string }[]) {
     return this.request<{
       applied: number;
+      created: number;
+      overwritten: number;
       sentencesAffected: number;
       duplicates: string[];
       skipped: SkippedWrite[];
@@ -210,6 +212,7 @@ export class LogiXivClient {
 
   reparse(id: string, parser: 'auto' | 'grobid' | 'fallback') {
     return this.request<{
+      document: PaperDocument;
       rebound: number;
       orphaned: number;
       editsReapplied: number;
