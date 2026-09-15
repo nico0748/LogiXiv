@@ -81,6 +81,7 @@ export async function parseWithPdfJs(
   const { sentences, sections } = buildSentencesFromChunks(output.chunks, output.pageSizes);
 
   const warnings: string[] = [];
+  if (sections.length > 0) warnings.push(`節 ${sections.length} 件を検出`);
   if (output.truncatedPages > 0) warnings.push(`先頭 ${limits.maxPages} ページだけを解析（残り ${output.truncatedPages} ページは未処理）`);
   if (output.truncatedChunks) warnings.push('文字数の上限に達したため途中で打ち切り');
 
@@ -88,7 +89,8 @@ export async function parseWithPdfJs(
     version: STRUCTURE_VERSION,
     parser: 'fallback',
     parserNote: [
-      'pdf.js による簡易解析（GROBID 未接続）。2 段組・数式・脚注で文の区切りと読み順が崩れることがあります。',
+      'pdf.js による簡易解析（GROBID 未接続）。段組・柱・図表キャプション・参考文献は自動で切り分けていますが、' +
+        '複雑なレイアウトでは文の区切りと読み順が崩れることがあります。',
       ...warnings,
     ].join(' / '),
     parsedAt: new Date().toISOString(),

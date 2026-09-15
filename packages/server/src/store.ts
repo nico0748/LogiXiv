@@ -72,14 +72,21 @@ export class DocumentStore {
     return documents.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  /** 読み出し時に旧バージョンの構造を移行する。訳は原文から再計算したハッシュで付け替わる。 */
+  /**
+   * 読み出し時に旧バージョンの構造を移行する。訳は原文から再計算したハッシュで付け替わる。
+   *
+   * 書き戻しは `write()` ではなく `update()` を通す。`write()` はロックの外で読んだ内容を
+   * そのまま上書きするので、(a) 並行して走っている更新の結果を古い内容で潰す、
+   * (b) その間に削除された文書のディレクトリを作り直してゾンビにする、の 2 つが起きる。
+   * `update()` はロックの中で読み直し、消えていれば中断する。
+   */
   async read(id: string): Promise<PaperDocument> {
     const raw = await readFile(join(this.dir(id), DOCUMENT_FILE), 'utf8');
     const parsed = JSON.parse(raw) as PaperDocument;
     const migration = migrateDocument(parsed);
     if (!migration.migrated) return parsed;
-    // 移行結果はそのまま書き戻す（毎回移行し直さないように）。
-    await this.write(migration.document).catch(() => undefined);
+    // update() の中でもう一度 migrate が走るので、mutate は素通しでよい。
+    await this.update(id, (current) => current).catch(() => undefined);
     return migration.document;
   }
 

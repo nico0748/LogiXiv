@@ -37,7 +37,9 @@ export function normalizeSentence(text: string): string {
     .replace(/[\u2010\u2011\uff0d]/g, '-')
     .replace(/[\u2018\u2019\u201b]/g, "'")
     .replace(/[\u201c\u201d]/g, '"')
-    .replace(/(\p{L})[-]\s*(\p{L})/gu, '$1$2')
+    // 先読みにすること。`(\p{L})-\s*(\p{L})` だと後ろの 1 文字を消費してしまい、
+    // 1 文字区切りが連続する語（a-b-c-d-e）でハイフンが飛び飛びに残る。
+    .replace(/(\p{L})-\s*(?=\p{L})/gu, '$1')
     .replace(/\s+/g, ' ')
     .trim();
 }

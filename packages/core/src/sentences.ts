@@ -1,5 +1,6 @@
 import type { PageSize, Rect, Sentence, Section } from './types.ts';
-import { sentenceHash, sentenceId } from './hash.ts';
+import { sentenceHash, sentenceId, stableId } from './hash.ts';
+import { buildLines, classifyLines, type ClassifiedLine } from './layout.ts';
 
 /**
  * GROBID が使えないときのフォールバック経路。
@@ -109,42 +110,6 @@ function isSentenceEndingPeriod(text: string, index: number): boolean {
   return true;
 }
 
-interface Line {
-  page: number;
-  /** 行の識別子。矩形をまとめる単位でもある。 */
-  index: number;
-  chunks: TextChunk[];
-  y: number;
-}
-
-/** y 座標の近い文字片を 1 行にまとめる。閾値は文字高の 60%。 */
-function groupIntoLines(chunks: TextChunk[]): Line[] {
-  const byPage = new Map<number, TextChunk[]>();
-  for (const chunk of chunks) {
-    if (chunk.text.length === 0) continue;
-    const list = byPage.get(chunk.page);
-    if (list) list.push(chunk);
-    else byPage.set(chunk.page, [chunk]);
-  }
-
-  const lines: Line[] = [];
-  for (const [page, items] of [...byPage.entries()].sort((a, b) => a[0] - b[0])) {
-    items.sort((a, b) => a.y - b.y || a.x - b.x);
-    let current: Line | null = null;
-    for (const item of items) {
-      const tolerance = Math.max(2, item.h * 0.6);
-      if (current && Math.abs(item.y - current.y) <= tolerance) {
-        current.chunks.push(item);
-      } else {
-        current = { page, index: lines.length, chunks: [item], y: item.y };
-        lines.push(current);
-      }
-    }
-  }
-  for (const line of lines) line.chunks.sort((a, b) => a.x - b.x);
-  return lines;
-}
-
 /**
  * 矩形は行単位でまとめる。以前は `Math.round(y)` の一致で束ねていたため、
  * 同じ行でも y が丸め境界をまたぐと矩形が 2 つに割れてハイライトが二重になっていた。
@@ -186,10 +151,12 @@ export interface FallbackResult {
  * 行末で割れた語がそれに一致するならハイフンを残す。
  * 辞書を持たずに "state-of-the-art" を守り、"informa-" + "tion" は結合できる。
  */
-function collectInlineHyphenated(lines: Line[]): Set<string> {
+function collectInlineHyphenated(lines: ClassifiedLine[]): Set<string> {
   const seen = new Set<string>();
   for (const line of lines) {
-    const text = line.chunks.map((c) => c.text).join('');
+    // 行末のハイフンは「割れた語」なので用例として数えない。数えると
+    // 「割れた語は必ず用例あり」になり、ハイフンが永久に残る。
+    const text = line.text.replace(/-\s*$/, '');
     for (const match of text.matchAll(/\p{L}+(?:-\p{L}+)+/gu)) {
       seen.add(match[0].toLowerCase());
     }
@@ -199,38 +166,67 @@ function collectInlineHyphenated(lines: Line[]): Set<string> {
 
 /**
  * 文字片から文を組み立てる。
- * 見出しは検出しないので sections は常に空（GROBID 経路との差が UI で分かるようにする）。
+ *
+ * 手順は「段を見つける → 行にする → 行の役割を決める → 本文だけ連結して文に割る」。
+ * 段を見ずに y だけで行をまとめていた頃は、2 段組の論文で左右の段が 1 行に混ざり、
+ * 正解の文が取れた割合が 60%（1 段組）から 30%（2 段組）まで落ちていた。
  */
-export function buildSentencesFromChunks(chunks: TextChunk[], _pages: PageSize[]): FallbackResult {
-  const lines = groupIntoLines(chunks);
+export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[]): FallbackResult {
+  const pageCount = pages.length > 0 ? pages.length : new Set(chunks.map((c) => c.page)).size;
+  const lines = classifyLines(buildLines(chunks), pageCount);
   const inlineHyphenated = collectInlineHyphenated(lines);
 
-  // 行を連結しつつ、連結後の文字位置 → （文字片, 行）の対応表を作る。
+  const sections: Section[] = [];
+  const sectionIds = new Set<string>();
+  const registerSection = (title: string): string => {
+    let disambiguator = 0;
+    let id = stableId('sec', title);
+    while (sectionIds.has(id)) {
+      disambiguator++;
+      id = stableId('sec', title, disambiguator);
+    }
+    sectionIds.add(id);
+    sections.push({ id, title, level: 1, order: sections.length });
+    return id;
+  };
+
+  // 本文を読み順（ページ → 段 → 行）に連結しつつ、
+  // 連結後の文字位置 → （文字片, 行, 節）の対応表を作る。
   let buffer = '';
-  const owners: { chunk: TextChunk; line: number }[] = [];
+  const owners: { chunk: TextChunk; line: number; section: string | null }[] = [];
+  let currentSection: string | null = null;
 
   const push = (text: string, chunk: TextChunk, line: number): void => {
     buffer += text;
-    for (let k = 0; k < text.length; k++) owners.push({ chunk, line });
+    for (let k = 0; k < text.length; k++) owners.push({ chunk, line, section: currentSection });
   };
 
-  for (let li = 0; li < lines.length; li++) {
-    const line = lines[li]!;
+  const bodyLines = lines.filter((line) => line.role !== 'furniture');
+
+  for (let li = 0; li < bodyLines.length; li++) {
+    const line = bodyLines[li]!;
+
+    if (line.role === 'heading') {
+      currentSection = registerSection(line.text);
+      // 見出しは本文に混ぜない。直前の文をここで区切るため、終端を入れておく。
+      if (buffer.length > 0 && !/[.!?。！？]\s*$/.test(buffer)) push('\n', line.chunks[0]!, line.index);
+      continue;
+    }
+
     for (const chunk of line.chunks) {
       if (chunk.text.length === 0) continue;
       push(chunk.text, chunk, line.index);
       if (!chunk.text.endsWith(' ')) push(' ', chunk, line.index);
     }
 
-    // 行末ハイフンの処理。次の行の先頭が英字のときだけ結合を検討する。
-    const nextLine = lines[li + 1];
-    if (!nextLine || nextLine.page !== line.page) continue;
+    // 行末ハイフンの処理。次の**本文**行が同じ段にあるときだけ結合を検討する。
+    const next = bodyLines[li + 1];
+    if (!next || next.role !== 'body' || next.page !== line.page || next.column !== line.column) continue;
     // ハイフンを含む語全体を取る。"state-of-the-" の末尾から "the" だけを見ると、
     // 文書内の用例 "state-of-the-art" と照合できない。
     const hyphen = /((?:\p{L}+-)*\p{L}+)-\s$/u.exec(buffer);
     if (!hyphen) continue;
-    const nextText = nextLine.chunks.map((c) => c.text).join('').trimStart();
-    const nextWord = /^(\p{L}+)/u.exec(nextText)?.[1];
+    const nextWord = /^(\p{L}+)/u.exec(next.text)?.[1];
     if (!nextWord) continue;
 
     const joined = `${hyphen[1]!}-${nextWord}`.toLowerCase();
@@ -256,7 +252,9 @@ export function buildSentencesFromChunks(chunks: TextChunk[], _pages: PageSize[]
     cursor = to;
 
     const covered = owners.slice(from, to);
-    const hash = sentenceHash(raw);
+    const text = raw.replace(/\s+/g, ' ').trim();
+    if (text.length === 0) continue;
+    const hash = sentenceHash(text);
     const occurrence = occurrences.get(hash) ?? 0;
     occurrences.set(hash, occurrence + 1);
     sentences.push({
@@ -264,11 +262,11 @@ export function buildSentencesFromChunks(chunks: TextChunk[], _pages: PageSize[]
       hash,
       order: sentences.length,
       page: covered[0]?.chunk.page ?? 1,
-      text: raw,
+      text,
       rects: mergeRects(covered),
-      sectionId: null,
+      sectionId: covered[0]?.section ?? null,
     });
   }
 
-  return { sentences, sections: [] };
+  return { sentences, sections };
 }

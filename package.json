@@ -22,6 +22,7 @@
     "test:e2e": "node --experimental-strip-types scripts/e2e-smoke.ts",
     "dev": "npm run dev -w @logixiv/web",
     "start": "node packages/server/dist/cli.js",
-    "clean": "rm -rf packages/*/dist apps/*/dist packages/*/*.tsbuildinfo"
+    "clean": "rm -rf packages/*/dist apps/*/dist packages/*/*.tsbuildinfo",
+    "measure": "node --experimental-strip-types scripts/measure-quality.ts"
   }
 }
