@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rename, writeFile, stat, rm } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, writeFile, stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { migrateDocument, type PaperDocument } from '@logixiv/core';
 import { type Config, documentDir, documentsDir } from './config.ts';
@@ -15,6 +15,16 @@ const DOCUMENT_FILE = 'document.json';
 const PDF_FILE = 'source.pdf';
 
 export class DocumentMissingError extends Error {}
+
+/**
+ * 同じデータ置き場を 2 つのプロセスが同時に開いているときのエラー。
+ *
+ * 直列化しているのはプロセス内のロックだけなので、2 つ目が居ると
+ * 「読む → 変える → 書く」が互いを踏み、**200 を返した書き込みが消える**。
+ * 25 件の訳を 2 プロセスに分けて投げると 13 件が黙って消えた、という状態だった。
+ * 気づけない壊れ方なので、起動時に断る方を選ぶ。
+ */
+export class DataDirectoryLockedError extends Error {}
 
 /**
  * 文書ごとの直列化。SSE や MCP からの同時更新で JSON を壊さないための最小限のロック。
@@ -42,15 +52,67 @@ export function assertSafeId(id: string): string {
   return id;
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    // シグナル 0 は「送らずに存在だけ確かめる」。
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 export class DocumentStore {
   private readonly config: Config;
+  private holdsLock = false;
 
   constructor(config: Config) {
     this.config = config;
   }
 
+  private lockPath(): string {
+    return join(this.config.dataDir, 'logixiv.lock');
+  }
+
   async init(): Promise<void> {
     await mkdir(documentsDir(this.config), { recursive: true });
+    await this.acquireLock();
+  }
+
+  /**
+   * データ置き場を 1 プロセスだけが使うようにする。
+   * 残骸のロック（前回が強制終了した等）は、そのプロセスが生きているかで判断する。
+   */
+  private async acquireLock(): Promise<void> {
+    if (this.holdsLock) return;
+    const path = this.lockPath();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const handle = await open(path, 'wx');
+        await handle.writeFile(`${process.pid}\n`);
+        await handle.close();
+        this.holdsLock = true;
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const owner = Number.parseInt(await readFile(path, 'utf8').catch(() => ''), 10);
+        if (Number.isFinite(owner) && owner !== process.pid && isAlive(owner)) {
+          throw new DataDirectoryLockedError(
+            `${this.config.dataDir} は別の LogiXiv（PID ${owner}）が使っています。` +
+              '同じ置き場を 2 つのプロセスで開くと、受け付けた書き込みが黙って消えます。',
+          );
+        }
+        // 持ち主が居ない残骸。消してもう一度だけ試す。
+        await rm(path, { force: true });
+      }
+    }
+    throw new DataDirectoryLockedError(`${this.config.dataDir} のロックを取得できませんでした`);
+  }
+
+  async releaseLock(): Promise<void> {
+    if (!this.holdsLock) return;
+    this.holdsLock = false;
+    await rm(this.lockPath(), { force: true });
   }
 
   private dir(id: string): string {
@@ -102,8 +164,15 @@ export class DocumentStore {
   private async writeAtomic(dir: string, file: string, data: string | Uint8Array): Promise<void> {
     const target = join(dir, file);
     const temporary = `${target}.${process.pid}.${Math.random().toString(16).slice(2, 8)}.tmp`;
-    await writeFile(temporary, data);
-    await rename(temporary, target);
+    try {
+      await writeFile(temporary, data);
+      await rename(temporary, target);
+    } catch (error) {
+      // 失敗した書きかけを残さない。ディスクが尽きた直後にこれが積もると、
+      // 空けたはずの容量がまた埋まる。
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   async write(document: PaperDocument): Promise<void> {

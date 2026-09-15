@@ -11,11 +11,19 @@ export function Library({ onOpen }: Props): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
-    const [list, status] = await Promise.all([api.listDocuments(), api.health().catch(() => null)]);
-    setDocuments(list.documents);
-    setHealth(status);
+    // 失敗を握り潰すと documents が [] のままになり、「まだ論文がありません」と
+    // 表示される。手元のデータが消えたようにしか見えないので、必ず理由を出す。
+    try {
+      const [list, status] = await Promise.all([api.listDocuments(), api.health().catch(() => null)]);
+      setDocuments(list.documents);
+      setHealth(status);
+      setListError(null);
+    } catch (cause) {
+      setListError(cause instanceof Error ? cause.message : String(cause));
+    }
   }, []);
 
   useEffect(() => {
@@ -23,10 +31,27 @@ export function Library({ onOpen }: Props): React.JSX.Element {
     return subscribe(() => void reload());
   }, [reload]);
 
-  const upload = async (file: File): Promise<void> => {
+  /**
+   * PDF と「LogiXiv の書き出し HTML」の両方を受ける。
+   * 後者は他人から送られてくるものなので、1 本も持っていない人でも
+   * ここから始められる必要がある。
+   */
+  const accept = async (file: File): Promise<void> => {
+    const isExport = /\.html?$/i.test(file.name) || file.type === 'text/html';
     setBusy(true);
-    setMessage(`${file.name} を解析しています…（GROBID 経由だと数十秒かかることがあります）`);
+    setMessage(
+      isExport
+        ? `${file.name} を取り込んでいます…`
+        : `${file.name} を解析しています…（GROBID 経由だと数十秒かかることがあります）`,
+    );
     try {
+      if (isExport) {
+        const result = await api.importNewDocument(await file.text());
+        setMessage(result.warning ? `取り込みました（${result.warning}）` : '取り込みました。');
+        await reload();
+        onOpen(result.documentId);
+        return;
+      }
       const result = await api.uploadPdf(file);
       setMessage(
         result.warning
@@ -65,20 +90,20 @@ export function Library({ onOpen }: Props): React.JSX.Element {
           const files = event.dataTransfer.files;
           if (files.length === 0) return;
           if (files.length > 1) setMessage(`${files.length} 件のうち 1 件目だけを取り込みます。`);
-          void upload(files[0]!);
+          void accept(files[0]!);
         }}
       >
-        <p>PDF をここにドロップ</p>
+        <p>PDF、または LogiXiv の書き出し HTML をここにドロップ</p>
         <label className="button-link">
           ファイルを選ぶ
           <input
             type="file"
-            accept="application/pdf,.pdf"
+            accept="application/pdf,.pdf,text/html,.html"
             hidden
             disabled={busy}
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) void upload(file);
+              if (file) void accept(file);
               event.target.value = '';
             }}
           />
@@ -107,7 +132,16 @@ export function Library({ onOpen }: Props): React.JSX.Element {
       )}
 
       <ul className="document-list">
-        {documents.length === 0 && <li className="pane-message">まだ論文がありません。</li>}
+        {listError !== null && (
+          <li className="pane-message">
+            一覧を取得できませんでした: {listError}
+            <br />
+            LogiXiv のサーバーが動いているか確認してください（データは消えていません）。
+          </li>
+        )}
+        {listError === null && documents.length === 0 && (
+          <li className="pane-message">まだ論文がありません。</li>
+        )}
         {documents.map((document) => (
           <li key={document.id}>
             <button type="button" className="document-row" onClick={() => onOpen(document.id)}>

@@ -171,8 +171,15 @@ export class LogiXivApi {
     const { structure, usedFallback, warning } = await this.parseStructure(pdf, fileName, preference);
     const document = createDocument({ structure, sourceFileName: fileName });
 
-    await this.store.writePdf(document.id, pdf);
-    await this.store.write(document);
+    try {
+      await this.store.writePdf(document.id, pdf);
+      await this.store.write(document);
+    } catch (error) {
+      // 書けなかったときに作りかけを残さない。document.json の無いディレクトリは
+      // 一覧に出ないので、利用者からは見えも消せもしないゴミになる。
+      await this.store.remove(document.id).catch(() => undefined);
+      throw error;
+    }
     this.bus.publish({ type: 'document.created', documentId: document.id });
 
     return { document, usedFallback, warning };

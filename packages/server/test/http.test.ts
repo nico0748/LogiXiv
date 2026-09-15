@@ -640,3 +640,43 @@ test('他人の書き出しに入っていた区切りの直しを取り込み�
   assert.equal(result.structure.sentences[0]!.hash, mergedHash);
   assert.equal(result.annotations.translations[mergedHash]?.text, 'まとめた文の訳');
 });
+
+test('他人の書き出しを、1 本も持っていない状態から取り込める', async () => {
+  // 以前は既存の文書 ID を経路に書いて ?merge=false を付けるしかなく、
+  // 0 本のときは書ける ID が無いので実際には到達できなかった。
+  const source = await ingest();
+  const html = await (await fetch(`${baseUrl}/api/documents/${source}/export`)).text();
+
+  const response = await fetch(`${baseUrl}/api/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/html' },
+    body: html,
+  });
+  const text = await response.text();
+  assert.equal(response.status, 201, text);
+  const { documentId } = JSON.parse(text) as { documentId: string };
+  assert.notEqual(documentId, source, '同じ文書に上書きしている');
+
+  const imported = (await (await fetch(`${baseUrl}/api/documents/${documentId}`)).json()) as {
+    structure: { sentences: unknown[] };
+  };
+  assert.ok(imported.structure.sentences.length > 0);
+  // PDF も一緒に入る（本文だけでは元のページを見られない）。
+  assert.equal((await fetch(`${baseUrl}/api/documents/${documentId}/pdf`)).status, 200);
+});
+
+test('PDF でないバイト列は、取り込み経路からも入れない', async () => {
+  const source = await ingest();
+  const html = await (await fetch(`${baseUrl}/api/documents/${source}/export`)).text();
+  const notPdf = Buffer.from('<html>not a pdf at all</html>', 'utf8').toString('base64');
+  const tampered = html.replace(/"pdfBase64":"[^"]*"/, `"pdfBase64":"${notPdf}"`);
+  assert.notEqual(tampered, html, '前提: pdfBase64 を差し替えられている');
+
+  const response = await fetch(`${baseUrl}/api/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/html' },
+    body: tampered,
+  });
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /PDF ではない/);
+});

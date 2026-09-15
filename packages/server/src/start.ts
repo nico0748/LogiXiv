@@ -53,6 +53,9 @@ export async function start(overrides: Partial<Config> = {}): Promise<StartResul
     async close() {
       api.bus.close();
       await new Promise<void>((done) => server.close(() => done()));
+      // 置き場のロックを返す。返さないと、次の起動が「別のプロセスが使っている」
+      // と誤判定する余地を残す（PID の生死で救えはするが、余地は作らない）。
+      await api.store.releaseLock().catch(() => undefined);
     },
   };
 }

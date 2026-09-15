@@ -207,6 +207,14 @@ export const api = {
       body: JSON.stringify({ parser: 'auto' }),
     }),
 
+  /** 他人の書き出しを新しい文書として取り込む（PDF ごと入る）。 */
+  importNewDocument: (html: string) =>
+    request<{ documentId: string; note: string; warning: string | null }>('/api/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/html' },
+      body: html,
+    }),
+
   importHtml: (id: string, html: string) =>
     request<{ documentId: string; report: unknown; note: string; warning: string | null }>(`/api/documents/${id}/import`, {
       method: 'POST',

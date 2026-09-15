@@ -101,7 +101,7 @@ GROBID に `segmentSentences=1` と `teiCoordinates=s` を付けて投げると�
 ```
 packages/core     型・TEIパーサ・文分割・検証・エクスポート/インポート・マージ・移行（唯一の真実、外部依存ゼロ）
 packages/server   ローカル API（GROBIDプロキシ、ファイルストア、SSE、解析ワーカー）
-packages/mcp      Claude 用 MCP サーバー（stdio、ツール10個＋プロンプト1個）
+packages/mcp      Claude 用 MCP サーバー（stdio、ツール11個＋プロンプト1個）
 apps/web          Vite + React の本体 UI
 apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア（pdf.js 同梱）
 ```

@@ -26,8 +26,19 @@ export interface MigrationResult {
   collisions: number;
 }
 
+export class FutureStructureError extends Error {}
+
 export function migrateDocument(document: PaperDocument): MigrationResult {
   const from = document.structure.version;
+  // 新しい版で書かれたものを、古い規則のまま読んで書き戻してはいけない。
+  // ハッシュの計算規則が違うので、片方の規則で付けた訳が混ざったファイルができ、
+  // しかも版の印は新しいままなので、将来の移行が二度と走らない。
+  if (from > STRUCTURE_VERSION) {
+    throw new FutureStructureError(
+      `この文書は新しい版の LogiXiv で作られています（構造 v${from} / このプログラムは v${STRUCTURE_VERSION} まで）。` +
+        'LogiXiv を更新してください。',
+    );
+  }
   if (from >= STRUCTURE_VERSION) {
     return {
       document,

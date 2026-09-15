@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { start } from './start.ts';
 import { isGrobidAlive } from './grobid.ts';
+import { DataDirectoryLockedError } from './store.ts';
 
 const args = process.argv.slice(2);
 
@@ -25,6 +26,10 @@ if (args.includes('--help') || args.includes('-h')) {
 }
 
 const portArg = flag('port');
+if (portArg !== undefined && !/^\d{1,5}$/.test(portArg)) {
+  console.error(`ポート番号が数字ではありません: ${portArg}`);
+  process.exit(2);
+}
 const overrides = {
   ...(portArg ? { port: Number.parseInt(portArg, 10) } : {}),
   ...(flag('host') ? { host: flag('host')! } : {}),
@@ -32,7 +37,35 @@ const overrides = {
   ...(flag('grobid') ? { grobidUrl: flag('grobid')! } : {}),
 };
 
-const { url, config, close } = await start(overrides);
+/**
+ * 起動の失敗は、生のスタックトレースではなく 1 行で伝える。
+ * いちばん起きやすい 3 つ（ポートが使用中・置き場が別プロセスに掴まれている・
+ * UI が未ビルド）は、原因も対処もはっきりしているので言葉で書く。
+ */
+function explainStartupFailure(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException).code;
+  const message = error instanceof Error ? error.message : String(error);
+  if (code === 'EADDRINUSE') {
+    return `ポート ${overrides.port ?? '(既定)'} は既に使われています。--port で別の番号を指定してください。`;
+  }
+  if (code === 'EACCES') {
+    return `ポート ${overrides.port ?? '(既定)'} を開く権限がありません。1024 以上の番号を指定してください。`;
+  }
+  if (error instanceof DataDirectoryLockedError) return message;
+  if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') {
+    return `ビルド成果物が見つかりません。先に npm run build を実行してください。\n  ${message}`;
+  }
+  return message;
+}
+
+let started: Awaited<ReturnType<typeof start>>;
+try {
+  started = await start(overrides);
+} catch (error) {
+  console.error(`LogiXiv を起動できませんでした: ${explainStartupFailure(error)}`);
+  process.exit(1);
+}
+const { url, config, close } = started;
 
 console.log(`LogiXiv を起動しました: ${url}`);
 console.log(`  データ: ${config.dataDir}`);

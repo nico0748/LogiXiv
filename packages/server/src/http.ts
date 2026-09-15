@@ -214,6 +214,19 @@ async function handle(
     return;
   }
 
+  /**
+   * 他人の書き出しを**新しい文書として**取り込む。
+   *
+   * これまでは既存の文書 ID を経路に書いて `?merge=false` を付けるしかなく、
+   * その ID は読み捨てられていた。1 本も持っていない人には書ける ID が無いので、
+   * README が書いている「他人の書き出しを取り込む」が実際には到達不能だった。
+   */
+  if (path === '/api/import' && method === 'POST') {
+    const html = (await readBody(request)).toString('utf8');
+    sendJson(response, 201, await api.importHtml(html, null));
+    return;
+  }
+
   if (path === '/api/documents' && method === 'POST') {
     // multipart は使わない。本文は PDF そのもので、ファイル名はヘッダで受け取る。
     const rawName = String(request.headers['x-file-name'] ?? 'paper.pdf');
