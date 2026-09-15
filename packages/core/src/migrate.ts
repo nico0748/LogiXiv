@@ -1,5 +1,6 @@
-import type { PaperDocument } from './types.ts';
+import type { PaperDocument, SentenceEdit } from './types.ts';
 import { STRUCTURE_VERSION, sentenceHash, sentenceId } from './hash.ts';
+import { deriveEdit } from './edits.ts';
 
 /**
  * 正規化規則を変えたときの移行。
@@ -84,14 +85,27 @@ export function migrateDocument(document: PaperDocument): MigrationResult {
     skipped[newHash] = { ...entry, sentenceHash: newHash };
   }
 
-  // 区切りの直しも hash で対象を指している。付け替えないと、再解析のたびに
-  // 「当てられなかった」として静かに捨てられる。
+  // 区切りの直しは hash で対象を指しているが、その対象（編集前の文）は
+  // 構造側にもう残っていないので、対応表では付け替えられない。
+  // 記録が原文テキストを持っているぶんだけ、新しい規則で計算し直す。
+  // 持っていない古い記録は、hash の付け替えで当たる範囲だけ拾っておく。
   const mapHashes = (hashes: readonly string[]): string[] => hashes.map((hash) => remap.get(hash) ?? hash);
-  const sentenceEdits = (document.annotations.sentenceEdits ?? []).map((edit) => ({
-    ...edit,
-    hashes: mapHashes(edit.hashes),
-    ...(edit.undo ? { undo: { ...edit.undo, hashes: mapHashes(edit.undo.hashes) } } : {}),
-  }));
+  const sentenceEdits: SentenceEdit[] = (document.annotations.sentenceEdits ?? []).map((edit) => {
+    if (!edit.sourceTexts || edit.sourceTexts.length === 0) {
+      return {
+        ...edit,
+        hashes: mapHashes(edit.hashes),
+        ...(edit.undo ? { undo: { ...edit.undo, hashes: mapHashes(edit.undo.hashes) } } : {}),
+      };
+    }
+    const derived = deriveEdit(edit.type, edit.sourceTexts, edit.offsets ?? [], edit.undo?.joiners);
+    return {
+      ...edit,
+      hashes: derived.hashes,
+      ...(edit.type === 'split' ? { offsets: derived.offsets } : {}),
+      undo: { ...derived.undo, occurrences: edit.undo?.occurrences },
+    };
+  });
 
   return {
     document: {

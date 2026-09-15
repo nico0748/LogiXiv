@@ -74,6 +74,18 @@ export interface PaperDocument {
   };
 }
 
+export interface SentenceEditResult {
+  applied: boolean;
+  /** 何か所に適用されたか。 */
+  occurrences: number;
+  editId?: string;
+  /** 編集の結果できた文の hash（画面の選択を追わせるのに使う）。 */
+  resultHashes: string[];
+  /** どの文にも結び付かなくなった注釈の数。消えてはおらず、取り消せば戻る。 */
+  detached: { translations: number; notes: number; skipped: number };
+  reason?: string;
+}
+
 export interface DocumentSummary {
   id: string;
   title: string;
@@ -162,25 +174,19 @@ export const api = {
 
   /** 連続する文を 1 文に結合する。同じ本文が複数箇所にあれば、そのすべてに効く。 */
   mergeSentences: (id: string, hashes: string[]) =>
-    request<{ applied: boolean; occurrences: number; editId?: string; reason?: string }>(
-      `/api/documents/${id}/sentence-edits`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'merge', hashes }),
-      },
-    ),
+    request<SentenceEditResult>(`/api/documents/${id}/sentence-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'merge', hashes }),
+    }),
 
   /** 1 文を文字位置で割る。 */
   splitSentence: (id: string, hash: string, offsets: number[]) =>
-    request<{ applied: boolean; occurrences: number; editId?: string; reason?: string }>(
-      `/api/documents/${id}/sentence-edits`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'split', hashes: [hash], offsets }),
-      },
-    ),
+    request<SentenceEditResult>(`/api/documents/${id}/sentence-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'split', hashes: [hash], offsets }),
+    }),
 
   undoSentenceEdit: (id: string, editId?: string) =>
     request<{ applied: boolean; reason?: string }>(

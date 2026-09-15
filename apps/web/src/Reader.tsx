@@ -18,6 +18,30 @@ interface Props {
  */
 const RELOAD_DEBOUNCE_MS = 300;
 
+/**
+ * 区切りを直した結果を、画面から見て分かる言葉にする。
+ *
+ * 黙って終わらせてはいけない。訳やメモが付いた文を結合すると、その注釈は
+ * どの文にも結び付かなくなって画面から消える。消したわけではなく戻せるのだが、
+ * 何も言わないと「作業が消えた」としか見えない。
+ */
+function describeEdit(
+  label: string,
+  result: { occurrences: number; detached?: { translations: number; notes: number; skipped: number } },
+): string | null {
+  const parts: string[] = [];
+  if (result.occurrences > 1) parts.push(`同じ本文の ${result.occurrences} か所に適用しました`);
+  const detached = result.detached;
+  const lost: string[] = [];
+  if (detached && detached.translations > 0) lost.push(`訳 ${detached.translations} 件`);
+  if (detached && detached.notes > 0) lost.push(`メモ ${detached.notes} 件`);
+  if (detached && detached.skipped > 0) lost.push(`「訳さない」${detached.skipped} 件`);
+  if (lost.length > 0) {
+    parts.push(`${lost.join('・')}が元の文から外れました（「直前の区切りを戻す」で戻ります）`);
+  }
+  return parts.length === 0 ? null : `${label}しました。${parts.join('。')}`;
+}
+
 export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   const [paper, setPaper] = useState<PaperDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -128,6 +152,8 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
 
   /** 失敗を黙って捨てないための共通ラッパ。以前は保存に失敗しても画面が無反応だった。 */
   const run = async (label: string, task: () => Promise<string | null>): Promise<boolean> => {
+    // 前の操作の知らせを消してから始める。残しておくと、次の操作の結果として読まれる。
+    setMessage(null);
     setBusyAction(label);
     try {
       const note = await task();
@@ -149,6 +175,25 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
       return null;
     });
 
+  /**
+   * 区切りを直したあとの後始末。
+   *
+   * 読み直したうえで、できた文を選び直す。区切りを変えると文の ID が変わるので、
+   * 何もしないと今いじっていた場所の選択が外れ、長い論文では読んでいた位置を見失う。
+   */
+  const applyEdit = async (result: { applied: boolean; resultHashes?: string[] }): Promise<void> => {
+    const updated = await api.getDocument(documentId).catch(() => null);
+    if (updated) {
+      setPaper(updated);
+      setError(null);
+      const wanted = result.resultHashes?.[0];
+      const landed = wanted ? updated.structure.sentences.find((s) => s.hash === wanted) : undefined;
+      if (landed) select(landed.id, 'sidebar');
+    } else {
+      await reload();
+    }
+  };
+
   const runImport = (file: File): Promise<boolean> =>
     run('取り込み', async () => {
       const html = await file.text();
@@ -156,7 +201,9 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
       await reload();
       const report = result.report as Record<string, number> | null;
       const base = report
-        ? `取り込み完了: 訳 +${report['translationsAdded'] ?? 0} / 更新 ${report['translationsUpdated'] ?? 0} / メモ +${report['notesAdded'] ?? 0} / 対応なし ${report['orphaned'] ?? 0}`
+        ? `取り込み完了: 訳 +${report['translationsAdded'] ?? 0} / 更新 ${report['translationsUpdated'] ?? 0} / メモ +${report['notesAdded'] ?? 0} / 対応なし ${report['orphaned'] ?? 0}${
+            report['sentenceEditsAdopted'] ? ` / 区切りの直し ${report['sentenceEditsAdopted']} 件を反映` : ''
+          }`
         : result.note;
       return result.warning ? `${base}（${result.warning}）` : base;
     });
@@ -208,7 +255,9 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           <button
             type="button"
             disabled={busyAction !== null}
-            title="直前の結合・分割を取り消します"
+            title={`直前の結合・分割を 1 件だけ取り消します（記録は ${
+              paper.annotations.sentenceEdits?.length ?? 0
+            } 件）`}
             onClick={() =>
               void run('区切りの取り消し', async () => {
                 const result = await api.undoSentenceEdit(documentId);
@@ -218,7 +267,7 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
               })
             }
           >
-            区切りを戻す（{paper.annotations.sentenceEdits?.length ?? 0}）
+            直前の区切りを戻す
           </button>
         )}
 
@@ -306,22 +355,17 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
           onMergeWithNext={(hashes) =>
             run('文の結合', async () => {
               const result = await api.mergeSentences(documentId, hashes);
-              await reload();
+              await applyEdit(result);
               if (!result.applied) throw new Error(result.reason ?? '結合できませんでした');
-              // 同じ本文が他にもあると、そちらも同時に変わる。黙って変わると驚くので伝える。
-              return result.occurrences > 1
-                ? `同じ本文の ${result.occurrences} か所をまとめて結合しました`
-                : null;
+              return describeEdit('結合', result);
             })
           }
           onSplit={(hash, offsets) =>
             run('文の分割', async () => {
               const result = await api.splitSentence(documentId, hash, offsets);
-              await reload();
+              await applyEdit(result);
               if (!result.applied) throw new Error(result.reason ?? '分割できませんでした');
-              return result.occurrences > 1
-                ? `同じ本文の ${result.occurrences} か所をまとめて分割しました`
-                : null;
+              return describeEdit('分割', result);
             })
           }
           onToggleSkip={(hash, skip) =>

@@ -520,3 +520,85 @@ test('区切り直しの入力検証（型・件数）', async () => {
   assert.equal((await post({ type: 'split', hashes: ['a'], offsets: [-1] })).status, 400);
   assert.equal((await post({ type: 'merge', hashes: [1, 2] })).status, 400);
 });
+
+test('区切りを直すと、外れる注釈の件数が返る', async () => {
+  const id = await ingest();
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  const [first, second] = document.structure.sentences;
+  await fetch(`${baseUrl}/api/documents/${id}/translations/${first!.hash}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: '一文目の訳', source: 'human' }),
+  });
+  await fetch(`${baseUrl}/api/documents/${id}/notes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sentenceHash: first!.hash, body: 'メモ' }),
+  });
+
+  const merged = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'merge', hashes: [first!.hash, second!.hash] }),
+    })
+  ).json()) as {
+    applied: boolean;
+    resultHashes: string[];
+    detached: { translations: number; notes: number; skipped: number };
+  };
+  assert.equal(merged.applied, true);
+  assert.equal(merged.detached.translations, 1);
+  assert.equal(merged.detached.notes, 1);
+  assert.equal(merged.resultHashes.length, 1);
+
+  const after = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  assert.equal(after.structure.sentences[0]!.hash, merged.resultHashes[0]);
+});
+
+test('他人の書き出しに入っていた区切りの直しを取り込み、訳を拾える', async () => {
+  const source = await ingest();
+  const target = await ingest();
+
+  const document = (await (await fetch(`${baseUrl}/api/documents/${source}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  const [first, second] = document.structure.sentences;
+  await fetch(`${baseUrl}/api/documents/${source}/sentence-edits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'merge', hashes: [first!.hash, second!.hash] }),
+  });
+  const mergedDocument = (await (await fetch(`${baseUrl}/api/documents/${source}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+  };
+  const mergedHash = mergedDocument.structure.sentences[0]!.hash;
+  await fetch(`${baseUrl}/api/documents/${source}/translations/${mergedHash}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'まとめた文の訳', source: 'human' }),
+  });
+
+  const html = await (await fetch(`${baseUrl}/api/documents/${source}/export`)).text();
+  const imported = (await (
+    await fetch(`${baseUrl}/api/documents/${target}/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/html' },
+      body: html,
+    })
+  ).json()) as { report: { translationsAdded: number; orphaned: number; sentenceEditsAdopted: number } };
+
+  assert.equal(imported.report.sentenceEditsAdopted, 1, '区切りの直しが取り込まれていない');
+  assert.equal(imported.report.orphaned, 0, '区切りを揃えたのに訳が捨てられている');
+
+  const result = (await (await fetch(`${baseUrl}/api/documents/${target}`)).json()) as {
+    structure: { sentences: { hash: string }[] };
+    annotations: { translations: Record<string, { text: string }> };
+  };
+  assert.equal(result.structure.sentences[0]!.hash, mergedHash);
+  assert.equal(result.annotations.translations[mergedHash]?.text, 'まとめた文の訳');
+});

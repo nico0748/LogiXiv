@@ -255,10 +255,28 @@ export function sanitizeAnnotations(value: unknown, report: SanitizeReport): Ann
         createdAt: isoDate(raw['createdAt'], EPOCH),
       };
       if (type === 'split') edit.offsets = sanitizeOffsets(raw['offsets']);
+      const sourceTexts = Array.isArray(raw['sourceTexts'])
+        ? raw['sourceTexts']
+            .map((item) => str(item, 20_000))
+            .filter((item): item is string => item !== null)
+            .slice(0, 64)
+        : [];
+      if (sourceTexts.length > 0) edit.sourceTexts = sourceTexts;
       const undo = raw['undo'];
       if (isRecord(undo)) {
         const undoHashes = sanitizeHashList(undo['hashes']);
-        if (undoHashes.length > 0) edit.undo = { hashes: undoHashes, offsets: sanitizeOffsets(undo['offsets']) };
+        if (undoHashes.length > 0) {
+          const occurrences = finiteNumber(undo['occurrences']);
+          edit.undo = {
+            hashes: undoHashes,
+            offsets: sanitizeOffsets(undo['offsets']),
+            joiners: Array.isArray(undo['joiners'])
+              // 繋ぎ文字は「空文字」か「空白 1 個」しか作らない。外から来た任意文字列は入れない。
+              ? undo['joiners'].slice(0, 64).map((item) => (item === '' ? '' : ' '))
+              : [],
+            ...(occurrences !== null && occurrences > 0 ? { occurrences: Math.floor(occurrences) } : {}),
+          };
+        }
       }
       sentenceEdits.push(edit);
     }

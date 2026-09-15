@@ -506,13 +506,22 @@ export function createMcpServer(baseUrl: string): McpServer {
           );
         }
         // 直すと文のハッシュが変わる。古いハッシュのまま訳を書くと素通りするので必ず伝える。
+        const detached = result.detached;
+        const lost = detached.translations + detached.notes + detached.skipped;
         return jsonResult({
           applied: true,
           editId: result.editId,
           occurrences: result.occurrences,
+          // 区切りが変わった文はハッシュも変わる。新しい文の hash を返しておけば
+          // もう一度取得しに行かずに訳を書ける。
+          resultHashes: result.resultHashes,
+          detached,
           hint:
-            '区切りを変えた文はハッシュが変わりました。訳を書く前に get_translation_batch か get_sentences で取り直してください。' +
-            (result.occurrences > 1 ? ` 同じ本文の ${result.occurrences} か所に適用されています。` : ''),
+            '区切りを変えた文はハッシュが変わりました。resultHashes が新しい文のハッシュです。' +
+            (result.occurrences > 1 ? ` 同じ本文の ${result.occurrences} か所に適用されています。` : '') +
+            (lost > 0
+              ? ` 元の文に付いていた訳 ${detached.translations} 件・メモ ${detached.notes} 件は、どの文にも結び付かなくなりました（消えてはおらず、action=undo で戻ります）。`
+              : ''),
         });
       } catch (error) {
         return errorResult(error);

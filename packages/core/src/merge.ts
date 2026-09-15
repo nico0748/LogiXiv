@@ -121,12 +121,49 @@ export function mergeAnnotations(
   // 静かに消え、未訳が増えて見える。
   const skipped = { ...(base.skipped ?? {}), ...(incoming.skipped ?? {}) };
 
-  // 区切りの直しは取り込まず、こちら側のものだけ残す。
-  // 相手の手順は相手の構造の上でしか意味を持たない（hash がこちらの文に当たらない）。
-  // こちらの構造には既に自分の手順が反映済みなので、混ぜると記録と構造がずれる。
+  // 区切りの直しはここでは混ぜない。こちらの構造には既に自分の手順が反映済みなので、
+  // 記録だけ足すと記録と構造がずれる。相手の手順は adoptSentenceEdits が
+  // 構造に当てながら取り込む（当たったものだけ記録に残る）。
   const sentenceEdits: SentenceEdit[] = [...(base.sentenceEdits ?? [])];
 
   return { annotations: { translations, notes, glossary, skipped, sentenceEdits }, report };
+}
+
+/** 同じ編集を二度取り込まないための鍵。原文と切り位置が同じなら同じ操作。 */
+function editKey(edit: SentenceEdit): string {
+  return [edit.type, (edit.sourceTexts ?? edit.hashes).join('\u0000'), (edit.offsets ?? []).join(',')].join('|');
+}
+
+/**
+ * 他人の書き出しに入っていた「文の区切りの直し」を取り込む。
+ *
+ * これをやらないと、相手が 2 文を 1 文にまとめてから訳した場合、その訳は
+ * こちらのどの文にも当たらず「対応なし」として捨てられる。区切りを先に揃えれば
+ * そのまま乗る。当てられなかった手順は黙って飛ばす（相手と本文が違うだけなので）。
+ */
+export function adoptSentenceEdits(
+  document: PaperDocument,
+  incoming: readonly SentenceEdit[],
+): { document: PaperDocument; adopted: number; skipped: number } {
+  const known = new Set((document.annotations.sentenceEdits ?? []).map(editKey));
+  const candidates = incoming.filter((edit) => !known.has(editKey(edit)));
+  if (candidates.length === 0) return { document, adopted: 0, skipped: 0 };
+
+  const replay = applySentenceEdits(document.structure, candidates);
+  if (replay.applied.length === 0) return { document, adopted: 0, skipped: replay.stale.length };
+
+  return {
+    document: {
+      ...document,
+      structure: replay.structure,
+      annotations: {
+        ...document.annotations,
+        sentenceEdits: [...(document.annotations.sentenceEdits ?? []), ...replay.applied],
+      },
+    },
+    adopted: replay.applied.length,
+    skipped: replay.stale.length,
+  };
 }
 
 /**
@@ -157,10 +194,9 @@ export function applyStructure(
       title: structure.title ?? document.title,
       structure: replay.structure,
       updatedAt: new Date().toISOString(),
-      annotations:
-        replay.stale.length === 0
-          ? document.annotations
-          : { ...document.annotations, sentenceEdits: replay.applied },
+      // 当てられた編集も含めて必ず書き戻す。取り消し情報は今の本文に合わせて
+      // 作り直されているので、古いものを残すと「戻す」が別の場所を切る。
+      annotations: { ...document.annotations, sentenceEdits: replay.applied },
     },
     rebound,
     orphaned,

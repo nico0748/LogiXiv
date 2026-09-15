@@ -112,10 +112,21 @@ export interface SentenceEdit {
   /** split のときだけ使う、原文テキスト内の分割位置（昇順）。 */
   offsets?: number[];
   /**
+   * 対象の原文そのもの。hash はここから計算できる。
+   *
+   * 正規化規則を変えた（STRUCTURE_VERSION を上げた）とき、hash だけでは付け替えられない。
+   * 構造側の文はもう結合・分割済みで、編集前の文はどこにも残っていないため。
+   */
+  sourceTexts?: string[];
+  /**
    * 取り消し用。merge なら「結合後の hash と元の境目」、split なら「分割後の hash 列」。
    * これが無いと取り消しに再解析が要る（数十秒かかるので、実質「戻せない」になる）。
+   *
+   * joiners は分割を戻すときに断片を繋ぐ文字列。単語の途中で切った場合は空文字になる。
+   * ここで空白を決め打ちすると、戻した文が元と違う本文になり訳がはぐれる。
+   * occurrences は適用された箇所の数。元から在った同じ本文の文まで巻き込まないための上限。
    */
-  undo?: { hashes: string[]; offsets?: number[] };
+  undo?: { hashes: string[]; offsets?: number[]; joiners?: string[]; occurrences?: number };
   createdAt: string;
 }
 

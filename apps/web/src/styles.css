@@ -435,8 +435,6 @@ textarea {
   color: var(--muted);
   font-size: 0.82rem;
   line-height: 1.55;
-  /* 分割位置はここをクリックして決めるので、テキストとして扱えることを見せる。 */
-  cursor: text;
 }
 
 .card-note {
@@ -465,8 +463,20 @@ textarea {
 .card-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.4rem;
   margin-top: 0.3rem;
+}
+
+.card-actions button {
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+/* 説明文だけが縮む。ボタンのラベルが単語の途中で折れるより読みやすい。 */
+.card-actions .hint {
+  flex: 1 1 8rem;
+  min-width: 0;
 }
 
 .hint {
@@ -477,6 +487,9 @@ textarea {
 .card-toolbar {
   display: flex;
   align-items: center;
+  /* ボタンが 5 つ並ぶので、狭い画面では折り返す。折り返さないと 400px 付近で
+     ラベルが単語の途中で改行され、どれが何のボタンか読めなくなる。 */
+  flex-wrap: wrap;
   gap: 0.35rem;
   margin-top: 0.35rem;
   opacity: 0;
@@ -501,12 +514,43 @@ textarea {
 .card-toolbar button {
   padding: 0.1rem 0.4rem;
   font-size: 0.72rem;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
-/* 原文を選んだときだけ出る操作。出たことに気づけるよう色を付ける。 */
-.card-toolbar button.is-primary {
-  border-color: var(--accent);
-  color: var(--accent);
+/* 押せない理由を伝えるため、disabled ではなく aria-disabled で出す
+   （disabled は Tab で飛ばされ、なぜ押せないのかを知る手段が無くなる）。 */
+.card-toolbar button[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 分割の切れ目。語と語の間に実体のある的として出す。 */
+.card-split .card-source.is-splitting {
+  cursor: default;
+}
+
+/* 語と語の間の細い的。文中に 20 個並ぶので、既定では線 1 本ぶんの主張に留める。
+   はさみの絵を常時出すと本文が読めなくなり、どこで切るかの判断ができない。 */
+.split-point {
+  display: inline-block;
+  width: 0.5rem;
+  height: 1em;
+  margin: 0 0.05rem;
+  padding: 0;
+  vertical-align: text-bottom;
+  border: 0;
+  border-radius: 2px;
+  background:
+    linear-gradient(var(--accent), var(--accent)) center / 1px 100% no-repeat;
+  opacity: 0.45;
+}
+
+.split-point:hover,
+.split-point:focus-visible {
+  background: var(--accent);
+  opacity: 1;
+  outline: none;
 }
 
 .card-page {

@@ -30,7 +30,6 @@ interface Props {
 
 export function Sidebar(props: Props): React.JSX.Element {
   const { document: paper, selectedId, visibleSentences, scrollTarget } = props;
-  const listRef = useRef<HTMLDivElement>(null);
 
   const notesByHash = useMemo(() => {
     const map = new Map<string, Note[]>();
@@ -48,31 +47,59 @@ export function Sidebar(props: Props): React.JSX.Element {
   );
 
   /**
-   * 「次と結合」の相手。絞り込み後の並びではなく本文の並びで引く。
-   * 検索中に見えている次のカードと結合してしまうと、画面と結果が食い違う。
+   * 区切りを直す操作の相手と、それが何か所に効くか。
+   *
+   * 相手は絞り込み後の並びではなく本文の並びで引く。検索中に見えている次の
+   * カードと結合してしまうと、画面と結果が食い違う。
+   * 件数を先に数えるのは、押す前に「何か所変わるか」を出すため。
+   * 同じ本文が 15 か所ある論文で、押した後に「15 か所変えました」と言われても遅い。
    */
-  const nextHashById = useMemo(() => {
-    const map = new Map<string, string>();
+  const relations = useMemo(() => {
     const all = paper.structure.sentences;
-    for (let i = 0; i < all.length - 1; i++) map.set(all[i]!.id, all[i + 1]!.hash);
-    return map;
+    const nextById = new Map<string, Sentence>();
+    const hashCounts = new Map<string, number>();
+    const pairCounts = new Map<string, number>();
+    for (let i = 0; i < all.length; i++) {
+      const sentence = all[i]!;
+      hashCounts.set(sentence.hash, (hashCounts.get(sentence.hash) ?? 0) + 1);
+      const next = all[i + 1];
+      if (!next) continue;
+      nextById.set(sentence.id, next);
+      const key = `${sentence.hash}|${next.hash}`;
+      pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+    }
+    return { nextById, hashCounts, pairCounts };
   }, [paper.structure.sentences]);
 
   useEffect(() => {
     if (!scrollTarget) return;
-    listRef.current
-      ?.querySelector(`[data-card-for="${CSS.escape(scrollTarget.id)}"]`)
+    window.document
+      .querySelector(`.sidebar [data-card-for="${CSS.escape(scrollTarget.id)}"]`)
       ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, [scrollTarget]);
+
+  if (visibleSentences.length === 0) {
+    // 「一致しない」と「そもそも文が無い」は原因も対処も違う。
+    // スキャン PDF を開いた人に検索の話をしても仕方がない。
+    return (
+      <div className="sidebar">
+        <p className="pane-message">
+          {props.filter.trim().length > 0
+            ? '一致する文がありません。'
+            : 'この PDF からは文を取り出せませんでした。画像だけのスキャン PDF は先に OCR を通してください。'}
+        </p>
+      </div>
+    );
+  }
 
   let lastSection: string | null | undefined;
 
   return (
-    <div className="sidebar" ref={listRef}>
-      {visibleSentences.length === 0 && <p className="pane-message">一致する文がありません。</p>}
+    <div className="sidebar">
       {visibleSentences.map((sentence) => {
         const heading = sentence.sectionId !== lastSection ? sectionTitles.get(sentence.sectionId ?? '') : undefined;
         lastSection = sentence.sectionId;
+        const next = relations.nextById.get(sentence.id) ?? null;
         return (
           <Fragment key={sentence.id}>
             {heading && <h2 className="sidebar-section">{heading}</h2>}
@@ -86,7 +113,9 @@ export function Sidebar(props: Props): React.JSX.Element {
               onAddNote={props.onAddNote}
               onDeleteNote={props.onDeleteNote}
               onToggleSkip={props.onToggleSkip}
-              nextHash={nextHashById.get(sentence.id) ?? null}
+              next={next}
+              mergeOccurrences={next ? (relations.pairCounts.get(`${sentence.hash}|${next.hash}`) ?? 1) : 0}
+              splitOccurrences={relations.hashCounts.get(sentence.hash) ?? 1}
               onMergeWithNext={props.onMergeWithNext}
               onSplit={props.onSplit}
             />
@@ -107,10 +136,33 @@ interface CardProps {
   onAddNote: (hash: string, body: string) => Promise<boolean>;
   onDeleteNote: (noteId: string) => Promise<boolean>;
   onToggleSkip: (hash: string, skip: boolean) => Promise<boolean>;
-  /** 本文の並びで次に来る文の hash。最後の文では null。 */
-  nextHash: string | null;
+  /** 本文の並びで次に来る文。最後の文では null。 */
+  next: Sentence | null;
+  /** 結合が何か所に効くか。 */
+  mergeOccurrences: number;
+  /** 分割が何か所に効くか。 */
+  splitOccurrences: number;
   onMergeWithNext: (hashes: [string, string]) => Promise<boolean>;
   onSplit: (hash: string, offsets: number[]) => Promise<boolean>;
+}
+
+/** 語の切れ目。分割はここにしか置けない（単語の途中で切ると読めない断片ができる）。 */
+function wordBoundaries(text: string): number[] {
+  const offsets: number[] = [];
+  const word = /\S+/g;
+  let match: RegExpExecArray | null;
+  while ((match = word.exec(text)) !== null) {
+    if (match.index > 0) offsets.push(match.index);
+  }
+  return offsets;
+}
+
+function preview(text: string, length = 28): string {
+  return text.length <= length ? text : `${text.slice(0, length)}…`;
+}
+
+function tail(text: string, length = 20): string {
+  return text.length <= length ? text : `…${text.slice(-length)}`;
 }
 
 function SentenceCard(props: CardProps): React.JSX.Element {
@@ -122,31 +174,27 @@ function SentenceCard(props: CardProps): React.JSX.Element {
   const [noteDraft, setNoteDraft] = useState('');
   const [noteOpen, setNoteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const sourceRef = useRef<HTMLParagraphElement>(null);
-  const [splitAt, setSplitAt] = useState<number | null>(null);
+  /** 分割の切れ目を選んでいる最中か。 */
+  const [choosingSplit, setChoosingSplit] = useState(false);
+  const splitRef = useRef<HTMLDivElement>(null);
 
-  /**
-   * 原文の上でクリック（またはドラッグ）した位置を、分割位置として拾う。
-   *
-   * 原文は 1 つのテキストノードとして描いているので、anchorOffset がそのまま
-   * 文字位置になる。範囲選択のときは手前側を使う（「ここから次の文」という
-   * 選び方が自然なので）。
-   */
-  const captureCaret = (): void => {
-    const node = sourceRef.current?.firstChild;
-    const selection = window.getSelection();
-    if (!node || !selection || selection.rangeCount === 0 || selection.anchorNode !== node) {
-      setSplitAt(null);
-      return;
-    }
-    const offset = Math.min(selection.anchorOffset, selection.focusOffset);
-    setSplitAt(offset > 0 && offset < sentence.text.length ? offset : null);
-  };
+  const boundaries = useMemo(() => wordBoundaries(sentence.text), [sentence.text]);
 
   useEffect(() => {
     // 編集中は SSE 由来の更新で下書きを潰さない。
     if (!editing) setDraft(translation?.text ?? '');
   }, [translation?.text, editing]);
+
+  useEffect(() => {
+    // 本文が変わったら選び直し。前の文の位置を新しい文に当ててはいけない。
+    setChoosingSplit(false);
+  }, [sentence.hash]);
+
+  useEffect(() => {
+    // 開いたら最初の切れ目に焦点を移す。切れ目は「分割…」ボタンより前にあるので、
+    // そのまま Tab を押すと次のカードへ飛んでしまい、キーボードでは辿り着けない。
+    if (choosingSplit) splitRef.current?.querySelector('button')?.focus();
+  }, [choosingSplit]);
 
   const save = async (): Promise<void> => {
     setBusy(true);
@@ -158,6 +206,8 @@ function SentenceCard(props: CardProps): React.JSX.Element {
   };
 
   const select = (): void => props.onSelect(sentence.id, 'sidebar');
+
+  const canMerge = props.next !== null;
 
   return (
     <article
@@ -212,16 +262,67 @@ function SentenceCard(props: CardProps): React.JSX.Element {
         </p>
       )}
 
-      <p
-        className="card-source"
-        lang="en"
-        ref={sourceRef}
-        onMouseUp={captureCaret}
-        onKeyUp={captureCaret}
-        title="切りたい位置をクリックすると「ここで分割」が出ます"
-      >
-        {sentence.text}
-      </p>
+      {choosingSplit ? (
+        /**
+         * 分割の切れ目を選ぶ。語と語の間に実体のあるボタンを置く。
+         *
+         * 以前は原文をクリックしたキャレット位置で切っていたが、(a) どこで切れるかが
+         * 画面に出ない、(b) 文を選ぶだけのクリックでも切る準備が整ってしまう、
+         * (c) キーボードだけでは一生たどり着けない、(d) 単語の途中で切れる、
+         * と 4 つ別々の壊れ方をした。押せる点として出せば全部消える。
+         */
+        <div
+          className="card-split"
+          ref={splitRef}
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === 'Escape') setChoosingSplit(false);
+          }}
+        >
+          <p className="card-source is-splitting" lang="en">
+            {boundaries.map((offset, index) => (
+              <Fragment key={offset}>
+                <span>{sentence.text.slice(index === 0 ? 0 : boundaries[index - 1]!, offset)}</span>
+                <button
+                  type="button"
+                  className="split-point"
+                  disabled={busy}
+                  title={`ここで分割: 「${tail(sentence.text.slice(0, offset).trim())}」／「${preview(
+                    sentence.text.slice(offset).trim(),
+                  )}」`}
+                  aria-label={`ここで分割。前半の終わりは ${tail(
+                    sentence.text.slice(0, offset).trim(),
+                  )}、後半の始まりは ${preview(sentence.text.slice(offset).trim())}`}
+                  onClick={() => {
+                    setBusy(true);
+                    void props
+                      .onSplit(sentence.hash, [offset])
+                      .then((ok) => {
+                        if (ok) setChoosingSplit(false);
+                      })
+                      .finally(() => setBusy(false));
+                  }}
+                />
+              </Fragment>
+            ))}
+            <span>{sentence.text.slice(boundaries[boundaries.length - 1] ?? 0)}</span>
+          </p>
+          <div className="card-actions">
+            <span className="hint">
+              切りたい位置の縦線を押してください
+              {props.splitOccurrences > 1 && `（同じ本文の ${props.splitOccurrences} か所すべてに効きます）`}
+            </span>
+            <button type="button" disabled={busy} onClick={() => setChoosingSplit(false)}>
+              やめる
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="card-source" lang="en">
+          {sentence.text}
+        </p>
+      )}
 
       {notes.map((note) => (
         <p key={note.id} className="card-note">
@@ -294,35 +395,39 @@ function SentenceCard(props: CardProps): React.JSX.Element {
         </button>
         <button
           type="button"
-          disabled={props.nextHash === null || busy}
-          title="1 文が 2 枚に割れているときに、次のカードと 1 つにします"
+          // disabled にすると Tab で飛ばされ、なぜ押せないのかを知る手段が無くなる。
+          aria-disabled={!canMerge}
+          title={
+            canMerge
+              ? `次の文と 1 つにします: 「${preview(props.next!.text, 40)}」${
+                  props.mergeOccurrences > 1 ? `（同じ並びの ${props.mergeOccurrences} か所すべて）` : ''
+                }`
+              : 'この文が最後なので、結合する相手がいません'
+          }
           onClick={() => {
-            if (!props.nextHash) return;
+            if (!canMerge || busy) return;
             setBusy(true);
-            void props.onMergeWithNext([sentence.hash, props.nextHash]).finally(() => setBusy(false));
+            void props.onMergeWithNext([sentence.hash, props.next!.hash]).finally(() => setBusy(false));
           }}
         >
-          次と結合
+          次と結合{canMerge && props.mergeOccurrences > 1 ? `（${props.mergeOccurrences}か所）` : ''}
         </button>
-        {splitAt !== null && (
-          <button
-            type="button"
-            className="is-primary"
-            disabled={busy}
-            title={`${splitAt} 文字目で切ります`}
-            onClick={() => {
-              setBusy(true);
-              void props
-                .onSplit(sentence.hash, [splitAt])
-                .then((ok) => {
-                  if (ok) setSplitAt(null);
-                })
-                .finally(() => setBusy(false));
-            }}
-          >
-            ここで分割
-          </button>
-        )}
+        <button
+          type="button"
+          aria-disabled={boundaries.length === 0}
+          aria-expanded={choosingSplit}
+          title={
+            boundaries.length === 0
+              ? '語がひとつしかないので分割できません'
+              : '原文の切れ目を選んで 2 文に分けます'
+          }
+          onClick={() => {
+            if (boundaries.length === 0) return;
+            setChoosingSplit((open) => !open);
+          }}
+        >
+          分割…{props.splitOccurrences > 1 ? `（${props.splitOccurrences}か所）` : ''}
+        </button>
         <span className="card-page">p.{sentence.page}</span>
       </div>
     </article>

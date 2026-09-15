@@ -1,5 +1,6 @@
 import {
   addNote,
+  adoptSentenceEdits,
   applyStructure,
   createDocument,
   deleteNote,
@@ -432,11 +433,12 @@ export class LogiXivApi {
   async editSentenceBoundary(
     id: string,
     input: { type: 'merge' | 'split'; hashes: string[]; offsets?: number[] },
-  ): Promise<{ applied: boolean; occurrences: number; editId?: string; hashes: string[]; reason?: string }> {
-    let outcome: { applied: boolean; occurrences: number; editId?: string; hashes: string[]; reason?: string } = {
+  ): Promise<SentenceEditOutcome> {
+    let outcome: SentenceEditOutcome = {
       applied: false,
       occurrences: 0,
-      hashes: [],
+      resultHashes: [],
+      detached: { translations: 0, notes: 0, skipped: 0 },
     };
     await this.mutate(id, (current) => {
       const result = editSentenceBoundary(current, input);
@@ -445,9 +447,17 @@ export class LogiXivApi {
             applied: true,
             occurrences: result.occurrences,
             editId: result.edit!.id,
-            hashes: result.edit!.undo?.hashes ?? [],
+            // 結合なら結合後の文、分割なら分割後の断片。画面が選択を追うのに使う。
+            resultHashes: result.edit!.undo?.hashes ?? [],
+            detached: result.detached,
           }
-        : { applied: false, occurrences: 0, hashes: [], reason: result.reason };
+        : {
+            applied: false,
+            occurrences: 0,
+            resultHashes: [],
+            detached: { translations: 0, notes: 0, skipped: 0 },
+            reason: result.reason,
+          };
       return result.document;
     });
     if (outcome.applied) this.bus.publish({ type: 'document.updated', documentId: id, reason: 'sentence-edit' });
@@ -562,14 +572,25 @@ export class LogiXivApi {
 
     if (targetId) {
       let report: unknown = null;
+      let adoptedEdits = 0;
       await this.mutate(targetId, (current) => {
-        const hashes = new Set(current.structure.sentences.map((s) => s.hash));
-        const merged = mergeAnnotations(current.annotations, parsed.annotations, hashes);
+        // 相手が直した文の区切りを先に取り込む。順番が逆だと、まとめた文に付いた訳が
+        // 「対応なし」として捨てられる（区切りが違うだけで hash が当たらないため）。
+        const adopted = adoptSentenceEdits(current, parsed.annotations.sentenceEdits ?? []);
+        adoptedEdits = adopted.adopted;
+        const base = adopted.document;
+        const hashes = new Set(base.structure.sentences.map((s) => s.hash));
+        const merged = mergeAnnotations(base.annotations, parsed.annotations, hashes);
         report = merged.report;
-        return { ...current, updatedAt: new Date().toISOString(), annotations: merged.annotations };
+        return { ...base, updatedAt: new Date().toISOString(), annotations: merged.annotations };
       });
       this.bus.publish({ type: 'document.updated', documentId: targetId, reason: 'import' });
-      return { documentId: targetId, report, note: '既存の文書に注釈をマージしました', warning };
+      return {
+        documentId: targetId,
+        report: { ...(report as Record<string, number>), sentenceEditsAdopted: adoptedEdits },
+        note: '既存の文書に注釈をマージしました',
+        warning,
+      };
     }
 
     if (!parsed.pdfBase64 || !parsed.document) {
@@ -610,6 +631,17 @@ export class LogiXivApi {
  * 「人手修正済み（＝放置してよい）」と「該当する文が無い（＝hash を取り直すべき）」は
  * 必要な対応が正反対なので、文字列の比較で分岐させない。
  */
+export interface SentenceEditOutcome {
+  applied: boolean;
+  occurrences: number;
+  editId?: string;
+  /** 編集の結果できた文の hash。 */
+  resultHashes: string[];
+  /** どの文にも結び付かなくなった注釈の数（消してはいない）。 */
+  detached: { translations: number; notes: number; skipped: number };
+  reason?: string;
+}
+
 export type SkipCode = 'revised_by_human' | 'unknown_hash' | 'other';
 
 function skipCodeOf(reason: string): SkipCode {

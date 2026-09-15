@@ -4,8 +4,10 @@ import {
   addNote,
   applyStructure,
   createDocument,
+  deriveEdit,
   editSentenceBoundary,
   mergeSentences,
+  migrateDocument,
   progress,
   sentenceEditsOf,
   sentenceHash,
@@ -203,4 +205,132 @@ test('結合しても訳とメモは新しい hash に付け直せる', () => {
   const restored = undoSentenceEdit(merged).document;
   assert.equal(progress(restored).translated, 1);
   assert.equal(restored.annotations.notes.length, 1);
+});
+
+// --- サイクル4 の批評で見つかった壊れ方 --------------------------------
+
+test('単語の途中で割っても、取り消すと元の本文に戻る', () => {
+  // 戻すときに空白 1 個を決め打ちすると "me thod." になり、別の本文になってしまう。
+  const base = structureOf(['We propose a fast method.', 'Next.']);
+  let document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  const originalHash = base.sentences[0]!.hash;
+  document = setTranslation(document, originalHash, '高速な手法を提案する。', { source: 'human' }).document;
+
+  const split = editSentenceBoundary(document, { type: 'split', hashes: [originalHash], offsets: [20] });
+  assert.equal(split.applied, true);
+  assert.deepEqual(
+    split.document.structure.sentences.slice(0, 2).map((s) => s.text),
+    ['We propose a fast me', 'thod.'],
+  );
+
+  const back = undoSentenceEdit(split.document);
+  assert.equal(back.applied, true);
+  assert.equal(back.document.structure.sentences[0]!.text, 'We propose a fast method.');
+  assert.equal(back.document.structure.sentences[0]!.hash, originalHash);
+  assert.equal(progress(back.document).translated, 1);
+});
+
+test('サロゲートペアの内側では切らない', () => {
+  const text = 'The gene \u{1D538}BC is expressed.';
+  const base = structureOf([text]);
+  const document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  // 'The gene ' の直後が 𝔸（2 単位）。10 はその内側を指す。
+  const split = editSentenceBoundary(document, { type: 'split', hashes: [base.sentences[0]!.hash], offsets: [10] });
+  assert.equal(split.applied, true);
+  const joined = split.document.structure.sentences.map((s) => s.text).join('');
+  assert.ok(!/[\uD800-\uDFFF]/.test(joined.replace(/\u{1D538}/gu, '')), '孤立したサロゲートが残っている');
+  assert.equal(undoSentenceEdit(split.document).document.structure.sentences[0]!.text, text);
+});
+
+test('再解析で綴りが変わっても、取り消しは正しい位置で切る', () => {
+  // フォールバックの "block- sparse" と GROBID の "block-sparse" は同じ hash になるが長さが違う。
+  const fallback = structureOf(['We use block- sparse attention.', 'It is fast.']);
+  const document = createDocument({ structure: fallback, sourceFileName: 'a.pdf' });
+  const merged = editSentenceBoundary(document, {
+    type: 'merge',
+    hashes: [fallback.sentences[0]!.hash, fallback.sentences[1]!.hash],
+  }).document;
+
+  const grobid = structureOf(['We use block-sparse attention.', 'It is fast.']);
+  assert.equal(grobid.sentences[0]!.hash, fallback.sentences[0]!.hash, '前提: 正規化すると同じ hash');
+
+  const applied = applyStructure(merged, grobid);
+  assert.equal(applied.editsReapplied, 1);
+
+  const undone = undoSentenceEdit(applied.document);
+  assert.equal(undone.applied, true);
+  assert.deepEqual(
+    undone.document.structure.sentences.map((s) => s.text),
+    ['We use block-sparse attention.', 'It is fast.'],
+  );
+});
+
+test('結合の取り消しは、元から在った同じ本文の文を巻き込まない', () => {
+  const base = structureOf(['Step one.', 'Step two.', 'Unrelated.', 'Step one. Step two.']);
+  let document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  const preexisting = base.sentences[3]!.hash;
+  document = setTranslation(document, preexisting, '手順 1。手順 2。', { source: 'human' }).document;
+
+  const merged = editSentenceBoundary(document, {
+    type: 'merge',
+    hashes: [base.sentences[0]!.hash, base.sentences[1]!.hash],
+  });
+  assert.equal(merged.occurrences, 1);
+
+  const back = undoSentenceEdit(merged.document);
+  assert.deepEqual(
+    back.document.structure.sentences.map((s) => s.text),
+    ['Step one.', 'Step two.', 'Unrelated.', 'Step one. Step two.'],
+  );
+  assert.equal(progress(back.document).translated, 1, '元から在った文の訳が外れている');
+});
+
+test('段組の左右にまたがる矩形は 1 本にまとめない', () => {
+  const base = structureOf(['Left side.', 'Right side.']);
+  base.sentences[0]!.rects = [{ page: 1, x: 60, y: 400, w: 230, h: 12 }];
+  base.sentences[1]!.rects = [{ page: 1, x: 320, y: 400, w: 230, h: 12 }];
+  const merged = mergeSentences(base, [base.sentences[0]!.hash, base.sentences[1]!.hash]);
+  assert.equal(merged.structure.sentences[0]!.rects.length, 2, '柱間を跨いで 1 本になっている');
+});
+
+test('正規化規則が変わっても、原文から編集記録を作り直せる', () => {
+  // deriveEdit が原文だけから hash と取り消し情報を導けることを直接確かめる。
+  const derived = deriveEdit('merge', ['We propose a method.', 'It is fast.']);
+  assert.deepEqual(derived.hashes, [sentenceHash('We propose a method.'), sentenceHash('It is fast.')]);
+  assert.equal(derived.undo.hashes[0], sentenceHash('We propose a method. It is fast.'));
+  assert.deepEqual(derived.undo.offsets, ['We propose a method.'.length + 1]);
+
+  const splitDerived = deriveEdit('split', ['We propose a fast method.'], [20]);
+  assert.deepEqual(splitDerived.undo.hashes, [sentenceHash('We propose a fast me'), sentenceHash('thod.')]);
+  assert.deepEqual(splitDerived.undo.joiners, ['']);
+});
+
+test('正規化規則が変わっても、記録した区切りは再解析で流し直せる', () => {
+  // v1 の hash を持つ古い保存データを作り、移行 → 再解析まで通す。
+  const texts = ['We propose a method.', 'It is fast.'];
+  const base = structureOf(texts);
+  const edited = editSentenceBoundary(createDocument({ structure: base, sourceFileName: 'a.pdf' }), {
+    type: 'merge',
+    hashes: [base.sentences[0]!.hash, base.sentences[1]!.hash],
+  }).document;
+
+  // 構造だけ v1 に落とし、記録の hash も当時の別物にする（＝対応表では引けない状態）。
+  const stale = {
+    ...edited,
+    structure: { ...edited.structure, version: STRUCTURE_VERSION - 1 },
+    annotations: {
+      ...edited.annotations,
+      sentenceEdits: (edited.annotations.sentenceEdits ?? []).map((edit) => ({
+        ...edit,
+        hashes: edit.hashes.map(() => '0000000000000000'),
+        undo: { ...edit.undo!, hashes: ['1111111111111111'] },
+      })),
+    },
+  };
+
+  const migrated = migrateDocument(stale);
+  assert.equal(migrated.migrated, true);
+  const applied = applyStructure(migrated.document, structureOf(texts));
+  assert.equal(applied.editsReapplied, 1, '移行後に区切りの直しが当たらなくなっている');
+  assert.equal(applied.document.structure.sentences.length, 1);
 });

@@ -182,7 +182,14 @@ export class LogiXivClient {
   }
 
   editSentenceBoundary(id: string, input: { type: 'merge' | 'split'; hashes: string[]; offsets?: number[] }) {
-    return this.request<{ applied: boolean; occurrences: number; editId?: string; reason?: string }>(
+    return this.request<{
+      applied: boolean;
+      occurrences: number;
+      editId?: string;
+      resultHashes: string[];
+      detached: { translations: number; notes: number; skipped: number };
+      reason?: string;
+    }>(
       `/api/documents/${encodeURIComponent(id)}/sentence-edits`,
       {
         method: 'POST',

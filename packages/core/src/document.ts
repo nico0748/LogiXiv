@@ -212,8 +212,32 @@ export interface SentenceEditResult {
   applied: boolean;
   /** 何か所に適用されたか。同じ本文が複数回出る文書では 1 より大きくなる。 */
   occurrences: number;
+  /**
+   * 区切りが変わったことで、どの文にも結び付かなくなった注釈の数。
+   * 消してはいない（取り消せば戻る）が、画面から消えるので必ず伝える。
+   */
+  detached: { translations: number; notes: number; skipped: number };
   edit?: SentenceEdit;
   reason?: string;
+}
+
+/** 構造から消えた hash に付いていた注釈を数える。 */
+function countDetached(
+  document: PaperDocument,
+  before: DocumentStructure,
+  after: DocumentStructure,
+): { translations: number; notes: number; skipped: number } {
+  const survivors = new Set(after.sentences.map((sentence) => sentence.hash));
+  const lost = new Set(before.sentences.map((s) => s.hash).filter((hash) => !survivors.has(hash)));
+  const skipped = skippedOf(document);
+  let translations = 0;
+  let skippedCount = 0;
+  for (const hash of lost) {
+    if (document.annotations.translations[hash]) translations++;
+    if (skipped[hash]) skippedCount++;
+  }
+  const notes = document.annotations.notes.filter((note) => lost.has(note.sentenceHash)).length;
+  return { translations, notes, skipped: skippedCount };
 }
 
 /**
@@ -240,11 +264,22 @@ export function editSentenceBoundary(
     outcome = applySentenceEdit(document.structure, edit);
   } catch (error) {
     if (error instanceof SentenceEditError) {
-      return { document, applied: false, occurrences: 0, reason: error.message };
+      return {
+        document,
+        applied: false,
+        occurrences: 0,
+        detached: { translations: 0, notes: 0, skipped: 0 },
+        reason: error.message,
+      };
     }
     throw error;
   }
-  const stored: SentenceEdit = { ...edit, undo: outcome.undo };
+  const stored: SentenceEdit = {
+    ...edit,
+    sourceTexts: outcome.sourceTexts,
+    ...(input.type === 'split' ? { offsets: outcome.offsets } : {}),
+    undo: outcome.undo,
+  };
   return {
     document: {
       ...document,
@@ -254,6 +289,7 @@ export function editSentenceBoundary(
     },
     applied: true,
     occurrences: outcome.occurrences,
+    detached: countDetached(document, document.structure, outcome.structure),
     edit: stored,
   };
 }
