@@ -26,6 +26,9 @@ function emptyReport(): MergeReport {
     notesAdded: 0,
     notesSkippedAsDuplicate: 0,
     glossaryAdded: 0,
+    glossaryAddedTerms: [],
+    skippedAdded: 0,
+    skippedIgnored: 0,
     orphaned: 0,
   };
 }
@@ -115,11 +118,44 @@ export function mergeAnnotations(
     glossary.push(entry);
     seenTerms.add(entry.term.toLowerCase());
     report.glossaryAdded++;
+    // 語そのものを返す。件数だけでは「別の論文の訳語方針が混ざった」を
+    // 見つけられないし、混ざった後に 1 件ずつ取り消すこともできない。
+    report.glossaryAddedTerms.push(entry.term);
   }
 
-  // skipped を落とさない。ここで取りこぼすと、取り込みのたびに「訳さない」判断が
-  // 静かに消え、未訳が増えて見える。
-  const skipped = { ...(base.skipped ?? {}), ...(incoming.skipped ?? {}) };
+  /**
+   * 「訳さない」は落とさないが、**無条件には受け取らない**。
+   *
+   * 以前は `{...base, ...incoming}` で丸ごと重ねていた。これだと、同僚が参考文献や
+   * 図表キャプションをまとめて対象外にしてから訳した書き出しを取り込むだけで、
+   * こちらがまだ訳していない文まで「訳さない」に移る。progress() は skipped を
+   * remaining から外すので残件が減り、MCP はその文を二度と返さない。
+   * 終了条件は remainingUnique === 0 なので、Claude は訳していない文を抱えたまま
+   * 「翻訳は完了しています」と報告することになる。
+   *
+   * そこで訳・メモと同じ条件に揃える:
+   *  - こちらの文書に無い文は受け取らない（orphaned として数える）
+   *  - こちらが既に訳している文は対象外にしない（skipSentences と同じ規則）
+   *  - 何件が新しく「訳さない」に移ったかを必ず報告する（＝減った残件の数）
+   */
+  const skipped = { ...(base.skipped ?? {}) };
+  for (const [hash, entry] of Object.entries(incoming.skipped ?? {})) {
+    if (!knownHashes.has(hash)) {
+      report.orphaned++;
+      if (policy === 'drop') {
+        report.skippedIgnored++;
+        continue;
+      }
+    }
+    // 既にこちらも同じ判断をしているなら、理由と日付は自分のものを残す。
+    if (skipped[hash]) continue;
+    if (translations[hash]) {
+      report.skippedIgnored++;
+      continue;
+    }
+    skipped[hash] = entry;
+    report.skippedAdded++;
+  }
 
   // 区切りの直しはここでは混ぜない。こちらの構造には既に自分の手順が反映済みなので、
   // 記録だけ足すと記録と構造がずれる。相手の手順は adoptSentenceEdits が
@@ -217,7 +253,11 @@ export function applyStructure(
       updatedAt: new Date().toISOString(),
       // 当てられた編集も含めて必ず書き戻す。取り消し情報は今の本文に合わせて
       // 作り直されているので、古いものを残すと「戻す」が別の場所を切る。
-      annotations: { ...document.annotations, sentenceEdits: replay.applied },
+      //
+      // 当たらなかった手順も detached の印を付けて残す。捨てていた頃は、
+      // 解析方式を変えた時点で手順が消え、「元の方式に戻せば戻ります」という
+      // 案内が嘘になっていた（戻しても手順が無いので再現されない）。
+      annotations: { ...document.annotations, sentenceEdits: [...replay.applied, ...replay.stale] },
     },
     rebound,
     orphaned,

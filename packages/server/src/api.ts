@@ -9,6 +9,7 @@ import {
   editSentenceBoundary,
   LOGIXIV_VERSION,
   mergeAnnotations,
+  overlapRatio,
   parseExportHtml,
   applyTranslationEdits,
   progress,
@@ -66,6 +67,17 @@ const MAX_CONCURRENT_PARSES = 2;
 
 /** 置き換え候補として画面に出す上限。全部見せるのが原則だが、青天井にはしない。 */
 const MAX_REPLACEMENT_CANDIDATES = 500;
+
+/**
+ * 既存文書にマージするとき、これ未満の一致率なら止める。
+ *
+ * 別の論文の書き出しを落としても止まらないと、相手の用語集（＝訳語の方針）が
+ * この文書に混ざり、以後 Claude はそれに従って訳す。訳とメモは hash で弾かれるが、
+ * 用語集は全件入るので、被害はいちばん気づきにくい形で残る。
+ * 「同じ論文の別バージョン」や「相手だけが区切りを直した」を巻き込まないよう
+ * 境目は低めに置き、判断は人に返す（force で通せる）。
+ */
+const MIN_IMPORT_OVERLAP = 0.3;
 
 class Semaphore {
   private active = 0;
@@ -501,15 +513,38 @@ export class LogiXivApi {
   ): Promise<{
     total: number;
     revisedByHuman: number;
-    candidates: { sentenceHash: string; before: string; after: string; revisedByHuman: boolean }[];
+    /** 実際に返した候補の件数。total より少なければ打ち切っている。 */
+    shown: number;
+    /** 打ち切ったか。true のとき、超えた分は選択肢に現れないので置換もされない。 */
+    truncated: boolean;
+    /** 打ち切りの上限（画面に「n 件ずつ」と出せるように返す）。 */
+    limit: number;
+    candidates: {
+      sentenceHash: string;
+      before: string;
+      after: string;
+      revisedByHuman: boolean;
+      /** どの文の訳かを突き合わせるための原文と位置。 */
+      text: string;
+      order: number;
+      page: number;
+    }[];
   }> {
     if (from.trim().length === 0) throw new BadRequestError('置き換える語が空です');
     const document = await this.require(id);
+    // replaceInTranslations は今の構造に在る文の訳だけを候補にする。
+    // 候補には原文・通し番号・ページが付くので、画面で実物と突き合わせられる。
     const { replacements } = replaceInTranslations(document, from, to);
+    const candidates = replacements.slice(0, MAX_REPLACEMENT_CANDIDATES);
     return {
       total: replacements.length,
       revisedByHuman: replacements.filter((r) => r.revisedByHuman).length,
-      candidates: replacements.slice(0, MAX_REPLACEMENT_CANDIDATES),
+      // 打ち切りは黙って起こしてはいけない。超えた分は選択肢に出ないまま
+      // 置き換えられずに残るので、前半と後半で訳語が違う論文がそのままできる。
+      shown: candidates.length,
+      truncated: replacements.length > candidates.length,
+      limit: MAX_REPLACEMENT_CANDIDATES,
+      candidates,
     };
   }
 
@@ -735,14 +770,46 @@ export class LogiXivApi {
   async importHtml(
     html: string,
     targetId: string | null,
-  ): Promise<{ documentId: string; report: unknown; note: string; warning: string | null }> {
+    options: { force?: boolean } = {},
+  ): Promise<{
+    documentId: string;
+    report: unknown;
+    note: string;
+    warning: string | null;
+    /** 取り込み元と取り込み先がどれだけ同じ文を持っていたか（新規取り込みでは null）。 */
+    overlap: number | null;
+  }> {
     const parsed = parseExportHtml(html);
-    const warning = describeSanitizeReport(parsed.sanitizeReport);
+    const warnings: string[] = [];
+    const sanitizeWarning = describeSanitizeReport(parsed.sanitizeReport);
+    if (sanitizeWarning) warnings.push(sanitizeWarning);
+    // 旧版の書き出しは、構造も注釈も今の規則に揃えてから使う（core の sanitize が行う）。
+    // 何件張り替えたかは黙って飲み込まない — 訳が別の文に付いたように見えたときに
+    // 原因を辿れる唯一の手がかりなので、必ず返す。
+    if (parsed.sanitizeReport.rekeyedAnnotations > 0) {
+      warnings.push(
+        `古い版（構造 v${parsed.declaredStructureVersion ?? '不明'}）の書き出しなので、` +
+          `注釈 ${parsed.sanitizeReport.rekeyedAnnotations} 件を今の文のハッシュに張り替えました`,
+      );
+    }
+
+    // 版の判定は、payload が名乗っていた値で行う。sanitize 後の structure.version は
+    // 今の規則に揃えた結果なので、ここでは判断材料にならない。
+    // **新規取り込みだけでなくマージでも見る。** 新しい版の注釈をこちらの規則で
+    // 読んで混ぜると、片方の規則で付けた訳が混ざった文書ができあがる。
+    const declared = parsed.declaredStructureVersion;
+    if (declared !== null && declared > STRUCTURE_VERSION) {
+      throw new BadRequestError(
+        `この書き出しは新しい版の LogiXiv で作られています（構造 v${declared} / ` +
+          `このプログラムは v${STRUCTURE_VERSION} まで）。LogiXiv を更新してください。`,
+      );
+    }
 
     if (targetId) {
       let report: unknown = null;
       let adoptedEdits = 0;
       let detachedByAdoption = { translations: 0, notes: 0 };
+      let overlap = 0;
       await this.mutate(targetId, (current) => {
         // 相手が直した文の区切りを先に取り込む。順番が逆だと、まとめた文に付いた訳が
         // 「対応なし」として捨てられる（区切りが違うだけで hash が当たらないため）。
@@ -750,22 +817,65 @@ export class LogiXivApi {
         adoptedEdits = adopted.adopted;
         detachedByAdoption = adopted.detached;
         const base = adopted.document;
+
+        // 「これは同じ論文か」の関門。区切りを揃えた**後**に測る。
+        // 前に測ると、相手だけが文をまとめている書き出しを別の論文と誤判定する。
+        // ここで投げれば store.update は書き込みに進まないので、
+        // 区切りの取り込みごと無かったことになる（中途半端な状態を残さない）。
+        overlap = overlapRatio(parsed, base);
+        const judgeable = parsed.sentenceHashes.length > 0;
+        if (judgeable && overlap < MIN_IMPORT_OVERLAP && options.force !== true) {
+          throw new BadRequestError(
+            `この書き出しは、取り込み先の文書とほとんど同じ文を持っていません` +
+              `（一致率 ${Math.round(overlap * 100)}% / 目安 ${Math.round(MIN_IMPORT_OVERLAP * 100)}%）。` +
+              '別の論文の書き出しではありませんか。' +
+              '用語集は文のハッシュで弾けないので、取り込むと以後の訳語の方針がそのまま混ざります。' +
+              // 画面には「それでも取り込む」の道がある。API の引数名を人に読ませない。
+              'それでも取り込むなら、あらためて取り込み直してください（?force=true）。',
+          );
+        }
+
         const hashes = new Set(base.structure.sentences.map((s) => s.hash));
         const merged = mergeAnnotations(base.annotations, parsed.annotations, hashes);
         report = merged.report;
         return { ...base, updatedAt: new Date().toISOString(), annotations: merged.annotations };
       });
+      const merged = report as {
+        glossaryAdded: number;
+        glossaryAddedTerms: string[];
+        skippedAdded: number;
+      };
+      if (parsed.sentenceHashes.length === 0) {
+        warnings.push('この書き出しには本文が入っていないため、同じ論文かどうかを確かめられませんでした');
+      } else if (overlap < MIN_IMPORT_OVERLAP) {
+        warnings.push(`一致率 ${Math.round(overlap * 100)}% のまま force で取り込みました`);
+      }
+      // 用語集と「訳さない」は、こちらの作業内容を静かに書き換える 2 つ。
+      // 件数を返すだけでなく警告に載せる（呼び出し側が report を読み落としても届くように）。
+      if (merged.glossaryAdded > 0) {
+        warnings.push(
+          `用語集に ${merged.glossaryAdded} 語（${merged.glossaryAddedTerms.slice(0, 10).join(', ')}` +
+            `${merged.glossaryAddedTerms.length > 10 ? ' …' : ''}）が追加されました。以後の訳はこれに従います`,
+        );
+      }
+      if (merged.skippedAdded > 0) {
+        warnings.push(
+          `取り込み元の判断により ${merged.skippedAdded} 文が「訳さない」に移りました（残件がその数だけ減ります）`,
+        );
+      }
       this.bus.publish({ type: 'document.updated', documentId: targetId, reason: 'import' });
       return {
         documentId: targetId,
         report: {
-          ...(report as Record<string, number>),
+          ...(report as Record<string, unknown>),
           sentenceEditsAdopted: adoptedEdits,
           detachedTranslations: detachedByAdoption.translations,
           detachedNotes: detachedByAdoption.notes,
+          rekeyedAnnotations: parsed.sanitizeReport.rekeyedAnnotations,
         },
         note: '既存の文書に注釈をマージしました',
-        warning,
+        warning: warnings.length > 0 ? warnings.join(' / ') : null,
+        overlap,
       };
     }
 
@@ -777,14 +887,7 @@ export class LogiXivApi {
     // 任意のバイト列が source.pdf として保存され、/pdf が application/pdf として配る。
     const pdf = Buffer.from(parsed.pdfBase64, 'base64');
     this.assertLooksLikePdf(pdf);
-    // 新しい版で書かれたものは保存しない。保存できてしまうと、一覧に出ないのに
-    // ディスクには在って、開くと 500 になる文書ができる。
-    if (document.structure.version > STRUCTURE_VERSION) {
-      throw new BadRequestError(
-        `この書き出しは新しい版の LogiXiv で作られています（構造 v${document.structure.version} / ` +
-          `このプログラムは v${STRUCTURE_VERSION} まで）。LogiXiv を更新してください。`,
-      );
-    }
+    // 新しい版は上で断り済み（判定は payload が名乗っていた版で行う）。
     try {
       await this.store.writePdf(document.id, pdf);
       await this.store.write(document);
@@ -794,7 +897,13 @@ export class LogiXivApi {
       throw error;
     }
     this.bus.publish({ type: 'document.created', documentId: document.id });
-    return { documentId: document.id, report: null, note: '新しい文書として取り込みました', warning };
+    return {
+      documentId: document.id,
+      report: null,
+      note: '新しい文書として取り込みました',
+      warning: warnings.length > 0 ? warnings.join(' / ') : null,
+      overlap: null,
+    };
   }
 
   async deleteDocument(id: string): Promise<void> {

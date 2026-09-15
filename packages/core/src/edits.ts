@@ -492,9 +492,14 @@ export function applySentenceEdits(
           ? { offsets: outcome.offsets }
           : { joiners: outcome.joiners }),
         undo: outcome.undo,
+        // 前は外れていた手順が当たったので、印を外す。
+        detached: false,
       });
     } catch (error) {
-      if (error instanceof SentenceEditError) stale.push(edit);
+      // 当たらなかった手順も記録としては残す（呼び出し側が印を付けて保存する）。
+      // 取り消し情報は当たったときに作り直されるので、外れている間の古い undo は
+      // 使われない（undoSentenceEdit は外れている手順を構造に当てない）。
+      if (error instanceof SentenceEditError) stale.push({ ...edit, detached: true });
       else throw error;
     }
   }

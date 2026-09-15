@@ -66,6 +66,28 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/**
+ * 見出しに出す文の数。
+ *
+ * 訳は「同じ本文ごとに 1 つ」付くので、作業量は**異なり文**の数で数える。
+ * 延べ数だけを出していたので、本体側が「298 文」と言っている論文の書き出しが
+ * 「403 文」と名乗っていた。受け取った側は同じ文書について違う数を見る。
+ */
+function countLabel(
+  paper: ExportPayload['document'],
+  sentences: readonly { hash: string }[],
+): string {
+  const unique = new Set(sentences.map((sentence) => sentence.hash)).size;
+  const translations = paper.annotations.translations;
+  const skipped = paper.annotations.skipped ?? {};
+  let done = 0;
+  for (const hash of new Set(sentences.map((sentence) => sentence.hash))) {
+    if (translations[hash] || skipped[hash]) done++;
+  }
+  const repeats = sentences.length > unique ? `（画面には延べ ${sentences.length} 行）` : '';
+  return `${done} / ${unique} 文${repeats}`;
+}
+
 function boot(): void {
   const payload = readPayload();
   if (!payload) return; // データが読めないときは静的フォールバックをそのまま見せる。
@@ -99,7 +121,7 @@ function boot(): void {
   const meta = el(
     'span',
     'lxv-meta',
-    `${sentences.length} 文 · ${paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}`,
+    countLabel(paper, sentences) + ` · ${paper.structure.parser === 'grobid' ? 'GROBID 解析' : '簡易解析'}`,
   );
   header.append(title, search, meta);
 
@@ -146,6 +168,11 @@ function boot(): void {
       const target = el('p', 'lxv-target', translation.text);
       if (translation.revisedByHuman) target.classList.add('is-human');
       card.append(target);
+    } else if (paper.annotations.skipped?.[sentence.hash]) {
+      // 「訳さない」は判断であって、訳し忘れではない。混ぜると、受け取った側は
+      // 片付いているものを残件だと読む。
+      card.append(el('p', 'lxv-skipped', '（訳さない）'));
+      card.classList.add('is-skipped');
     } else {
       card.append(el('p', 'lxv-untranslated', '（未訳）'));
     }

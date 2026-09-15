@@ -64,6 +64,14 @@ export interface ExportPayload {
       translations: Record<string, Translation>;
       notes: Note[];
       glossary: { term: string; translation: string; note: string | null }[];
+      /**
+       * 「訳す対象ではない」と判断した文（参考文献・数式など）。
+       *
+       * 埋め込む JSON には最初から入っていたのに、この型が持っていなかったので
+       * ビューアは読まず、（訳さない）の文を（未訳）として描いていた。
+       * 受け取った側には「訳し忘れが残っている」としか見えない。
+       */
+      skipped?: Record<string, { sentenceHash: string; reason: string; at: string }>;
     };
   };
 }

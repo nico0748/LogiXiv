@@ -38,10 +38,41 @@ export interface ClassifiedLine extends Line {
 }
 
 const BIN_WIDTH = 2;
-/** これより狭い空白は段の切れ目とみなさない。 */
-const MIN_GUTTER = 12;
+/**
+ * 段の切れ目と認める空白帯の最小幅を、**そのページの字送り**の何倍で測るか。
+ *
+ * ここを絶対値（12pt）で決めていたときは、`\documentclass[twocolumn]{article}` の
+ * 既定（`\columnsep` = 10pt）がそのまま閾値を下回り、段組の検出が丸ごと失敗していた。
+ * 実測（pdflatex で組んだ同一原稿の、柱間だけ変えた版）: 柱間 10pt では 56 文中
+ * 26 文が左右の段の連結で破壊され、文書が文の途中で途切れていた。14pt なら 0 件。
+ * 合成 PDF（両端揃え・柱間 10pt）でも再現率は 15% まで落ちる。
+ * arXiv のプレプリントは既定値のまま出すことが多いので、実害が大きい。
+ *
+ * かといって絶対値を下げるだけでは、1 段組の論文で語間の空白が縦に揃った帯を
+ * 段の切れ目と誤検出する。だから絶対値ではなく**字送りとの比**で決める。
+ * 語間は字送りの 0.3 倍前後で、両端揃えで伸びても 1 倍には届かない。
+ * 一方、柱間 10pt は字送り 4.4pt の 2.3 倍ある（実測値、10pt 本文の論文）。
+ * ビンの粒度のぶん帯は最大 2 ビンぶん狭く出る（10pt の柱間が 8pt の帯に見える）ので、
+ * 実効の比は 1.8 倍。1.5 倍を下限にすれば両方が成り立つ。
+ */
+const MIN_GUTTER_ADVANCES = 1.5;
+/** 字送りが測れないページ（図版だけのページなど）で使う下限（pt）。 */
+const MIN_GUTTER_FLOOR = 5;
 /** 段として認めるための最小幅（文字のある幅に対する比）。 */
 const MIN_COLUMN_RATIO = 0.12;
+/**
+ * 段として認めるための最小の幅を、字送りの何倍（＝およそ何文字ぶん）で測るか。
+ *
+ * ページ全体に対する比（MIN_COLUMN_RATIO）だけでは、幅の狭い版面で
+ * 「6 文字ぶんの段」が通ってしまう。空白帯の下限を字送りとの比にすると、
+ * この歯止めが無い限り**1 行の中の語間**がそのまま段の切れ目に化ける
+ * （実測: 「同一行の矩形は 1 つにまとまる」回帰テストで、1 行が 3 段に割られて
+ *  ハイライトの矩形が 3 つになった）。
+ *
+ * 段とは「running text が何行も積まれる帯」なので、1 行に十数文字は入る。
+ * 実測の下限は、2 段組の論文で 55 文字・3 段組で 38 文字ぶんの幅。
+ */
+const MIN_COLUMN_CHARS = 15;
 
 export interface ColumnRange {
   from: number;
@@ -65,6 +96,22 @@ function percentile(values: number[], ratio: number): number {
 
 function rowKey(chunk: TextChunk): number {
   return Math.round(chunk.y / 6);
+}
+
+/**
+ * 1 文字あたりの送り幅（pt）。文字の大きさと書体の太さが一緒に効くので、
+ * 「このページで空白 1 個ぶんはどれくらいか」の物差しになる。
+ *
+ * 3 文字以下の断片は数えない。合字・記号・上付きの 1 文字片は幅が歪んでいて、
+ * 中央値をそちらへ引っ張る。
+ */
+function charAdvance(chunks: TextChunk[]): number {
+  const advances: number[] = [];
+  for (const chunk of chunks) {
+    if (chunk.text.length < 4 || chunk.w <= 0) continue;
+    advances.push(chunk.w / chunk.text.length);
+  }
+  return median(advances);
 }
 
 /**
@@ -123,6 +170,9 @@ export function detectColumns(chunks: TextChunk[], tolerance = 0.15): ColumnRang
     Math.floor(totalRows / 2),
   );
 
+  // 空白帯の下限は、絶対値ではなくこのページの字送りとの比で決める（定数の説明を参照）。
+  const minGutter = Math.max(MIN_GUTTER_FLOOR, charAdvance(chunks) * MIN_GUTTER_ADVANCES);
+
   const gutters: ColumnRange[] = [];
   let runStart: number | null = null;
   for (let bin = 0; bin < binCount; bin++) {
@@ -131,7 +181,7 @@ export function detectColumns(chunks: TextChunk[], tolerance = 0.15): ColumnRang
     if (!empty && runStart !== null) {
       const from = minX + runStart * BIN_WIDTH;
       const to = minX + bin * BIN_WIDTH;
-      if (to - from >= MIN_GUTTER) gutters.push({ from, to });
+      if (to - from >= minGutter) gutters.push({ from, to });
       runStart = null;
     }
   }
@@ -148,6 +198,12 @@ export function detectColumns(chunks: TextChunk[], tolerance = 0.15): ColumnRang
   if (maxX - cursor >= width * MIN_COLUMN_RATIO) boundaries.push({ from: cursor, to: maxX });
 
   if (boundaries.length <= 1) return SINGLE_COLUMN;
+
+  // どの段も、1 行ぶんの文章が入る幅を持っているか。
+  // 数文字ぶんしかない「段」は、段ではなく行の中の語間。
+  const minColumnWidth = charAdvance(chunks) * MIN_COLUMN_CHARS;
+  if (boundaries.some((range) => range.to - range.from < minColumnWidth)) return SINGLE_COLUMN;
+
   boundaries[0]!.from = -Infinity;
   boundaries[boundaries.length - 1]!.to = Infinity;
   return boundaries;
@@ -480,6 +536,19 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
   const columnRight = new Map<string, number>();
   for (const [key, rights] of rightsByColumn) columnRight.set(key, percentile(rights, 0.05));
 
+  // 段ごとの代表的な左端。ここは中央値でよい。段落の 1 行目の字下げ（1〜2 em）や
+  // 中央寄せの数式が混ざっても、本文行が多数派なので段の左端に落ち着く。
+  // 最小値だと、はみ出した 1 行（行番号・記号）に引きずられる。
+  const leftsByColumn = new Map<string, number[]>();
+  for (const line of lines) {
+    const key = `${line.page}:${line.column}`;
+    const list = leftsByColumn.get(key);
+    if (list) list.push(line.left);
+    else leftsByColumn.set(key, [line.left]);
+  }
+  const columnLeft = new Map<string, number>();
+  for (const [key, lefts] of leftsByColumn) columnLeft.set(key, median(lefts));
+
   /**
    * その行が段の右端まで届いているか。
    *
@@ -544,6 +613,45 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     }
   }
 
+  // 同じ段の直前の行。段落の途中かどうかの判定に使う。
+  const previousByColumn = new Map<string, Line>();
+  const previousLine = new Map<number, Line | undefined>();
+  for (const line of [...lines].sort((a, b) => a.index - b.index)) {
+    const key = `${line.page}:${line.column}`;
+    previousLine.set(line.index, previousByColumn.get(key));
+    previousByColumn.set(key, line);
+  }
+
+  /**
+   * その行が「直前の行の続き」か。
+   *
+   * 同じ段のすぐ上の行が、段の右端まで届いたまま文として閉じずに終わっていて、
+   * 行送りも普通のまま、という状態。組版で折り返しただけの行なので、
+   * ここに図表キャプションや参考文献の 1 エントリが**始まることはない**。
+   *
+   * これが無いと、本文が図表を参照する普通の書き方
+   * （"… We then report results in Table 3. Our block-sparse kernel …"）で、
+   * 折り返しの都合で `Table 3.` が行頭に来た瞬間にキャプションと誤認され、
+   * 続きの行まで巻き込んで本文が消えていた。実測（pdflatex の 2 段組）で
+   * 本文 3 行が丸ごと落ち、6 文が破壊、うち 1 文は出力から完全に消失していた。
+   */
+  const continuesParagraph = (line: Line): boolean => {
+    const previous = previousLine.get(line.index);
+    if (previous === undefined) return false;
+    const spacing = stats.get(line.page)?.spacing ?? bodyHeight * 1.3;
+    if (line.y - previous.y > spacing * 1.3) return false;
+    // 右端に届いていない行は段落の最終行。そのあとにキャプションが来るのは普通。
+    if (!reachesRight(previous)) return false;
+    return !/[.!?]$/.test(previous.text);
+  };
+
+  /** 図表キャプションの**先頭行**か。段落の途中に現れた参照は除く。 */
+  const startsCaption = (line: Line): boolean => isCaption(line.text) && !continuesParagraph(line);
+
+  /** 参考文献の 1 エントリの**先頭行**か。こちらも段落の途中には現れない。 */
+  const startsReference = (line: Line): boolean =>
+    REFERENCE_ENTRY.test(line.text) && REFERENCE_SHAPE.test(line.text) && !continuesParagraph(line);
+
   /**
    * キャプションと参考文献の**続きの行**も付物にする。
    *
@@ -572,7 +680,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     let previous: Line | undefined;
     const stillOpen = (line: Line): boolean => reachesRight(line) || !/[.!?]$/.test(line.text);
     for (const line of ordered) {
-      const starts = isCaption(line.text) || (REFERENCE_ENTRY.test(line.text) && REFERENCE_SHAPE.test(line.text));
+      const starts = startsCaption(line) || startsReference(line);
       const spacing = stats.get(line.page)?.spacing ?? 13;
       const adjacent =
         previous !== undefined &&
@@ -591,6 +699,70 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         open = false;
       }
       previous = line;
+    }
+  }
+
+  /**
+   * 別行立ての表と数式を見つける。
+   *
+   * 実物の論文では、これらが**本文の文の途中**に挟まる:
+   *   `Information retrieval benefits from ★Model Acc F1 Dense 81.2 79.4★ the same sparsity …`
+   *   `The attention weights are computed as ★y = softmax(QK⊤/d)V (1)★ The state-of-the-art …`
+   * 文字だけを見る `looksLikeFormula` では落ちない — 表のセルに演算子は無いし、
+   * `y = softmax(QK⊤/d)V` は英字比率 0.63 で「英字比率 0.6 未満」の門を通り抜ける
+   * （実物の pdflatex 出力で実測）。合成 PDF が数式・表を段落の切れ目に置いていたため、
+   * この壊れ方は計測の網にも掛かっていなかった。
+   *
+   * 版面を見れば別物だと分かる。本文は段の左端から右端まで組まれるが、
+   * 別行立ての要素は中央へ寄せて組まれ、右端にも届かない。
+   * 判定は次の 3 つを**全部**満たしたときだけにする。どれか 1 つでは本文を落とす
+   * （字下げだけを見ると箇条書きが、短さだけを見ると段落の最終行が消える）。
+   *
+   *   1. 段の左端から明らかに右へ入っている（段落の字下げ 1〜2 em では届かない幅）
+   *   2. 段の右端に届かない（右にぶら下がる式番号のぶんは差し引いて測る）
+   *   3. 機能語も文末記号も持たない（"the" や "of" が 1 つでもあれば本文）
+   */
+  const displayBlock = new Set<number>();
+  {
+    const isDisplay = (line: Line): boolean => {
+      const key = `${line.page}:${line.column}`;
+      const width = columnWidth.get(key) ?? 0;
+      const left = columnLeft.get(key);
+      if (width <= 0 || left === undefined || line.text.length === 0) return false;
+      // 見出しは中央寄せで組まれることがある。ここでは扱わず、見出しの判定に任せる。
+      if (KNOWN_HEADINGS.has(bareHeading(line.text)) || headingNumber(line.text) !== null) return false;
+      const stripped = line.text.replace(EQUATION_NUMBER, '').trim();
+      if (stripped.length === 0) return false;
+      if (FUNCTION_WORDS.test(stripped)) return false;
+      if (/[.!?]$/.test(stripped)) return false;
+      if (line.left - left <= Math.max(bodyHeight * 1.5, width * 0.08)) return false;
+      // 幅は式番号を除いた実効幅で測る。右端にぶら下がる "(1)" のせいで、
+      // 別行立ての数式が段幅いっぱいに見えてしまう。
+      const effective = ((line.right - line.left) * stripped.length) / line.text.length;
+      return effective < width * 0.7;
+    };
+    for (const line of lines) if (isDisplay(line)) displayBlock.add(line.index);
+
+    // 表は複数行でひとかたまり。1 行でも見つかったら、同じ左端で続く行もまとめて外す。
+    // 行ごとに独立して判定すると、セルに "of" のような語が入っている行だけ本文に残り、
+    // かえって読みにくい断片が対訳に並ぶ。
+    const ordered = [...lines].sort((a, b) => a.index - b.index);
+    for (let i = 0; i < ordered.length; i++) {
+      const anchor = ordered[i]!;
+      if (!isDisplay(anchor)) continue;
+      const spacing = stats.get(anchor.page)?.spacing ?? bodyHeight * 1.3;
+      for (const step of [-1, 1]) {
+        let previous = anchor;
+        for (let j = i + step; j >= 0 && j < ordered.length; j += step) {
+          const line = ordered[j]!;
+          if (line.page !== anchor.page || line.column !== anchor.column) break;
+          if (Math.abs(line.y - previous.y) > spacing * 1.6) break;
+          // 本文行は段の左端に揃うので、字下げの揃った行だけが表の続きになりうる。
+          if (Math.abs(line.left - anchor.left) > 2) break;
+          displayBlock.add(line.index);
+          previous = line;
+        }
+      }
     }
   }
 
@@ -616,15 +788,6 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     }
   }
 
-  // 同じ段の直前の行。段落の途中かどうかの判定に使う。
-  const previousByColumn = new Map<string, Line>();
-  const previousLine = new Map<number, Line | undefined>();
-  for (const line of [...lines].sort((a, b) => a.index - b.index)) {
-    const key = `${line.page}:${line.column}`;
-    previousLine.set(line.index, previousByColumn.get(key));
-    previousByColumn.set(key, line);
-  }
-
   return lines.map((line) => {
     const pageStats = stats.get(line.page)!;
     const span = Math.max(1, pageStats.bottom - pageStats.top);
@@ -636,10 +799,8 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     if (line.index > tailFrom) return { ...line, role: 'furniture' as const };
     if (footnote.has(line.index)) return { ...line, role: 'furniture' as const };
     if (continuation.has(line.index)) return { ...line, role: 'furniture' as const };
-    if (isCaption(line.text)) return { ...line, role: 'furniture' as const };
-    if (REFERENCE_ENTRY.test(line.text) && REFERENCE_SHAPE.test(line.text)) {
-      return { ...line, role: 'furniture' as const };
-    }
+    if (startsCaption(line)) return { ...line, role: 'furniture' as const };
+    if (startsReference(line)) return { ...line, role: 'furniture' as const };
     // 複数ページで同じ柱が出ていれば付物。1 ページだけの文書では判定できない。
     if (nearEdge && edgeCandidate.has(line.index) && pageCount >= 2 && seenOn >= 2) {
       return { ...line, role: 'furniture' as const };
@@ -664,6 +825,11 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     // looksLikeFormula 自体が「機能語なし・終端記号なし・演算子あり・
     // 英字比率 0.6 未満」の 4 条件なので、これ単体で十分に厳しい。
     if (looksLikeFormula(line.text)) {
+      return { ...line, role: 'furniture' as const };
+    }
+
+    // 別行立ての表・数式（版面で判定したもの）。
+    if (displayBlock.has(line.index)) {
       return { ...line, role: 'furniture' as const };
     }
 

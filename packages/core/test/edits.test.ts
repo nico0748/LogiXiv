@@ -172,19 +172,54 @@ test('再解析しても区切りの直しは流し直される', () => {
   );
 });
 
-test('本文が変わって当てられなくなった編集は記録から外れる', () => {
+test('当てられなくなった編集は外れた印が付くだけで、元の構造に戻せば復活する', () => {
+  // 捨てていた頃は、解析方式を変えた時点で区切り直しが記録ごと消え、
+  // 「元の方式に戻せば戻ります」という案内が嘘になっていた。
+  // 訳す前に区切りを直せと勧めている以上、手を入れた人ほど失う壊れ方だった。
   const base = structureOf(['Alpha.', 'Beta.']);
   const document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
   const edited = editSentenceBoundary(document, {
     type: 'merge',
     hashes: [base.sentences[0]!.hash, base.sentences[1]!.hash],
   }).document;
+  assert.equal(edited.structure.sentences.length, 1);
 
   const applied = applyStructure(edited, structureOf(['Gamma.', 'Delta.']));
   assert.equal(applied.editsReapplied, 0);
   assert.equal(applied.editsDropped, 1);
-  assert.equal(sentenceEditsOf(applied.document).length, 0);
   assert.equal(applied.document.structure.sentences.length, 2);
+  // 記録は残り、外れていることが分かる。
+  const kept = sentenceEditsOf(applied.document);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0]!.detached, true);
+
+  // 元の構造に戻すと、同じ手順がもう一度当たる。
+  const back = applyStructure(applied.document, structureOf(['Alpha.', 'Beta.']));
+  assert.equal(back.editsReapplied, 1);
+  assert.equal(back.editsDropped, 0);
+  assert.equal(back.document.structure.sentences.length, 1);
+  assert.equal(sentenceEditsOf(back.document)[0]!.detached, false);
+});
+
+test('外れている区切り直しは「直前の編集を取り消す」の対象にならない', () => {
+  // 当たってもいない場所を切ってしまうため。名指しなら記録だけ捨てられる。
+  const base = structureOf(['Alpha.', 'Beta.']);
+  const document = createDocument({ structure: base, sourceFileName: 'a.pdf' });
+  const edited = editSentenceBoundary(document, {
+    type: 'merge',
+    hashes: [base.sentences[0]!.hash, base.sentences[1]!.hash],
+  }).document;
+  const detached = applyStructure(edited, structureOf(['Gamma.', 'Delta.'])).document;
+
+  const nothing = undoSentenceEdit(detached);
+  assert.equal(nothing.applied, false);
+  assert.equal(sentenceEditsOf(nothing.document).length, 1);
+
+  const dropped = undoSentenceEdit(detached, sentenceEditsOf(detached)[0]!.id);
+  assert.equal(dropped.applied, true);
+  assert.equal(sentenceEditsOf(dropped.document).length, 0);
+  // 構造には触れていない。
+  assert.equal(dropped.document.structure.sentences.length, 2);
 });
 
 test('結合しても訳とメモは新しい hash に付け直せる', () => {

@@ -163,8 +163,15 @@ export interface ParsedImport {
   documentId: string;
   /** 検証済みの注釈。既存文書へのマージはこれを使う。 */
   annotations: Annotations;
-  /** 取り込み元の全文ハッシュ。どれだけ重なっているかを UI に出すために使う。 */
+  /** 取り込み元の全文ハッシュ（今の正規化規則で作り直した値）。重なり具合の判定に使う。 */
   sentenceHashes: string[];
+  /**
+   * 取り込み元が名乗っていた構造バージョン（書かれていなければ null）。
+   *
+   * `document.structure.version` は sanitize が今の規則に揃えてしまうので、
+   * 「新しい版で書かれたものを断る」の判断はこちらを見る。
+   */
+  declaredStructureVersion: number | null;
   /** PDF も含まれていた場合のみ。新規文書として取り込むときに使う。 */
   pdfBase64: string | null;
   /**
@@ -211,6 +218,7 @@ export function parseExportHtml(html: string): ParsedImport {
     documentId: typeof rawDocument['id'] === 'string' ? rawDocument['id'] : 'unknown',
     annotations,
     sentenceHashes: document.structure.sentences.map((s) => s.hash),
+    declaredStructureVersion: report.declaredStructureVersion,
     pdfBase64: hasPdf ? pdfBase64 : null,
     document: document.structure.sentences.length > 0 ? document : null,
     sanitizeReport: report,
@@ -222,7 +230,14 @@ export function sanitizeImportedAnnotations(value: unknown): Annotations {
   return sanitizeAnnotations(value, emptySanitizeReport());
 }
 
-/** 取り込み元と取り込み先がどれだけ同じ文を持っているか。 */
+/**
+ * 取り込み元と取り込み先がどれだけ同じ文を持っているか（0〜1）。
+ *
+ * 取り込みの前に「これは同じ論文か」を判断するための関門。低いまま通すと、
+ * 別の論文の用語集と訳がこの文書に混ざり、以後 Claude はその訳語方針に従う。
+ * 文が 1 つも無い書き出し（注釈だけ）は判断材料が無いので 0 を返す。
+ * 呼び出し側はその場合を「低い」ではなく「判定できない」として扱うこと。
+ */
 export function overlapRatio(incoming: ParsedImport, target: PaperDocument): number {
   if (incoming.sentenceHashes.length === 0) return 0;
   const targetHashes = new Set(target.structure.sentences.map((s) => s.hash));

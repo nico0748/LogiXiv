@@ -30,6 +30,10 @@ interface Candidate {
   before: string;
   after: string;
   revisedByHuman: boolean;
+  /** どの文の訳かを突き合わせるための原文と位置。訳文だけでは見分けが付かない。 */
+  text: string;
+  order: number;
+  page: number;
 }
 
 interface Pending {
@@ -37,6 +41,7 @@ interface Pending {
   from: string;
   to: string;
   total: number;
+  truncated: boolean;
   candidates: Candidate[];
   chosen: Set<string>;
 }
@@ -102,6 +107,7 @@ export function GlossaryPanel({ document: paper, onChanged, onClose, onMessage }
         from: entry.translation,
         to: value,
         total: preview.total,
+        truncated: preview.truncated,
         candidates: preview.candidates,
         // 既定は全部選ぶが、1 件ずつ外せる。
         chosen: new Set(preview.candidates.map((c) => c.sentenceHash)),
@@ -141,6 +147,12 @@ export function GlossaryPanel({ document: paper, onChanged, onClose, onMessage }
           日本語には語の切れ目がないので、意図しない語まで巻き込むことがあります。変わる場所を確かめてください。
           {pending.total > shown && `（${pending.total} 件中 ${shown} 件を表示）`}
         </p>
+        {pending.truncated && (
+          <p className="translate-note reparse-caution">
+            候補が多すぎて {shown} 件で打ち切りました。残りはこの画面に出ず、置き換えられません。
+            用語集の訳語は新しいままなので、本文の一部が古い訳語で残ります。もう一度開くと続きが出ます。
+          </p>
+        )}
 
         <ul className="replace-list">
           {pending.candidates.map((candidate) => (
@@ -162,6 +174,14 @@ export function GlossaryPanel({ document: paper, onChanged, onClose, onMessage }
                   from={pending.from}
                   to={pending.to}
                 />
+                {/* 訳文だけを並べると、どの文のことか分からないまま選ばされる。
+                    同じ訳文が別の場所にもある文書ではなおさら。 */}
+                <span className="replace-where">
+                  p.{candidate.page}・{candidate.order + 1} 文目
+                </span>
+                <span className="replace-source" lang="en">
+                  {candidate.text}
+                </span>
                 {candidate.revisedByHuman && <span className="replace-human">人手修正済み</span>}
               </label>
             </li>

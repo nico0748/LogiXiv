@@ -377,9 +377,30 @@ export function undoSentenceEdit(
   editId?: string,
 ): { document: PaperDocument; applied: boolean; reason?: string } {
   const edits = sentenceEditsOf(document);
-  const index = editId ? edits.findIndex((edit) => edit.id === editId) : edits.length - 1;
+  // 外れている記録（detached）は今の構造に当たっていないので、取り消しの対象にしない。
+  // 「直前の編集を戻す」で外れた古い記録を掘り当てると、当たってもいない場所を切る。
+  const index = editId
+    ? edits.findIndex((edit) => edit.id === editId)
+    : edits.reduce((found, edit, at) => (edit.detached ? found : at), -1);
   if (index < 0) return { document, applied: false, reason: '取り消せる編集がありません' };
   const edit = edits[index]!;
+
+  // 名指しで外れている記録を指されたときは、構造に触れず記録だけを捨てる。
+  // 「もうこの直しは要らない」という意思表示なので、断るより消す方が正しい。
+  if (edit.detached) {
+    return {
+      document: {
+        ...document,
+        updatedAt: new Date().toISOString(),
+        annotations: {
+          ...document.annotations,
+          sentenceEdits: [...edits.slice(0, index), ...edits.slice(index + 1)],
+        },
+      },
+      applied: true,
+    };
+  }
+
   let structure: DocumentStructure;
   try {
     structure = revertSentenceEdit(document.structure, edit);
@@ -502,6 +523,38 @@ export interface TermReplacement {
   before: string;
   after: string;
   revisedByHuman: boolean;
+  /**
+   * どの文の訳なのかを画面で示すための原文と位置。
+   *
+   * 日本語の before/after だけを並べると、どこの行が書き換わるのか確認しようが無い。
+   * 1 件ずつ見せる確認画面の意味は「実物と突き合わせられること」なので、
+   * 原文・通し番号・ページを必ず添える。
+   */
+  text: string;
+  order: number;
+  page: number;
+}
+
+/**
+ * 「今の構造に在る文」だけを、原文の並び順に、重複なしで返す。
+ *
+ * 訳は消さない設計なので annotations.translations は構造より単調に太る
+ * （再解析や区切り直しで外れた訳も残る）。訳語の一括置換をその生の Map の上で
+ * 回すと、**画面のどこにも無い訳**が候補に並び、実在する行と区別できないまま
+ * 書き換わる。用語を扱う処理は必ずこの入口を通す。
+ */
+function liveTranslations(
+  document: PaperDocument,
+): { sentence: Sentence; translation: Translation }[] {
+  const rows: { sentence: Sentence; translation: Translation }[] = [];
+  const seen = new Set<string>();
+  for (const sentence of document.structure.sentences) {
+    if (seen.has(sentence.hash)) continue;
+    seen.add(sentence.hash);
+    const translation = document.annotations.translations[sentence.hash];
+    if (translation) rows.push({ sentence, translation });
+  }
+  return rows;
 }
 
 /**
@@ -529,18 +582,21 @@ export function replaceInTranslations(
   const translations: Record<string, Translation> = { ...document.annotations.translations };
   const now = new Date().toISOString();
 
-  for (const [hash, translation] of Object.entries(document.annotations.translations)) {
+  for (const { sentence, translation } of liveTranslations(document)) {
     if (!translation.text.includes(needle)) continue;
     if (translation.revisedByHuman && !includeHuman) continue;
     const after = translation.text.split(needle).join(to);
     if (after === translation.text) continue;
     replacements.push({
-      sentenceHash: hash,
+      sentenceHash: sentence.hash,
       before: translation.text,
       after,
       revisedByHuman: translation.revisedByHuman,
+      text: sentence.text,
+      order: sentence.order,
+      page: sentence.page,
     });
-    translations[hash] = { ...translation, text: after, updatedAt: now };
+    translations[sentence.hash] = { ...translation, text: after, updatedAt: now };
   }
 
   if (replacements.length === 0) return { document, replacements };
@@ -633,7 +689,9 @@ export function countTermUses(document: PaperDocument, term: string): { total: n
   if (needle.length === 0) return { total: 0, revisedByHuman: 0 };
   let total = 0;
   let revisedByHuman = 0;
-  for (const translation of Object.values(document.annotations.translations)) {
+  // 置換の対象と同じ母集団を数える。構造から外れた訳まで数えると、
+  // 押す前に出す件数と、実際に書き換わる件数が食い違う。
+  for (const { translation } of liveTranslations(document)) {
     if (!translation.text.includes(needle)) continue;
     total++;
     if (translation.revisedByHuman) revisedByHuman++;

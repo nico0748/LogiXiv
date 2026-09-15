@@ -137,6 +137,18 @@ export interface SentenceEdit {
     occurrences?: number;
     at?: number[];
   };
+  /**
+   * いまの構造には当たらない（外れている）区切り直し。記録としては残す。
+   *
+   * 以前は当たらなかった手順を記録ごと捨てていた。ところが解析方式を変えると
+   * 文の切れ目が変わるので手順は当然当たらなくなり、そこで消える。
+   * 「元の方式で解析し直せば戻ります」と案内しておきながら、戻したときには
+   * 手順がもう存在せず、結合した文に付けていた訳は永久に宙に浮いた。
+   * 訳す前に区切りを直せ、と勧めている以上、手を入れた人ほど失う壊れ方だった。
+   *
+   * 外れていても残しておけば、元の方式に戻したときに再び当たって復活する。
+   */
+  detached?: boolean;
   createdAt: string;
 }
 
@@ -184,6 +196,24 @@ export interface MergeReport {
   notesAdded: number;
   notesSkippedAsDuplicate: number;
   glossaryAdded: number;
+  /**
+   * 実際に足した用語そのもの。
+   *
+   * 用語集は「これから訳すとき」の方針なので、別の論文の書き出しから混ざると
+   * 以後の訳が黙ってそれに従う。件数だけでは何が入ったか分からず取り消せないので、
+   * 語を返して 1 件ずつ消せるようにする（removeGlossaryEntry）。
+   */
+  glossaryAddedTerms: string[];
+  /**
+   * 取り込み元の「訳さない」のうち、こちらに新しく記録したもの。
+   *
+   * これは**自分の残件がその数だけ減る**ということ。progress() は skipped を
+   * remaining から外し、get_translation_batch はその文を二度と返さない。
+   * 黙って減らすと「訳していない文を抱えたまま翻訳完了」が成立するので、必ず報告する。
+   */
+  skippedAdded: number;
+  /** 取り込み元の「訳さない」のうち、当てられずに無視したもの（該当文なし／こちらは既に訳してある）。 */
+  skippedIgnored: number;
   /** 取り込み元にあったが、こちらの文書に対応する文が無かった注釈の数。 */
   orphaned: number;
 }

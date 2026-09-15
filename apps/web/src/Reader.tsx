@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, subscribe, type Health, type PaperDocument, type Sentence } from './api.ts';
+import { api, ApiError, subscribe, type Health, type PaperDocument, type Sentence } from './api.ts';
 import { PdfPane } from './PdfPane.tsx';
 import { Sidebar } from './Sidebar.tsx';
 import { GlossaryPanel } from './GlossaryPanel.tsx';
@@ -56,6 +56,8 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
   const [health, setHealth] = useState<Health | null>(null);
   const [translateOpen, setTranslateOpen] = useState(false);
   const [reparseOpen, setReparseOpen] = useState(false);
+  /** 一致率で断られた取り込み。人が「それでも」と言ったときだけ通す。 */
+  const [importConfirm, setImportConfirm] = useState<{ file: File; message: string } | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   /** 直近に訳が届いた時刻。「いま Claude が書いている」を画面に出すため。 */
@@ -286,24 +288,53 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
     }
   };
 
-  const runImport = (file: File): Promise<boolean> =>
+  const describeImport = (result: {
+    report: unknown;
+    note: string;
+    warning: string | null;
+  }): string => {
+    const report = result.report as Record<string, unknown> | null;
+    const n = (key: string): number => (typeof report?.[key] === 'number' ? (report[key] as number) : 0);
+    const base = report
+      ? `取り込み完了: 訳 +${n('translationsAdded')} / 更新 ${n('translationsUpdated')} / メモ +${n('notesAdded')} / 対応なし ${n('orphaned')}${
+          n('sentenceEditsAdopted') ? ` / 区切りの直し ${n('sentenceEditsAdopted')} 件を反映` : ''
+        }${
+          // 用語集は「これから訳すときの方針」なので、混ざると以後の訳が黙って従う。
+          // 件数だけでは何が入ったか分からず取り消せないので、語そのものを出す。
+          Array.isArray(report['glossaryAddedTerms']) && report['glossaryAddedTerms'].length > 0
+            ? ` / 用語集 +${(report['glossaryAddedTerms'] as string[]).length}（${(report['glossaryAddedTerms'] as string[])
+                .slice(0, 5)
+                .join('・')}${(report['glossaryAddedTerms'] as string[]).length > 5 ? ' ほか' : ''}）`
+            : ''
+        }${
+          // 相手の「訳さない」は、自分の残件をその数だけ減らす。黙って減らすと
+          // 「訳していない文を抱えたまま翻訳完了」が成立する。
+          n('skippedAdded') > 0 ? ` / 訳さない +${n('skippedAdded')}（残件がその数だけ減ります）` : ''
+        }${
+          n('detachedTranslations') + n('detachedNotes') > 0
+            ? `（区切りが変わったため、こちらの訳 ${n('detachedTranslations')} 件・メモ ${n('detachedNotes')} 件が元の文から外れました）`
+            : ''
+        }`
+      : result.note;
+    return result.warning ? `${base}（${result.warning}）` : base;
+  };
+
+  const runImport = (file: File, force = false): Promise<boolean> =>
     run('取り込み', async () => {
       const html = await file.text();
-      const result = await api.importHtml(documentId, html);
-      await reload();
-      const report = result.report as Record<string, number> | null;
-      const base = report
-        ? `取り込み完了: 訳 +${report['translationsAdded'] ?? 0} / 更新 ${report['translationsUpdated'] ?? 0} / メモ +${report['notesAdded'] ?? 0} / 対応なし ${report['orphaned'] ?? 0}${
-            report['sentenceEditsAdopted'] ? ` / 区切りの直し ${report['sentenceEditsAdopted']} 件を反映` : ''
-          }${
-            (report['detachedTranslations'] ?? 0) + (report['detachedNotes'] ?? 0) > 0
-              ? `（区切りが変わったため、こちらの訳 ${report['detachedTranslations'] ?? 0} 件・メモ ${
-                  report['detachedNotes'] ?? 0
-                } 件が元の文から外れました）`
-              : ''
-          }`
-        : result.note;
-      return result.warning ? `${base}（${result.warning}）` : base;
+      try {
+        const result = await api.importHtml(documentId, html, force);
+        await reload();
+        return describeImport(result);
+      } catch (cause) {
+        // 一致率が低くて断られたときは、やり直す道を出す。素のエラーにすると
+        // 「取り込めません」で終わってしまい、同じ論文の版違いも通せなくなる。
+        if (cause instanceof ApiError && cause.status === 400 && /一致率/.test(cause.message)) {
+          setImportConfirm({ file, message: cause.message });
+          return null;
+        }
+        throw cause;
+      }
     });
 
   return (
@@ -444,6 +475,44 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
         </button>
       </header>
 
+      {importConfirm && (
+        <div className="translate-panel" role="dialog" aria-label="取り込みの確認">
+          <div className="translate-head">
+            <strong>この書き出しを取り込みますか</strong>
+            <button
+              type="button"
+              className="flash-close"
+              aria-label="閉じる"
+              onClick={() => setImportConfirm(null)}
+            >
+              ×
+            </button>
+          </div>
+          <p className="translate-note reparse-caution">{importConfirm.message}</p>
+          <p className="translate-note">
+            別の論文の書き出しだと、訳は 1 件も当たらないまま
+            <strong>用語集だけが混ざり</strong>、以後の訳がそれに従います。同じ論文の版違いなら、
+            そのまま進めて構いません。
+          </p>
+          <div className="card-actions">
+            <button
+              type="button"
+              disabled={busyAction !== null}
+              onClick={() => {
+                const { file } = importConfirm;
+                setImportConfirm(null);
+                void runImport(file, true);
+              }}
+            >
+              それでも取り込む
+            </button>
+            <button type="button" onClick={() => setImportConfirm(null)}>
+              やめる
+            </button>
+          </div>
+        </div>
+      )}
+
       {reparseOpen && (
         <ReparsePanel
           document={paper}
@@ -459,7 +528,12 @@ export function Reader({ documentId, onBack }: Props): React.JSX.Element {
               const edits =
                 result.editsReapplied > 0 || result.editsDropped > 0
                   ? ` / 区切りの直し ${result.editsReapplied} 件を再適用${
-                      result.editsDropped > 0 ? `・${result.editsDropped} 件は本文が変わったため解除` : ''
+                      // 「解除」と書いていた頃、記録も一緒に消えていたので
+                      // 「元の方式に戻せば戻る」という同じ行の案内が嘘になっていた。
+                      // いまは記録が残るので、戻せば効き直す。
+                      result.editsDropped > 0
+                        ? `・${result.editsDropped} 件は本文が変わったため外れた状態（記録は残っています）`
+                        : ''
                     }`
                   : '';
               // 「対応なし n 件」だけでは、消えたのか外れただけなのかが分からない。

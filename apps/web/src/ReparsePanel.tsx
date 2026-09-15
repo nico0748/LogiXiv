@@ -38,7 +38,16 @@ export function ReparsePanel({ document: paper, grobidUp, busy, onRun, onClose }
   const current = paper.structure.parser;
   const [choice, setChoice] = useState<ParserChoice>(current === 'grobid' ? 'grobid' : 'fallback');
   const translations = Object.keys(paper.annotations.translations).length;
-  const switching = (choice === 'grobid' && current !== 'grobid') || (choice === 'fallback' && current !== 'fallback');
+  const edits = (paper.annotations.sentenceEdits ?? []).filter((edit) => !edit.detached).length;
+  // 「自動」は GROBID が生きていれば GROBID を選ぶので、いまが簡易解析なら
+  // 方式は変わる。自動のときだけ注意書きが出ないのは、いちばん変わる選択肢で
+  // いちばん黙っていることになる。
+  const willSwitch =
+    choice === 'auto'
+      ? grobidUp
+        ? current !== 'grobid'
+        : current !== 'fallback'
+      : choice !== current;
 
   return (
     <div className="translate-panel" role="dialog" aria-label="再解析">
@@ -69,11 +78,24 @@ export function ReparsePanel({ document: paper, grobidUp, busy, onRun, onClose }
         ))}
       </div>
 
-      {translations > 0 && switching && (
+      {edits > 0 && (
+        <p className="translate-note">
+          手で直した区切り {edits} 件は、当たらなくなっても記録として残ります。元の方式に戻せば
+          そのまま効き直します。
+        </p>
+      )}
+
+      {translations > 0 && willSwitch && (
         <p className="translate-note reparse-caution">
           方式を変えると文の切れ目が変わるので、訳の一部が文から外れることがあります。
           <strong>訳が消えることはありません。</strong>
           元の方式（{current === 'grobid' ? 'GROBID' : '簡易解析'}）でもう一度解析し直せば、外れた訳は戻ります。
+          {choice === 'auto' && grobidUp && current !== 'grobid' && (
+            <>
+              <br />
+              「自動」は GROBID が届いているので GROBID を選びます。
+            </>
+          )}
         </p>
       )}
 

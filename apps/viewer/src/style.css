@@ -207,6 +207,17 @@
   font-size: 0.82rem;
 }
 
+/* 「訳さない」は判断であって訳し忘れではない。（未訳）と見分けが付く形にする。 */
+.lxv-skipped {
+  margin: 0 0 0.2rem;
+  font-size: 0.85rem;
+  opacity: 0.6;
+}
+
+.lxv-card.is-skipped .lxv-source {
+  opacity: 0.6;
+}
+
 /* 誰のメモかは本文と同じ面に出す（属性に隠すとホバーしないと見えない）。 */
 .lxv-note-author {
   margin-left: 0.4rem;

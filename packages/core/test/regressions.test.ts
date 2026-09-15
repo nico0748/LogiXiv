@@ -5,8 +5,15 @@ import { normalizeSentence, sentenceHash, STRUCTURE_VERSION } from '../src/hash.
 import { parseXml, textContent, descendants, firstChild, decodeEntities } from '../src/xml.ts';
 import { parseTei } from '../src/tei.ts';
 import { splitIntoSentences, buildSentencesFromChunks, type TextChunk } from '../src/sentences.ts';
-import { incomingWins } from '../src/merge.ts';
-import { createDocument, addNote, setTranslation, searchDocument } from '../src/document.ts';
+import { incomingWins, mergeAnnotations } from '../src/merge.ts';
+import {
+  createDocument,
+  addNote,
+  setTranslation,
+  searchDocument,
+  progress,
+  skipSentences,
+} from '../src/document.ts';
 import { buildExportHtml } from '../src/export.ts';
 import { extractPayloadJson, parseExportHtml, ImportError } from '../src/import.ts';
 import {
@@ -17,7 +24,8 @@ import {
   sanitizeStructure,
 } from '../src/validate.ts';
 import { migrateDocument } from '../src/migrate.ts';
-import type { PaperDocument, Rect, Translation } from '../src/types.ts';
+import { emptyAnnotations, type Annotations, type PaperDocument, type Rect, type Translation } from '../src/types.ts';
+import { createHash } from 'node:crypto';
 
 /**
  * サイクル1の批評で見つかった不具合の回帰テスト。
@@ -528,4 +536,194 @@ test('形が壊れた注釈は、落とした件数まで報告する', () => {
   assert.equal(report.droppedEdits, 3);
   assert.match(describeSanitizeReport(report) ?? '', /訳さない/);
   assert.match(describeSanitizeReport(report) ?? '', /区切りの直し/);
+});
+
+
+// --- サイクル7：取り込み経路が構造バージョンの差を橋渡しする -------------
+
+/**
+ * v1 の正規化規則（NFKC・空白を潰すだけ）。
+ *
+ * 本物の v1 の書き出しを再現するために要る。今の規則との違いは NFKC が
+ * 上付き文字・℃ を潰すことと、letter 間のハイフンを落とさないこと。
+ */
+function v1Hash(text: string): string {
+  const normalized = text.normalize('NFKC').replace(/\s+/g, ' ').trim();
+  return createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 16);
+}
+
+const V1_TEXTS = [
+  'We study block-sparse attention for long documents.',
+  'The temperature is 25 ℃ and x² = 2 in every run.',
+];
+
+/** v1 の書き出し HTML を、本物と同じ経路（buildExportHtml）で作る。 */
+function legacyExportHtml(): string {
+  const legacy = {
+    id: 'doc_legacy',
+    title: 'Legacy paper',
+    sourceFileName: 'legacy.pdf',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    structure: {
+      version: 1,
+      parser: 'grobid' as const,
+      parserNote: 'GROBID',
+      parsedAt: '2026-01-01T00:00:00.000Z',
+      title: 'Legacy paper',
+      abstract: null,
+      pageSizes: [],
+      sections: [],
+      sentences: V1_TEXTS.map((text, index) => ({
+        id: `s_${v1Hash(text)}`,
+        hash: v1Hash(text),
+        order: index,
+        page: 1,
+        text,
+        rects: [],
+        sectionId: null,
+      })),
+    },
+    annotations: {
+      translations: Object.fromEntries(
+        V1_TEXTS.map((text, index) => [
+          v1Hash(text),
+          {
+            sentenceHash: v1Hash(text),
+            text: `訳${index}`,
+            revisedByHuman: true,
+            source: 'human' as const,
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ]),
+      ),
+      notes: V1_TEXTS.map((text, index) => ({
+        id: `note_legacy${index}`,
+        sentenceHash: v1Hash(text),
+        body: `メモ${index}`,
+        author: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })),
+      glossary: [],
+      skipped: {
+        [v1Hash(V1_TEXTS[1]!)]: {
+          sentenceHash: v1Hash(V1_TEXTS[1]!),
+          reason: 'formula',
+          at: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      sentenceEdits: [],
+    },
+  } as unknown as PaperDocument;
+  return buildExportHtml({ document: legacy, pdfBase64: 'JVBERi0xLjQK', viewerScript: '', viewerStyle: '' });
+}
+
+test('v1 の書き出しを取り込み経路に通すと、訳とメモが新しいハッシュに付け替わる', () => {
+  // 前提: v1 と v2 でハッシュが実際に変わる文を使っている。
+  for (const text of V1_TEXTS) {
+    assert.notEqual(v1Hash(text), sentenceHash(text), `前提: ${text} は新旧で別のハッシュにならないと意味がない`);
+  }
+
+  // 人工データを作らず、本物の取り込み経路（parseExportHtml → sanitizeDocument）を通す。
+  // 「構造側に旧ハッシュを残した文書」を手で作って migrate に渡すと、
+  // 取り込み経路が壊している前提をそのまま素通ししてしまう。
+  const parsed = parseExportHtml(legacyExportHtml());
+  assert.equal(parsed.declaredStructureVersion, 1, '名乗っていた版が失われている');
+  const document = parsed.document!;
+
+  // 構造は今の規則。だから注釈のキーも今の規則でなければ噛み合わない。
+  assert.equal(document.structure.version, STRUCTURE_VERSION);
+  const hashes = new Set(document.structure.sentences.map((s) => s.hash));
+  assert.deepEqual([...hashes], V1_TEXTS.map((t) => sentenceHash(t)));
+
+  for (const [index, text] of V1_TEXTS.entries()) {
+    const hash = sentenceHash(text);
+    assert.equal(document.annotations.translations[hash]?.text, `訳${index}`, `訳${index} が付け替わっていない`);
+    assert.equal(document.annotations.translations[hash]?.revisedByHuman, true, '人手修正済みの印が落ちている');
+  }
+  assert.deepEqual(
+    document.annotations.notes.map((note) => note.sentenceHash).sort(),
+    V1_TEXTS.map((t) => sentenceHash(t)).sort(),
+    'メモが旧ハッシュのまま残っている',
+  );
+  assert.deepEqual(Object.keys(document.annotations.skipped ?? {}), [sentenceHash(V1_TEXTS[1]!)]);
+  assert.equal(
+    Object.keys(document.annotations.translations).filter((h) => !hashes.has(h)).length,
+    0,
+    '構造に当たらない訳が残っている',
+  );
+  assert.ok(parsed.sanitizeReport.rekeyedAnnotations >= 4, '張り替えた件数が報告されていない');
+
+  // 取り込んだ時点で今の規則に揃っているので、読み出し時の migrate はもう何もしない。
+  // （以前はここで version だけ 2 に押し上がり、訳は浮いたまま二度と直らなかった）
+  const migration = migrateDocument(document);
+  assert.equal(migration.migrated, false);
+  assert.equal(migration.document.structure.version, STRUCTURE_VERSION);
+
+  // 既存文書へのマージ経路でも同じ。全件 orphaned として黙って捨てられてはいけない。
+  const target = createDocument({
+    structure: sanitizeStructure({ sentences: V1_TEXTS.map((text) => ({ text })) }, emptySanitizeReport()),
+    sourceFileName: 'mine.pdf',
+  });
+  const merged = mergeAnnotations(
+    target.annotations,
+    parsed.annotations,
+    new Set(target.structure.sentences.map((s) => s.hash)),
+  );
+  assert.equal(merged.report.orphaned, 0, 'マージ経路で v1 の注釈が捨てられている');
+  assert.equal(merged.report.translationsAdded, V1_TEXTS.length);
+  assert.equal(merged.report.notesAdded, V1_TEXTS.length);
+});
+
+test('取り込んだ「訳さない」は、自分の残件を減らした数を必ず報告する', () => {
+  const structure = sanitizeStructure(
+    { sentences: [{ text: 'First sentence here.' }, { text: 'Second sentence here.' }, { text: 'Third one here.' }] },
+    emptySanitizeReport(),
+  );
+  const [a, b, c] = structure.sentences;
+  let mine = createDocument({ structure, sourceFileName: 'mine.pdf' });
+  mine = setTranslation(mine, a!.hash, '自分の訳').document;
+  assert.equal(progress(mine).remaining, 2);
+
+  // 同僚が 3 文とも「訳さない」にしてから書き出した、という状況。
+  const incoming: Annotations = {
+    ...emptyAnnotations(),
+    skipped: Object.fromEntries(
+      [a, b, c].map((sentence) => [
+        sentence!.hash,
+        { sentenceHash: sentence!.hash, reason: 'reference', at: '2026-01-01T00:00:00.000Z' },
+      ]),
+    ),
+  };
+  // こちらの文書に無い文の「訳さない」は受け取らない。
+  incoming.skipped!['ffffffffffffffff'] = {
+    sentenceHash: 'ffffffffffffffff',
+    reason: 'other',
+    at: '2026-01-01T00:00:00.000Z',
+  };
+
+  const merged = mergeAnnotations(
+    mine.annotations,
+    incoming,
+    new Set(structure.sentences.map((s) => s.hash)),
+  );
+  const after = { ...mine, annotations: merged.annotations };
+
+  // 既に訳してある a は「訳さない」に移らない（移しても残件は減らず、報告だけが嘘になる）。
+  assert.equal(merged.annotations.skipped?.[a!.hash], undefined, '既訳の文が他人の判断で対象外にされた');
+  // 減った残件の数がそのまま報告に出る。b と c の 2 件。
+  assert.equal(merged.report.skippedAdded, 2);
+  assert.equal(progress(after).remaining, 0);
+  assert.equal(progress(mine).remaining - progress(after).remaining, merged.report.skippedAdded);
+  // 当てられなかったもの（該当文なし＋既訳）も黙って消えない。
+  assert.equal(merged.report.skippedIgnored, 2);
+  assert.ok(merged.report.orphaned >= 1);
+  assert.equal(merged.annotations.skipped?.['ffffffffffffffff'], undefined, '存在しない文の判断まで取り込んでいる');
+
+  // 自分で付けた「訳さない」の理由と日付は、取り込みで上書きされない。
+  const own = skipSentences(mine, [b!.hash], 'mine').document;
+  const again = mergeAnnotations(own.annotations, incoming, new Set(structure.sentences.map((s) => s.hash)));
+  assert.equal(again.annotations.skipped?.[b!.hash]?.reason, 'mine');
+  assert.equal(again.report.skippedAdded, 1, 'c の 1 件だけが新しく移るはず');
 });

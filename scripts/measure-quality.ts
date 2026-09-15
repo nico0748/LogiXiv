@@ -150,6 +150,14 @@ const results = [
   await measure('2 段組 / 12 ページ', { pages: 12, columns: 2 }),
   await measure('3 段組 / 6 ページ', { pages: 6, columns: 3 }),
   await measure('2 段組 / 狭い柱間', { pages: 6, columns: 2, columnGap: 14 }),
+  // `\documentclass[twocolumn]{article}` の既定（\columnsep = 10pt）。arXiv の
+  // プレプリントは既定値のまま出すことが多いので、ここが落ちると実害が最も大きい。
+  await measure('2 段組 / 既定の柱間 10pt', { pages: 6, columns: 2, columnGap: 10, justified: true }),
+  // 表のセルと別行立て数式が本文の文の**途中**に挟まる形。
+  await measure('本文中の表と数式', { pages: 6, columns: 2, inlineDisplay: true, justified: true }),
+  // 本文が "… report every number in Table 3." と図表を参照し、折り返しで
+  // `Table 3.` が行頭に来る形。論文では普通の書き方なので当たりやすい。
+  await measure('本文が表を参照', { pages: 6, columns: 2, captionReference: true, justified: true }),
   await measure('2 段組 / 表題あり', { pages: 6, columns: 2, banner: true }),
   await measure('1 ページのみ', { pages: 1, columns: 2 }),
   await measure('紛らわしい言い回し', { pages: 6, columns: 2, pathological: true }),

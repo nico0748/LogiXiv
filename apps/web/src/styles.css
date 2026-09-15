@@ -657,6 +657,21 @@ textarea {
   content: '— ';
 }
 
+/* どの文の訳かを突き合わせるための原文と位置。訳文だけでは見分けが付かない。 */
+.replace-where {
+  margin-left: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.replace-source {
+  display: block;
+  margin-left: 1.5rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 /* 解析方式は選ばせる。auto しか無いと、元の方式へ戻す操作が存在しなくなる。 */
 .reparse-choices {
   display: flex;

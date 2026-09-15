@@ -973,3 +973,155 @@ test('用語集は 1 件ずつ触れる（開いている間に増えた語を�
     ['baseline'],
   );
 });
+
+
+// --- サイクル7：取り込みの関門と、幽霊の訳 -------------------------------
+
+/** 本文の違う「別の論文」を取り込む。 */
+async function ingestOtherPaper(): Promise<string> {
+  const response = await fetch(`${baseUrl}/api/documents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/pdf', 'X-File-Name': 'other.pdf' },
+    body: makeSamplePdf({
+      lines: [
+        'Photosynthesis converts light into chemical energy.',
+        'Chloroplasts contain stacked thylakoid membranes.',
+        'We measured oxygen evolution under red light.',
+        'The quantum yield saturates beyond 400 micromoles.',
+      ],
+    }),
+  });
+  assert.equal(response.status, 201);
+  return ((await response.json()) as { documentId: string }).documentId;
+}
+
+test('別の論文の書き出しは、一致率が低いので取り込まずに人へ返す', async () => {
+  const mine = await ingest();
+  const other = await ingestOtherPaper();
+
+  // 相手の用語集に、こちらとは別の訳語方針が入っている状態にする。
+  await fetch(`${baseUrl}/api/documents/${other}/glossary`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries: [{ term: 'attention', translation: '別論文の訳語' }] }),
+  });
+  const html = await (await fetch(`${baseUrl}/api/documents/${other}/export`)).text();
+
+  const refused = await fetch(`${baseUrl}/api/documents/${mine}/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/html' },
+    body: html,
+  });
+  assert.equal(refused.status, 400);
+  const message = await refused.text();
+  assert.match(message, /一致率/);
+  assert.match(message, /別の論文/);
+
+  // 断ったのだから、用語集は 1 語も混ざっていない。
+  const untouched = (await (await fetch(`${baseUrl}/api/documents/${mine}`)).json()) as {
+    annotations: { glossary: { term: string }[] };
+  };
+  assert.equal(untouched.annotations.glossary.length, 0, '断ったはずの取り込みで用語集が汚れている');
+
+  // それでも取り込むという人の判断は通す。ただし何が入ったかは必ず報告する。
+  const forced = await fetch(`${baseUrl}/api/documents/${mine}/import?force=true`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/html' },
+    body: html,
+  });
+  assert.equal(forced.status, 200);
+  const result = (await forced.json()) as {
+    overlap: number;
+    warning: string | null;
+    report: { glossaryAdded: number; glossaryAddedTerms: string[] };
+  };
+  assert.ok(result.overlap < 0.3, `一致率が高すぎる: ${result.overlap}`);
+  assert.equal(result.report.glossaryAdded, 1);
+  assert.deepEqual(result.report.glossaryAddedTerms, ['attention']);
+  assert.match(result.warning ?? '', /用語集/);
+
+  // 同じ論文どうしの取り込みは、これまでどおり止まらない。
+  const twin = await ingest();
+  const same = await fetch(`${baseUrl}/api/documents/${twin}/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/html' },
+    body: await (await fetch(`${baseUrl}/api/documents/${mine}/export`)).text(),
+  });
+  const sameBody = await same.text();
+  assert.equal(same.status, 200, sameBody);
+  assert.equal((JSON.parse(sameBody) as { overlap: number }).overlap, 1);
+});
+
+test('訳語の置き換え候補に、構造から外れた幽霊の訳は並ばない', async () => {
+  const id = await ingest();
+  const document = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string; order: number; page: number; text: string }[] };
+  };
+  const [a, b, c] = document.structure.sentences;
+
+  for (const [hash, text] of [
+    [a!.hash, '疎な注意機構を研究する。'],
+    [b!.hash, '注意機構は長文で劣化する。'],
+    [c!.hash, '注意機構のカーネルを使う。'],
+  ] as const) {
+    await fetch(`${baseUrl}/api/documents/${id}/translations/${hash}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, source: 'human' }),
+    });
+  }
+
+  // a と b をまとめると、2 つの訳はどちらも今の構造のどの文にも当たらなくなる。
+  // 設計として消さずに残すので、annotations.translations には居座り続ける。
+  const merged = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/sentence-edits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'merge', hashes: [a!.hash, b!.hash] }),
+    })
+  ).json()) as { applied: boolean; detached: { translations: number } };
+  assert.equal(merged.applied, true);
+  assert.equal(merged.detached.translations, 2, '前提: 2 件の訳が構造から外れている');
+
+  const stored = (await (await fetch(`${baseUrl}/api/documents/${id}`)).json()) as {
+    structure: { sentences: { hash: string; order: number; page: number; text: string }[] };
+    annotations: { translations: Record<string, { text: string }> };
+  };
+  const live = new Set(stored.structure.sentences.map((s) => s.hash));
+  // 結合で通し番号が振り直されるので、位置は結合**後**の構造から取る。
+  const liveC = stored.structure.sentences.find((s) => s.hash === c!.hash)!;
+  const ghosts = Object.keys(stored.annotations.translations).filter((hash) => !live.has(hash));
+  assert.equal(ghosts.length, 2, '前提: 幽霊の訳が残っている');
+
+  const preview = (await (
+    await fetch(`${baseUrl}/api/documents/${id}/glossary/preview-replace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: '注意機構', to: 'アテンション' }),
+    })
+  ).json()) as {
+    total: number;
+    shown: number;
+    truncated: boolean;
+    limit: number;
+    candidates: { sentenceHash: string; before: string; after: string; text: string; order: number; page: number }[];
+  };
+
+  // 画面に出ている行だけが候補になる。幽霊の 2 件は並ばない。
+  assert.equal(preview.total, 1, '構造から外れた訳が候補に混ざっている');
+  assert.deepEqual(
+    preview.candidates.map((x) => x.sentenceHash),
+    [c!.hash],
+  );
+  for (const candidate of preview.candidates) {
+    assert.ok(live.has(candidate.sentenceHash), '画面のどこにも無い訳が候補に並んでいる');
+    // どの文のことか分かるように、原文と位置が付く。
+    assert.equal(candidate.text, liveC.text);
+    assert.equal(candidate.order, liveC.order);
+    assert.equal(candidate.page, liveC.page);
+  }
+  // 打ち切りが起きたかどうかも返す（超えた分は選択肢に出ないまま置換されない）。
+  assert.equal(preview.shown, preview.total);
+  assert.equal(preview.truncated, false);
+  assert.ok(preview.limit > 0);
+});

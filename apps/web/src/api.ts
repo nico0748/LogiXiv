@@ -70,7 +70,15 @@ export interface PaperDocument {
     /** 訳さないと判断した文（キーは hash）。古い保存データには無い。 */
     skipped?: Record<string, { sentenceHash: string; reason: string; at: string }>;
     /** 人が直した文の区切り。再解析のときに流し直される。 */
-    sentenceEdits?: { id: string; type: 'merge' | 'split'; hashes: string[]; offsets?: number[]; createdAt: string }[];
+    sentenceEdits?: {
+      id: string;
+      type: 'merge' | 'split';
+      hashes: string[];
+      offsets?: number[];
+      /** いまの構造に当たっていない記録。元の方式に戻せば効き直す。 */
+      detached?: boolean;
+      createdAt: string;
+    }[];
   };
 }
 
@@ -114,6 +122,23 @@ export interface Health {
   };
 }
 
+/**
+ * 本体が返したエラー。状態コードを残す。
+ *
+ * 「断られた」と「壊れた」は呼び出し側のやることが違う。取り込みの一致率で
+ * 断られたときは、人に「それでも取り込むか」を訊いて送り直せるが、
+ * 素の Error だとその分岐ができず、やり直す道の無い赤い文字になる。
+ */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   const text = await response.text();
@@ -125,7 +150,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       if (text) message = text.slice(0, 300);
     }
-    throw new Error(message);
+    throw new ApiError(response.status, message);
   }
   return (text ? JSON.parse(text) : null) as T;
 }
@@ -156,7 +181,20 @@ export const api = {
     request<{
       total: number;
       revisedByHuman: number;
-      candidates: { sentenceHash: string; before: string; after: string; revisedByHuman: boolean }[];
+      /** 画面に出せた件数と、打ち切りの有無。超えた分は選べないまま置換されない。 */
+      shown: number;
+      truncated: boolean;
+      limit: number;
+      candidates: {
+        sentenceHash: string;
+        before: string;
+        after: string;
+        revisedByHuman: boolean;
+        /** どの文の訳かを突き合わせるための原文と位置。 */
+        text: string;
+        order: number;
+        page: number;
+      }[];
     }>(`/api/documents/${id}/glossary/preview-replace`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -277,8 +315,21 @@ export const api = {
       body: html,
     }),
 
-  importHtml: (id: string, html: string) =>
-    request<{ documentId: string; report: unknown; note: string; warning: string | null }>(`/api/documents/${id}/import`, {
+  /**
+   * 他人の書き出しを今の文書へ重ねる。
+   *
+   * 一致率が低いと本体が 400 で止める（別の論文を落としたときに、
+   * 訳語方針だけが静かに混ざるのを防ぐため）。人が「それでも」と言ったときだけ
+   * `force` を立てて送り直す。
+   */
+  importHtml: (id: string, html: string, force = false) =>
+    request<{
+      documentId: string;
+      report: unknown;
+      note: string;
+      warning: string | null;
+      overlap: number | null;
+    }>(`/api/documents/${id}/import${force ? '?force=true' : ''}`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/html' },
       body: html,

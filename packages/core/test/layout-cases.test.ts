@@ -414,3 +414,153 @@ test('書体が変わるだけの文字片の境目で語を割らない', () =>
   const { sentences } = buildSentencesFromChunks(chunks, pages(1));
   assert.equal(sentences[0]?.text, 'We define the operator below and use it everywhere.');
 });
+
+// --- 柱間が既定値（10pt）の 2 段組 ---------------------------------------
+
+/**
+ * `\documentclass[twocolumn]{article}` の既定は `\columnsep` = 10pt。
+ * 空白帯の下限を絶対値 12pt で持っていた頃は、この既定値がそのまま閾値を下回り、
+ * 段組の検出が丸ごと失敗して左右の段が 1 行に連結されていた。
+ * 実測（pdflatex の同一原稿）: 柱間 10pt で 56 文中 26 文が破壊、14pt なら 0 件。
+ */
+test('柱間が 10pt しかない 2 段組でも段を見つける', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 30; i++) {
+    // 左段は x=50..300（両端揃えなので右端まで届く）、右段は x=310 から。段間はちょうど 10pt。
+    chunks.push(chunk(1, 50, 100 + i * 13, `Left body line ${i} of the page fills the measure.`.padEnd(50, ' ')));
+    chunks.push(chunk(1, 310, 100 + i * 13, `Right body line ${i} of the page fills the measure.`.padEnd(50, ' ')));
+  }
+  assert.equal(detectColumns(chunks).length, 2, '柱間 10pt の段組を見落とした');
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const merged = sentences.filter((s) => /Left body line \d+ .*Right body line/.test(s.text));
+  assert.equal(merged.length, 0, `左右の段が 1 行に連結された: ${JSON.stringify(merged.slice(0, 2).map((s) => s.text))}`);
+});
+
+test('語間の空白が縦に揃っただけの 1 段組を 2 段と誤検出しない', () => {
+  // 空白帯の下限を絶対値で下げると、ここが段の切れ目に化けて 1 段組の論文が壊れる。
+  // 両端揃えで伸びた語間は字送り（ここでは 5pt）を超えない、という関係で弾く。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 30; i++) {
+    const y = 100 + i * 13;
+    chunks.push(chunk(1, 50, y, `Left half of body line ${i} here.`.padEnd(30, ' ')));
+    // 直前の行は x=200 で終わる。6pt 空けて続きを置く（伸びた語間ぶんの隙間）。
+    chunks.push(chunk(1, 206, y, `and the right half of line ${i} runs on.`.padEnd(38, ' ')));
+  }
+  assert.equal(detectColumns(chunks).length, 1, '語間の空白を段の切れ目と誤検出した');
+});
+
+// --- 本文の途中に挟まる表と別行立て数式 ----------------------------------
+
+/** 段の左端から x=50、幅 245（右端 295）の本文行。段の代表値を決めるために要る。 */
+const measureLine = (i: number, y: number): TextChunk =>
+  chunk(1, 50, y, `${`Body line ${i} of this paper fills the whole measure`.padEnd(48, ' ').slice(0, 48)}.`);
+
+test('文の途中に挟まった表のセルを本文に混ぜない', () => {
+  // 実物の論文で出た壊れ方:
+  //   "Information retrieval benefits from ★Model Acc F1 Dense 81.2 79.4★ the same sparsity …"
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 12; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 256, 'Information retrieval benefits from'));
+  // 中央寄せの表。段の左端から 70pt 入り、右端にも届かない。
+  chunks.push(chunk(1, 120, 269, 'Model     Acc     F1'));
+  chunks.push(chunk(1, 120, 282, 'Dense     81.2    79.4'));
+  chunks.push(chunk(1, 120, 295, 'Ours      88.7    86.1'));
+  chunks.push(chunk(1, 50, 308, 'the same sparsity pattern at every depth.'));
+  for (let i = 0; i < 12; i++) chunks.push(measureLine(i + 20, 321 + i * 13));
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const texts = sentences.map((s) => s.text);
+  assert.ok(
+    texts.includes('Information retrieval benefits from the same sparsity pattern at every depth.'),
+    `表のセルが文の途中に差し込まれた: ${JSON.stringify(texts.filter((t) => t.includes('Information retrieval')))}`,
+  );
+  assert.ok(!texts.some((t) => t.includes('81.2')), `表のセルが本文に残った: ${JSON.stringify(texts.filter((t) => t.includes('81.2')))}`);
+});
+
+test('中央寄せの数式と右端の式番号を本文に混ぜない', () => {
+  // `y = softmax(QK⊤/d)V` は英字比率 0.63 で、文字だけを見る数式判定を通り抜ける。
+  // 版面（段の左端から入り、右端には式番号でしか届かない）で落とす。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 12; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 50, 256, 'The attention weights are computed as'));
+  chunks.push(chunk(1, 120, 269, 'y = softmax(QK^T/d)V'));
+  chunks.push(chunk(1, 280, 269, '(1)')); // 式番号は段の右端にぶら下がる
+  chunks.push(chunk(1, 50, 282, 'where the query and key matrices are shared.'));
+  for (let i = 0; i < 12; i++) chunks.push(measureLine(i + 20, 295 + i * 13));
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const texts = sentences.map((s) => s.text);
+  assert.ok(
+    texts.includes('The attention weights are computed as where the query and key matrices are shared.'),
+    `数式が文の途中に差し込まれた: ${JSON.stringify(texts.filter((t) => t.includes('attention weights')))}`,
+  );
+  assert.ok(!texts.some((t) => t.includes('softmax')), `数式が本文に残った: ${JSON.stringify(texts.filter((t) => t.includes('softmax')))}`);
+});
+
+test('字下げされた箇条書きと段落の最終行は本文のまま残す', () => {
+  // 別行立ての判定を「字下げ」や「短さ」だけで決めると、ここが消える。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 12; i++) chunks.push(measureLine(i, 100 + i * 13));
+  chunks.push(chunk(1, 75, 256, '(1) We introduce a new block-sparse kernel.'));
+  chunks.push(chunk(1, 75, 269, '(2) We prove a bound on the error.'));
+  chunks.push(chunk(1, 50, 282, 'The paragraph ends here.'));
+  for (let i = 0; i < 12; i++) chunks.push(measureLine(i + 20, 295 + i * 13));
+
+  const texts = buildSentencesFromChunks(chunks, pages(1)).sentences.map((s) => s.text);
+  for (const expected of [
+    '(1) We introduce a new block-sparse kernel.',
+    '(2) We prove a bound on the error.',
+    'The paragraph ends here.',
+  ]) {
+    assert.ok(texts.includes(expected), `本文が落ちた: ${expected} / ${JSON.stringify(texts.slice(11, 17))}`);
+  }
+});
+
+// --- 本文が図表を参照する（行頭に "Table 3." が来る） --------------------
+
+/**
+ * 本文で表や図を参照するのは論文で普通の書き方なのに、折り返しの都合で
+ * `Table 3.` が行頭に来た瞬間、その行がキャプションと誤認され、続きの行まで
+ * 巻き込んで本文が消えていた。実測（pdflatex の 2 段組・柱間 14pt）で
+ * 本文 3 行が落ち、6 文が破壊、うち 1 文は出力から完全に消失していた。
+ */
+test('行頭に来た図表参照をキャプションと誤認しない', () => {
+  // 段の代表値がぶれないよう、どの行も本文と同じ幅（49 文字ぶん）に揃えておく。
+  for (const reference of ['Table 3. Our block-sparse kernel wins.', 'Figure 2. The gain holds at every scale.']) {
+    const chunks: TextChunk[] = [];
+    for (let i = 0; i < 10; i++) chunks.push(measureLine(i, 100 + i * 13));
+    // 直前の行は段の右端まで届いたまま、文の途中で折り返している。
+    chunks.push(chunk(1, 50, 230, 'We then report every number in'.padEnd(49, ' ')));
+    chunks.push(chunk(1, 50, 243, reference.padEnd(49, ' ')));
+    chunks.push(chunk(1, 50, 256, 'Smaller models see little change here.'));
+    for (let i = 0; i < 10; i++) chunks.push(measureLine(i + 20, 269 + i * 13));
+
+    const texts = buildSentencesFromChunks(chunks, pages(1)).sentences.map((s) => s.text);
+    const head = reference.slice(0, reference.indexOf('.') + 1); // "Table 3." / "Figure 2."
+    assert.ok(
+      texts.some((t) => t.includes(`report every number in ${head}`)),
+      `図表参照の行が落ちた: ${JSON.stringify(texts.filter((t) => t.includes('report every number')))}`,
+    );
+    assert.ok(
+      texts.includes('Smaller models see little change here.'),
+      `参照の続きの行まで巻き込んで落ちた: ${JSON.stringify(texts.slice(10, 14))}`,
+    );
+  }
+});
+
+test('段落の切れ目から始まる本物の図表キャプションは今までどおり落とす', () => {
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i, 100 + i * 13));
+  // 段落の最終行（右端まで届かない）。このあとに来るのは本物のキャプション。
+  chunks.push(chunk(1, 50, 230, 'The paragraph ends here.'));
+  // キャプションの 1 行目は段の右端まで届く（両端揃えで折り返した行）。
+  chunks.push(chunk(1, 50, 243, 'Figure 1: Overview of the proposed pipeline.'.padEnd(49, ' ')));
+  chunks.push(chunk(1, 50, 256, 'Darker cells are retained across every head.'));
+  for (let i = 0; i < 10; i++) chunks.push(measureLine(i + 20, 282 + i * 13));
+
+  const texts = buildSentencesFromChunks(chunks, pages(1)).sentences.map((s) => s.text);
+  assert.ok(!texts.some((t) => t.includes('Overview of the proposed pipeline')), `キャプションが本文に混ざった: ${JSON.stringify(texts.slice(9, 13))}`);
+  assert.ok(!texts.some((t) => t.includes('Darker cells are retained')), 'キャプションの 2 行目が本文に混ざった');
+  assert.ok(texts.includes('The paragraph ends here.'), '段落の最終行が落ちた');
+});

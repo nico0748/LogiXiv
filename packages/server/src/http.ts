@@ -310,7 +310,10 @@ async function handle(
     if (rest === '/import' && method === 'POST') {
       const html = (await readBody(request)).toString('utf8');
       const target = url.searchParams.get('merge') === 'false' ? null : id;
-      sendJson(response, 200, await api.importHtml(html, target));
+      // 一致率が低い書き出しは既定で断る。force は「別の論文かもしれないが承知の上」
+      // という人の判断を通すための口で、既定では付かない。
+      const force = url.searchParams.get('force') === 'true';
+      sendJson(response, 200, await api.importHtml(html, target, { force }));
       return;
     }
     // 書き換わる候補を「1 件残らず」返す。書き込みはしない。
