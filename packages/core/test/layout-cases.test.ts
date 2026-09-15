@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildLines, classifyLines, detectColumns } from '../src/layout.ts';
-import { buildSentencesFromChunks, type TextChunk } from '../src/sentences.ts';
+import { buildSentencesFromChunks, splitIntoSentences, type TextChunk } from '../src/sentences.ts';
 import type { PageSize } from '../src/types.ts';
 
 /**
@@ -60,11 +60,21 @@ test('1 ページ目が全幅ブロックで潰れても、他ページの段割
   chunks.push(...twoColumnPage(3, 30));
 
   const lines = buildLines(chunks);
-  const page1Columns = new Set(lines.filter((l) => l.page === 1).map((l) => l.column));
-  assert.equal(page1Columns.size, 2, '1 ページ目が 1 段と判定され、左右の段が混ざっている');
+  const bodyColumns = new Set(lines.filter((l) => l.page === 1 && l.column >= 0).map((l) => l.column));
+  assert.equal(bodyColumns.size, 2, '1 ページ目が 1 段と判定され、左右の段が混ざっている');
 
   const mixed = lines.filter((l) => l.text.includes('Left body') && l.text.includes('Right body'));
   assert.equal(mixed.length, 0, `左右の段が 1 行に連結されている: ${mixed.length} 行`);
+
+  // 全幅の要旨は段抜きの帯として、段より先に読まれること。
+  const page1 = lines.filter((l) => l.page === 1);
+  const lastAbstract = page1.findLastIndex((l) => l.text.startsWith('A full width abstract'));
+  const firstBody = page1.findIndex((l) => l.text.includes('Left body'));
+  assert.ok(lastAbstract >= 0 && firstBody > lastAbstract, '全幅の要旨が段の後ろに回っている');
+  assert.ok(
+    page1.filter((l) => l.text.startsWith('A full width abstract')).every((l) => l.column === -1),
+    '全幅行が段に押し込まれている',
+  );
 });
 
 test('段間に中央揃えされた全幅の 1 行が消えない', () => {
@@ -238,4 +248,145 @@ test('番号が飛んでいる行は見出しにしない', () => {
   const classified = roles(chunks);
   assert.equal(classified.get('1. Introduction'), 'heading');
   assert.equal(classified.get('7. Suddenly Jumping Number'), 'body');
+});
+
+// --- サイクル5：測り方を厳しくして見えた壊れ方 --------------------------
+
+test('普通の理系散文の "T." "R." "G." を人名イニシャルと誤認しない', () => {
+  // 直前の名詞の白名簿でしか判定していなかったので、白名簿に無い語は全部繋がっていた。
+  for (const [text, expected] of [
+    ['We sweep the temperature T. The results are stable.', 2],
+    ['We denote the rank by R. Our method uses it.', 2],
+    ['Consider the graph G. Each node has a label.', 2],
+    ['We fix the batch size to B. Training then proceeds.', 2],
+    // 本物のイニシャルは繋がったまま。
+    ['Work by J. Doe and A. Smith is relevant.', 1],
+    ['Prior work by Smith et al. introduced a decomposition.', 1],
+  ] as const) {
+    assert.equal(splitIntoSentences(text).length, expected, text);
+  }
+});
+
+test('点を含む頭字語で文を割らない', () => {
+  assert.deepEqual(splitIntoSentences('The U.S. government funded it. Done.'), [
+    'The U.S. government funded it.',
+    'Done.',
+  ]);
+  assert.deepEqual(splitIntoSentences('The Ph.D. thesis of Roe covers case 9. Next.'), [
+    'The Ph.D. thesis of Roe covers case 9.',
+    'Next.',
+  ]);
+  assert.equal(splitIntoSentences('The N.A.S.A. mission failed. We retry.').length, 2);
+});
+
+test('行頭の "(1)" や "[12]" の箇条書きを参考文献として捨てない', () => {
+  const chunks: TextChunk[] = [
+    chunk(1, 50, 100, 'Our contributions are as follows in this paper.'),
+    chunk(1, 50, 113, '(1) We introduce a new block-sparse kernel for GPUs.'),
+    chunk(1, 50, 126, '(2) We prove a bound on the approximation error.'),
+    chunk(1, 50, 139, '[12] Recent work extends it to long documents nicely.'),
+    // 本物の参考文献は落とす（西暦や掲載誌が手掛かり）。
+    chunk(1, 50, 152, '[1] J. Doe. Sparse transformers. In Proc. NeurIPS, 2024.'),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const texts = sentences.map((s) => s.text);
+  assert.ok(texts.some((t) => t.startsWith('(1) We introduce')), '箇条書き (1) が消えた');
+  assert.ok(texts.some((t) => t.startsWith('(2) We prove')), '箇条書き (2) が消えた');
+  assert.ok(texts.some((t) => t.startsWith('[12] Recent work')), '本文の [12] が消えた');
+  assert.ok(!texts.some((t) => t.includes('NeurIPS')), '本物の参考文献が本文に混ざった');
+});
+
+test('折り返したキャプションの続きの行も本文にしない', () => {
+  const chunks: TextChunk[] = [
+    chunk(1, 50, 100, 'We evaluate the model on the benchmark suite.'),
+    chunk(1, 50, 113, 'Figure 1: Overview of the proposed'),
+    chunk(1, 50, 126, 'pipeline.'),
+    chunk(1, 50, 139, 'The results are reported in the next section.'),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  const texts = sentences.map((s) => s.text);
+  assert.ok(!texts.some((t) => t.includes('pipeline.')), 'キャプションの続きが本文に残った');
+  assert.equal(texts.length, 2);
+});
+
+test('段幅いっぱいの数式も落とす（幅で門を作らない）', () => {
+  // 段が狭いほど数式は段幅いっぱいになる。幅を条件にすると 3 段組で軒並み本文に混ざる。
+  const chunks: TextChunk[] = [
+    chunk(1, 50, 100, 'We define the attention operator as follows.'),
+    chunk(1, 50, 113, 'y = softmax(QK^T / sqrt(d)) V + b'),
+    chunk(1, 50, 126, 'The operator is applied at every layer.'),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(!sentences.some((s) => s.text.includes('softmax')), '数式が本文に混ざった');
+  assert.equal(sentences.length, 2);
+});
+
+test('段を跨ぐ行は帯として、その位置で読まれる', () => {
+  // 重なりが最大の段に入れると、ほぼ対称な全幅行は必ず右段が勝ち、
+  // 左段を読み終えた後に現れて右段の 1 文目と癒着する。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) chunks.push(chunk(1, 50, 100 + i * 13, `Left top line ${i} of the page.`));
+  for (let i = 0; i < 6; i++) chunks.push(chunk(1, 310, 100 + i * 13, `Right top line ${i} of the page.`));
+  chunks.push(chunk(1, 50, 190, 'Figure 2: A wide figure spanning both of the columns on this page.'));
+  for (let i = 0; i < 6; i++) chunks.push(chunk(1, 50, 210 + i * 13, `Left bottom line ${i} of the page.`));
+  for (let i = 0; i < 6; i++) chunks.push(chunk(1, 310, 210 + i * 13, `Right bottom line ${i} of the page.`));
+
+  const lines = buildLines(chunks);
+  const order = lines.map((l) => l.text);
+  const at = (needle: string): number => order.findIndex((t) => t.includes(needle));
+  assert.ok(at('Left top line 0') < at('Right top line 0'), '帯の中は左段が先');
+  assert.ok(at('Right top line 5') < at('Figure 2'), '段抜きの行が帯の頭より前に出ている');
+  assert.ok(at('Figure 2') < at('Left bottom line 0'), '段抜きの行が次の帯より後ろに回った');
+  assert.ok(at('Left bottom line 5') < at('Right bottom line 0'), '下の帯でも左段が先');
+  assert.equal(lines.find((l) => l.text.includes('Figure 2'))?.column, -1);
+});
+
+test('大きな見出しが、少し上にある小さな柱を吸い込まない', () => {
+  const chunks: TextChunk[] = [
+    chunk(1, 50, 60, 'Preprint. Under review.', 8),
+    chunk(1, 50, 66, 'Block Sparse Attention for Long Documents', 16),
+  ];
+  const lines = buildLines(chunks);
+  assert.equal(lines.length, 2, '小さな行が大きな行に吸い込まれた');
+});
+
+test('段やページを跨いだ行末ハイフンも解決する', () => {
+  // 跨いだときだけ "informa- tion" が画面に残る、という非対称が起きていた。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) chunks.push(chunk(1, 50, 100 + i * 13, `Left line ${i} of the page here.`));
+  // 左段の最終行で語が割れ、続きは右段の先頭行にある（実際の 2 段組でよく起きる）。
+  chunks.push(chunk(1, 50, 178, 'We evaluate the model on a large informa-'));
+  chunks.push(chunk(1, 310, 100, 'tion retrieval task without any loss.'));
+  for (let i = 0; i < 6; i++) chunks.push(chunk(1, 310, 113 + i * 13, `Right line ${i} of the page here.`));
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    sentences.some((s) => s.text.includes('information retrieval task')),
+    `段を跨いだハイフネーションが残っている: ${JSON.stringify(sentences.map((s) => s.text).slice(-3))}`,
+  );
+  assert.ok(!sentences.some((s) => /\p{L}-\s+\p{L}/u.test(s.text)), '画面にハイフンの残骸が出る');
+});
+
+test('見出しは前の文をそこで打ち切る', () => {
+  const chunks: TextChunk[] = [
+    chunk(1, 50, 100, 'The model is robust across seeds and it is stable'),
+    chunk(1, 50, 113, 'in every run we tried'),
+    chunk(1, 50, 140, 'Results', 13),
+    chunk(1, 50, 166, 'We now describe the main experimental findings.'),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    !sentences.some((s) => s.text.includes('in every run we tried We now describe')),
+    `見出しを跨いだ文ができている: ${JSON.stringify(sentences.map((s) => s.text))}`,
+  );
+});
+
+test('書体が変わるだけの文字片の境目で語を割らない', () => {
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'We de', x: 50, y: 100, w: 25, h: 10 },
+    { page: 1, text: 'fine', x: 75, y: 100, w: 18, h: 10 },
+    { page: 1, text: ' the operator below and use it everywhere.', x: 93, y: 100, w: 190, h: 10 },
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.equal(sentences[0]?.text, 'We define the operator below and use it everywhere.');
 });

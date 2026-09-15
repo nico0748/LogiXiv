@@ -43,6 +43,29 @@ const LABEL_HEADS = new Set([
   'system', 'systems', 'version', 'versions', 'option', 'options', 'scheme', 'schemes',
 ]);
 
+/**
+ * 大文字で始まるが、人名の姓ではありえない語。
+ *
+ * "温度 T. The results are stable." の `T.` を人名イニシャルと誤認しないために要る。
+ * 直前の名詞の白名簿（LABEL_HEADS）だけで見ていた頃は、白名簿に載っていない
+ * 普通の理系散文（"the rank by R." "the graph G." "the batch size to B."）が
+ * ことごとく次の文と繋がっていた。
+ */
+const SENTENCE_OPENERS = new Set([
+  'the', 'we', 'our', 'this', 'these', 'those', 'it', 'its', 'they', 'their', 'there',
+  'in', 'on', 'at', 'for', 'to', 'as', 'by', 'with', 'from', 'after', 'before', 'during',
+  'however', 'thus', 'therefore', 'hence', 'moreover', 'furthermore', 'finally', 'first',
+  'second', 'third', 'next', 'then', 'both', 'each', 'all', 'if', 'when', 'while', 'since',
+  'although', 'because', 'note', 'here', 'results', 'result', 'training', 'testing', 'using',
+  'given', 'let', 'more', 'most', 'such', 'unlike', 'similarly', 'conversely', 'instead',
+  'consider', 'assume', 'suppose', 'recall', 'empirically', 'formally', 'importantly',
+  'unfortunately', 'crucially', 'overall', 'together', 'again', 'once', 'every', 'no', 'not',
+  'a', 'an', 'one', 'two', 'three', 'any', 'some', 'many', 'few', 'several', 'other', 'another',
+]);
+
+/** "U.S." "N.A.S.A." "Ph.D." のような、点を含む頭字語。 */
+const DOTTED_ACRONYM = /^(?:\p{L}{1,3}\.)+\p{L}{1,3}$/u;
+
 const TERMINATORS = new Set(['.', '!', '?', '。', '！', '？']);
 
 /**
@@ -99,12 +122,19 @@ function isSentenceEndingPeriod(text: string, index: number): boolean {
   if (ABBREVIATIONS.has(word)) return false;
   if (ABBREVIATIONS_BEFORE_NUMBER.has(word) && /^\s*\d/.test(text.slice(index + 1))) return false;
 
-  // 単一大文字。"J. Doe" のイニシャルか、"we call this method X." のラベルか。
+  // 頭字語（"the U.S. government"）。続く語が小文字なら文の途中で確定。
+  // 続く語が大文字始まりなら、そこで文が終わっている方が自然なので通常の判定に落とす。
+  if (DOTTED_ACRONYM.test(word) && !/^\s*\p{Lu}/u.test(text.slice(index + 1))) return false;
+
+  // 単一大文字。"J. Doe" のイニシャルか、"we sweep the temperature T." の記号か。
   if (/^[A-Z]$/.test(text[index - 1] ?? '') && !/\p{L}/u.test(text[index - 2] ?? ' ')) {
     const head = wordBefore(text, index - 1);
     if (LABEL_HEADS.has(head)) return true; // ラベルなので文末
-    // もう 1 つイニシャルが続く（"J. R. R.") か、直後が大文字始まりの語ならイニシャル扱い。
-    if (/^\s*(?:[A-Z]\.|\p{Lu}\p{Ll})/u.test(text.slice(index + 1))) return false;
+    // もう 1 つイニシャルが続くなら人名で確定（"J. R. R. Tolkien"）。
+    if (/^\s*[A-Z]\./.test(text.slice(index + 1))) return false;
+    // 大文字始まりの語が続く場合。文頭に立つ語なら文末、そうでなければ姓とみなす。
+    const nextWord = /^\s*(\p{Lu}[\p{L}']*)/u.exec(text.slice(index + 1))?.[1]?.toLowerCase();
+    if (nextWord && !SENTENCE_OPENERS.has(nextWord)) return false;
   }
 
   return true;
@@ -189,15 +219,25 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
     return id;
   };
 
-  // 本文を読み順（ページ → 段 → 行）に連結しつつ、
-  // 連結後の文字位置 → （文字片, 行, 節）の対応表を作る。
-  let buffer = '';
-  const owners: { chunk: TextChunk; line: number; section: string | null }[] = [];
+  /**
+   * 本文を読み順（ページ → 段 → 行）に連結しつつ、
+   * 連結後の文字位置 →（文字片, 行, 節）の対応表を作る。
+   *
+   * 見出しで**段落の塊を切る**。以前は区切り文字を 1 つ挟むだけだったが、
+   * 分割器は改行を空白として畳むので、見出しの手前で切れていない文が
+   * 見出しの次の文と 1 枚のカードに同居していた（しかも節の帰属まで狂う）。
+   */
+  interface Segment {
+    buffer: string;
+    owners: { chunk: TextChunk; line: number; section: string | null }[];
+  }
+  const segments: Segment[] = [{ buffer: '', owners: [] }];
   let currentSection: string | null = null;
 
   const push = (text: string, chunk: TextChunk, line: number): void => {
-    buffer += text;
-    for (let k = 0; k < text.length; k++) owners.push({ chunk, line, section: currentSection });
+    const segment = segments[segments.length - 1]!;
+    segment.buffer += text;
+    for (let k = 0; k < text.length; k++) segment.owners.push({ chunk, line, section: currentSection });
   };
 
   const bodyLines = lines.filter((line) => line.role !== 'furniture');
@@ -207,23 +247,40 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
 
     if (line.role === 'heading') {
       currentSection = registerSection(line.text);
-      // 見出しは本文に混ぜない。直前の文をここで区切るため、終端を入れておく。
-      if (buffer.length > 0 && !/[.!?。！？]\s*$/.test(buffer)) push('\n', line.chunks[0]!, line.index);
+      // 見出しは本文に混ぜない。ここで塊を切る（跨いだ文を作らないため）。
+      if (segments[segments.length - 1]!.buffer.trim().length > 0) segments.push({ buffer: '', owners: [] });
       continue;
     }
 
+    let previousRight: number | null = null;
     for (const chunk of line.chunks) {
       if (chunk.text.length === 0) continue;
+      // 文字片の境目に無条件で空白を入れると、書体が変わるだけの箇所（斜体・合字・
+      // カーニング）で語が割れる。実際に隙間があるときだけ空白を入れる。
+      const gap = previousRight === null ? Infinity : chunk.x - previousRight;
+      if (previousRight !== null && gap > chunk.h * 0.22) {
+        const segment = segments[segments.length - 1]!;
+        if (!segment.buffer.endsWith(' ')) push(' ', chunk, line.index);
+      }
       push(chunk.text, chunk, line.index);
-      if (!chunk.text.endsWith(' ')) push(' ', chunk, line.index);
+      previousRight = chunk.x + chunk.w;
+    }
+    {
+      const segment = segments[segments.length - 1]!;
+      if (segment.buffer.length > 0 && !segment.buffer.endsWith(' ')) {
+        push(' ', line.chunks[line.chunks.length - 1]!, line.index);
+      }
     }
 
-    // 行末ハイフンの処理。次の**本文**行が同じ段にあるときだけ結合を検討する。
+    // 行末ハイフンの処理。読み順で次に来る**本文**行が続きなので、
+    // 段やページを跨いでいても結合を検討する（跨いだときだけ "informa- tion" が
+    // 画面に残る、という妙な非対称が起きていた）。
     const next = bodyLines[li + 1];
-    if (!next || next.role !== 'body' || next.page !== line.page || next.column !== line.column) continue;
+    if (!next || next.role !== 'body') continue;
     // ハイフンを含む語全体を取る。"state-of-the-" の末尾から "the" だけを見ると、
     // 文書内の用例 "state-of-the-art" と照合できない。
-    const hyphen = /((?:\p{L}+-)*\p{L}+)-\s$/u.exec(buffer);
+    const segment = segments[segments.length - 1]!;
+    const hyphen = /((?:\p{L}+-)*\p{L}+)-\s$/u.exec(segment.buffer);
     if (!hyphen) continue;
     const nextWord = /^(\p{L}+)/u.exec(next.text)?.[1];
     if (!nextWord) continue;
@@ -231,18 +288,19 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
     const joined = `${hyphen[1]!}-${nextWord}`.toLowerCase();
     if (inlineHyphenated.has(joined)) {
       // 本来ハイフンを含む複合語。ハイフンを残したまま行を直結する（空白だけ落とす）。
-      buffer = buffer.slice(0, -1);
-      owners.length = buffer.length;
+      segment.buffer = segment.buffer.slice(0, -1);
+      segment.owners.length = segment.buffer.length;
     } else {
       // 真のハイフネーション。ハイフンごと落とす。
-      const cut = buffer.lastIndexOf('-');
-      buffer = buffer.slice(0, cut);
-      owners.length = cut;
+      const cut = segment.buffer.lastIndexOf('-');
+      segment.buffer = segment.buffer.slice(0, cut);
+      segment.owners.length = cut;
     }
   }
 
   const occurrences = new Map<string, number>();
   const sentences: Sentence[] = [];
+  for (const { buffer, owners } of segments) {
   let cursor = 0;
   for (const raw of splitIntoSentences(buffer)) {
     const at = buffer.indexOf(raw, cursor);
@@ -265,6 +323,7 @@ export function buildSentencesFromChunks(chunks: TextChunk[], pages: PageSize[])
       rects: mergeRects(covered),
       sectionId: covered[0]?.section ?? null,
     });
+  }
   }
 
   return { sentences, sections };

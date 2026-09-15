@@ -2,7 +2,7 @@
   "name": "logixiv",
   "version": "0.1.0",
   "private": true,
-  "description": "論文PDFを1文単位で読むためのローカルファースト対訳リーダー",
+  "description": "\u8ad6\u6587PDF\u30921\u6587\u5358\u4f4d\u3067\u8aad\u3080\u305f\u3081\u306e\u30ed\u30fc\u30ab\u30eb\u30d5\u30a1\u30fc\u30b9\u30c8\u5bfe\u8a33\u30ea\u30fc\u30c0\u30fc",
   "license": "MIT",
   "type": "module",
   "workspaces": [
@@ -23,6 +23,6 @@
     "dev": "npm run dev -w @logixiv/web",
     "start": "node packages/server/dist/cli.js",
     "clean": "rm -rf packages/*/dist apps/*/dist packages/*/*.tsbuildinfo",
-    "measure": "node --experimental-strip-types scripts/measure-quality.ts"
+    "measure": "npm run build -w @logixiv/core && node --experimental-strip-types scripts/measure-quality.ts"
   }
 }

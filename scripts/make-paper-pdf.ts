@@ -11,13 +11,28 @@
 
 export interface PaperSpec {
   pages: number;
-  /** 2 段組にするか。false なら 1 段組。 */
-  twoColumn: boolean;
+  /** 2 段組にするか。false なら 1 段組。columns を指定したときは無視される。 */
+  twoColumn?: boolean;
+  /** 段数。3 段組を測るために開けてある。 */
+  columns?: number;
+  /** 柱間の幅（pt）。学会テンプレートは 0.2in = 14.4pt 前後で、検出の限界に近い。 */
+  columnGap?: number;
+  /** 1 ページ目に段を跨ぐ表題・著者行を置く。 */
+  banner?: boolean;
+  /** 誤分割しやすい言い回し（"温度 T." や "Ph.D." や "[12] Capital"）を混ぜる。 */
+  pathological?: boolean;
+  /** ページ中ほどに段抜きの図キャプションを置く（帯の読み順を測る）。 */
+  spanFigure?: boolean;
 }
 
 export interface GeneratedPaper {
   pdf: Uint8Array;
-  /** 本文として正しく取れてほしい文（この順で並ぶのが理想）。 */
+  /**
+   * 本文として正しく取れてほしい**文**（この順で並ぶのが理想）。
+   *
+   * ここは 1 要素 = 1 文。測定側で分割器に通し直してはいけない。
+   * 通し直すと、分割器のバグがそのまま正解に写って永遠に 100% になる。
+   */
   expectedSentences: string[];
   /** 本文として取れて**ほしくない**もの（ページ番号・図キャプション・参考文献など）。 */
   expectedNonBody: string[];
@@ -37,25 +52,58 @@ interface Placed {
  * 「543 文あるのに異なり文は 14 個」という状態になる。そうなると
  * どこか 1 箇所が壊れても別の出現に隠れて、測定が意味を失う。
  */
-const BODY_TEMPLATES: ((n: number) => string)[] = [
-  (n) => `Sparse attention reduces the quadratic cost of self-attention in setting ${n}.`,
-  (n) => `We evaluate configuration ${n} on the test. We then report results in Table 1.`,
-  (n) => `Our block-sparse kernel outperforms the dense baseline by ${n} points overall.`,
-  (n) => `Prior work by Smith et al. introduced a related decomposition in run ${n}.`,
-  (n) => `We report ${n}.14 as the reference value for every experiment in this block.`,
-  (n) => `The state-of-the-art model uses a hierarchical routing scheme with ${n} levels.`,
-  (n) => `We call this variant method X. It converges faster than baseline ${n} does.`,
-  (n) => `Does the improvement hold at scale ${n}? Yes, it holds up to 32k tokens.`,
-  (n) => `Information retrieval benefits from the same sparsity pattern at depth ${n}.`,
-  (n) => `Large systems benefit most from stage ${n}. Smaller ones see little change.`,
+/** 1 段落 = 文の配列。**正解はここに書いた通りの区切り**で、分割器には通さない。 */
+const BODY_TEMPLATES: ((n: number) => string[])[] = [
+  (n) => [`Sparse attention reduces the quadratic cost of self-attention in setting ${n}.`],
+  (n) => [`We evaluate configuration ${n} on the test.`, 'We then report results in Table 1.'],
+  (n) => [`Our block-sparse kernel outperforms the dense baseline by ${n} points overall.`],
+  (n) => [`Prior work by Smith et al. introduced a related decomposition in run ${n}.`],
+  (n) => [`We report ${n}.14 as the reference value for every experiment in this block.`],
+  (n) => [`The state-of-the-art model uses a hierarchical routing scheme with ${n} levels.`],
+  (n) => ['We call this variant method X.', `It converges faster than baseline ${n} does.`],
+  (n) => [`Does the improvement hold at scale ${n}?`, 'Yes, it holds up to 32k tokens.'],
+  (n) => [`Information retrieval benefits from the same sparsity pattern at depth ${n}.`],
+  (n) => [`Large systems benefit most from stage ${n}.`, 'Smaller ones see little change.'],
+];
+
+/**
+ * 誤分割しやすい言い回し。実際の論文に普通に出るのに、素朴な分割器が必ず外す形。
+ * 「1 文字の大文字 + ピリオド」「頭字語」「行頭の [12] や (1)」。
+ */
+const PATHOLOGICAL: ((n: number) => string[])[] = [
+  (n) => [`We sweep the temperature T.`, `The results are stable across seed ${n}.`],
+  (n) => [`The Ph.D. thesis of Roe covers case ${n}.`, 'We reuse its notation throughout.'],
+  (n) => [`The U.S. government funded experiment ${n}.`, 'No other sponsor was involved.'],
+  (n) => [`We denote the rank by R.`, `Our method uses it at layer ${n}.`],
+  // 箇条書きの中身も 1 文ずつ違えておく。同じ本文が段の端に何度も出ると、
+  // 柱の除去（同じ行が複数ページに出たら付物）に巻き込まれ、測っている対象が
+  // すり替わってしまう。
+  (n) => [
+    `Our contributions are as follows for release ${n}.`,
+    `(1) We introduce a new block-sparse kernel for GPUs in case ${n}.`,
+    `(2) We prove a bound on the approximation error of ${n} percent.`,
+    `(3) We release code and trained model checkpoints for run ${n}.`,
+  ],
+  (n) => [
+    `Sparse attention has been studied before, most notably in line ${n}.`,
+    `[12] Recent work extends it to long documents in setting ${n} without loss.`,
+  ],
 ];
 
 const NON_BODY = [
   'Figure 1: Overview of the proposed pipeline.',
   'Table 1: Accuracy on the held-out split.',
   'y = softmax(QK^T / sqrt(d)) V',
+];
+
+const REFERENCES = [
   '[1] J. Doe and A. Smith. Sparse transformers. In Proc. NeurIPS, 2024.',
   '[2] R. Roe. Efficient attention. Journal of ML, 12(3):45-67, 2025.',
+];
+
+const BANNER = [
+  'Block Sparse Attention for Long Documents',
+  'Jane Q. Doe, Alan R. Roe, and Mei Tanaka',
 ];
 
 function escapePdfText(text: string): string {
@@ -97,8 +145,8 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
   const pageWidth = 595;
   const pageHeight = 842;
   const margin = 50;
-  const columnGap = 20;
-  const columns = spec.twoColumn ? 2 : 1;
+  const columnGap = spec.columnGap ?? 20;
+  const columns = spec.columns ?? (spec.twoColumn ? 2 : 1);
   const columnWidth = (pageWidth - margin * 2 - columnGap * (columns - 1)) / columns;
   const charsPerLine = Math.floor(columnWidth / 5.0); // Helvetica 10pt のおおよその幅
   const lineHeight = 13;
@@ -115,18 +163,43 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
   let column = 0;
   let line = 0;
   let placedLines = 0;
+  // 表題を置くと 1 ページ目の段が短くなる。
+  const bannerLines = spec.banner ? BANNER.length + 1 : 0;
+
+  const linesIn = (atPage: number): number => linesPerColumn - (atPage === 1 ? bannerLines : 0);
+  const topOf = (atPage: number): number => bodyTop - (atPage === 1 ? bannerLines * lineHeight : 0);
+
+  /**
+   * ページを横帯に割る。段抜きの図表があるページは、その行で帯が切れる。
+   * 紙の上の読み順は「帯 → 段 → 行」なので、正解の並びもその順で積む。
+   */
+  const spanRow = (atPage: number): number | null =>
+    spec.spanFigure && atPage === 2 ? Math.floor(linesIn(atPage) / 2) : null;
+  const bandsOf = (atPage: number): { from: number; to: number }[] => {
+    const cut = spanRow(atPage);
+    if (cut === null) return [{ from: 0, to: linesIn(atPage) }];
+    return [
+      { from: 0, to: cut },
+      { from: cut + 1, to: linesIn(atPage) },
+    ];
+  };
+  let band = 0;
 
   const pushLine = (text: string, size: number): void => {
-    if (line >= linesPerColumn) {
-      line = 0;
+    if (line >= bandsOf(page)[band]!.to) {
       column++;
       if (column >= columns) {
         column = 0;
-        page++;
+        band++;
+        if (band >= bandsOf(page).length) {
+          page++;
+          band = 0;
+        }
       }
+      line = bandsOf(page)[band]!.from;
     }
     const x = margin + column * (columnWidth + columnGap);
-    const y = bodyTop - line * lineHeight;
+    const y = topOf(page) - line * lineHeight;
     const list = placedByPage.get(page);
     const item: Placed = { text, x, y, size };
     if (list) list.push(item);
@@ -146,36 +219,62 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
   let block = 0;
   let sectionIndex = 0;
 
-  const emit = (text: string, kind: 'head' | 'body' | 'nonbody'): void => {
+  /**
+   * 1 段落を流し込む。正解には**段落ではなく文を 1 つずつ**積む。
+   * 段落をそのまま積んで測定側で割り直すと、分割器のバグが正解に写ってしまう。
+   */
+  /** 箇条書きの項目は行頭から始まる（"[12]" や "(1)" が行頭に来る形を測るため）。 */
+  const ENUMERATED = /^[[(]\d+[\])]/;
+
+  const emit = (sentences: string[], kind: 'head' | 'body' | 'nonbody'): void => {
     if (kind === 'head') {
-      pushLine(text, 11);
+      pushLine(sentences.join(' '), 11);
       return;
     }
-    for (const wrapped of wrap(text, charsPerLine)) pushLine(wrapped, 10);
-    if (kind === 'body') expectedSentences.push(text);
-    else expectedNonBody.push(text);
+    // 箇条書きの項目だけは独立した行に置く。段落に混ぜてしまうと行頭に来ず、
+    // 「行頭の [12] を参考文献と誤認して丸ごと捨てる」不具合を測れない。
+    let run: string[] = [];
+    const flush = (): void => {
+      if (run.length === 0) return;
+      for (const wrapped of wrap(run.join(' '), charsPerLine)) pushLine(wrapped, 10);
+      run = [];
+    };
+    for (const sentence of sentences) {
+      if (ENUMERATED.test(sentence)) {
+        flush();
+        for (const wrapped of wrap(sentence, charsPerLine)) pushLine(wrapped, 10);
+      } else {
+        run.push(sentence);
+      }
+      if (kind === 'body') expectedSentences.push(sentence);
+      else expectedNonBody.push(sentence);
+    }
+    flush();
   };
+
+  const paragraphs = spec.pathological ? [...BODY_TEMPLATES, ...PATHOLOGICAL] : BODY_TEMPLATES;
 
   while (placedLines < capacity - reserve) {
     if (block % 3 === 0 && sectionIndex < sectionTitles.length) {
-      emit(sectionTitles[sectionIndex]!, 'head');
+      emit([sectionTitles[sectionIndex]!], 'head');
       sectionIndex++;
     }
     for (let i = 0; i < 3; i++) {
       const index = block * 3 + i;
-      emit(BODY_TEMPLATES[index % BODY_TEMPLATES.length]!(index), 'body');
+      emit(paragraphs[index % paragraphs.length]!(index), 'body');
       if (placedLines >= capacity - reserve) break;
     }
     if (block % 3 === 2 && placedLines < capacity - reserve) {
-      emit(NON_BODY[block % 3]!, 'nonbody');
+      // 図・表・数式を順に回す。ここを固定の添字にしていたので、
+      // キャプションが一度も PDF に置かれず、混入の判定が効いていなかった。
+      emit([NON_BODY[(block / 3) % NON_BODY.length | 0]!], 'nonbody');
     }
     block++;
   }
 
   // 参考文献は最後に固めて置く。
-  emit('References', 'head');
-  emit(NON_BODY[3]!, 'nonbody');
-  emit(NON_BODY[4]!, 'nonbody');
+  emit(['References'], 'head');
+  for (const reference of REFERENCES) emit([reference], 'nonbody');
 
   // ヘッダとページ番号を全ページに足す。
   const totalPages = Math.max(page, 1);
@@ -184,8 +283,32 @@ export function makePaperPdf(spec: PaperSpec): GeneratedPaper {
     list.push({ text: 'Preprint. Under review.', x: margin, y: pageHeight - margin + 4, size: 8 });
     list.push({ text: String(p), x: pageWidth / 2, y: margin - 10, size: 9 });
     placedByPage.set(p, list);
+    expectedNonBody.push(String(p));
   }
   expectedNonBody.push('Preprint. Under review.');
+
+  // ページ中ほどの段抜きキャプション。上で空けておいた行にちょうど置く。
+  if (spec.spanFigure && totalPages >= 2) {
+    // 本当に段を跨ぐ幅にする。柱間に届かない幅だと、ただの段内キャプションになり
+    // 「帯で読み順が変わる」ことを測れない。
+    const caption =
+      'Figure 2: A wide figure spanning both columns of the page, shown here with a caption that runs the full width.';
+    const cut = Math.floor(linesIn(2) / 2);
+    const list = placedByPage.get(2) ?? [];
+    list.push({ text: caption, x: margin, y: topOf(2) - cut * lineHeight, size: 9 });
+    placedByPage.set(2, list);
+    expectedNonBody.push(caption);
+  }
+
+  // 段を跨ぐ表題と著者行。1 ページ目の段はそのぶん下から始まっている。
+  if (spec.banner) {
+    const list = placedByPage.get(1) ?? [];
+    BANNER.forEach((text, index) => {
+      list.push({ text, x: margin + 40, y: bodyTop - index * lineHeight, size: index === 0 ? 16 : 11 });
+    });
+    placedByPage.set(1, list);
+    for (const text of BANNER) expectedNonBody.push(text);
+  }
 
   // --- PDF を組む -------------------------------------------------------
   const objects: string[] = [];

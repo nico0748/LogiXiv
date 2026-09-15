@@ -235,28 +235,41 @@ export function buildLines(chunks: TextChunk[]): Line[] {
   for (const [page, pageChunks] of [...byPage.entries()].sort((a, b) => a[0] - b[0])) {
     const columns = columnsByPage.get(page) ?? SINGLE_COLUMN;
 
-    // どの段にも入らない文字片を作らない。段間に中央揃えされた全幅の 1 行が
-    // 黙って消える、という壊れ方をしていた。重なりが最大の段へ必ず割り当てる。
-    const buckets: TextChunk[][] = columns.map(() => []);
-    for (const chunk of pageChunks) {
-      let bestIndex = 0;
-      let bestOverlap = -Infinity;
-      for (let i = 0; i < columns.length; i++) {
-        const range = columns[i]!;
-        const overlap = Math.min(range.to, chunk.x + chunk.w) - Math.max(range.from, chunk.x);
-        if (overlap > bestOverlap) {
-          bestOverlap = overlap;
-          bestIndex = i;
-        }
-      }
-      buckets[bestIndex]!.push(chunk);
+    /**
+     * 段を跨ぐ行（表題・著者行・段抜きの図表キャプション・幅の広い数式）を先に分ける。
+     *
+     * 重なりが最大の段へ入れると、ほぼ左右対称なぶん必ず**右の段**が勝つ。
+     * すると表題がページの左段をすべて読み終えた後に現れ、右段の 1 文目と
+     * 1 つの文に癒着する。ページを「段抜きの行」で横帯に割り、
+     * 帯 → 段 → y の順に読めば、紙の上の見え方と一致する。
+     */
+    const gutters: { from: number; to: number }[] = [];
+    for (let i = 0; i + 1 < columns.length; i++) {
+      const from = columns[i]!.to;
+      const to = columns[i + 1]!.from;
+      if (Number.isFinite(from) && Number.isFinite(to) && to > from) gutters.push({ from, to });
     }
+    const spansGutter = (chunk: TextChunk): boolean =>
+      gutters.some((gutter) => chunk.x <= gutter.from + 1 && chunk.x + chunk.w >= gutter.to - 1);
 
-    buckets.forEach((inColumn, columnIndex) => {
-      inColumn.sort((a, b) => a.y - b.y || a.x - b.x);
+    const fullWidth = pageChunks.filter(spansGutter).sort((a, b) => a.y - b.y || a.x - b.x);
+    const inColumns = pageChunks.filter((chunk) => !spansGutter(chunk));
+
+    // 段抜きの行の y。これが帯の境目になる。
+    const bandBreaks: number[] = [];
+    for (const chunk of fullWidth) {
+      const last = bandBreaks[bandBreaks.length - 1];
+      if (last === undefined || Math.abs(chunk.y - last) > Math.max(2, chunk.h * 0.6)) bandBreaks.push(chunk.y);
+    }
+    const bandOf = (y: number): number => bandBreaks.filter((breakY) => breakY <= y + 0.5).length;
+
+    const groupIntoLines = (list: TextChunk[], columnIndex: number): void => {
+      list.sort((a, b) => a.y - b.y || a.x - b.x);
       let current: Line | null = null;
-      for (const chunk of inColumn) {
-        const tolerance = Math.max(2, chunk.h * 0.6);
+      for (const chunk of list) {
+        // 許容量は小さい方の文字高で測る。大きい見出しの許容量で測ると、
+        // その少し上に浮いている小さな柱まで同じ行に吸い込んでしまう。
+        const tolerance = Math.max(2, Math.min(chunk.h, current?.height ?? chunk.h) * 0.6);
         if (current && Math.abs(chunk.y - current.y) <= tolerance) {
           current.chunks.push(chunk);
           continue;
@@ -274,7 +287,39 @@ export function buildLines(chunks: TextChunk[]): Line[] {
         };
         lines.push(current);
       }
-    });
+    };
+
+    // どの段にも入らない文字片を作らない。重なりが最大の段へ必ず割り当てる。
+    const buckets: TextChunk[][] = columns.map(() => []);
+    for (const chunk of inColumns) {
+      let bestIndex = 0;
+      let bestOverlap = -Infinity;
+      for (let i = 0; i < columns.length; i++) {
+        const range = columns[i]!;
+        const overlap = Math.min(range.to, chunk.x + chunk.w) - Math.max(range.from, chunk.x);
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          bestIndex = i;
+        }
+      }
+      buckets[bestIndex]!.push(chunk);
+    }
+
+    for (let band = 0; band <= bandBreaks.length; band++) {
+      if (band > 0) {
+        // 帯の頭にある段抜きの行。段より先に読む。
+        groupIntoLines(
+          fullWidth.filter((chunk) => bandOf(chunk.y) === band && Math.abs(chunk.y - bandBreaks[band - 1]!) <= Math.max(2, chunk.h * 0.6)),
+          -1,
+        );
+      }
+      buckets.forEach((inColumn, columnIndex) => {
+        groupIntoLines(
+          inColumn.filter((chunk) => bandOf(chunk.y) === band),
+          columnIndex,
+        );
+      });
+    }
   }
 
   for (const line of lines) {
@@ -317,8 +362,16 @@ function isCaption(text: string): boolean {
   return /^\s+\p{Lu}/u.test(rest);
 }
 
-/** 参考文献の 1 エントリ。`1. Author` の形は章見出しと区別できないので入れない。 */
-const REFERENCE_ENTRY = /^(\[\d+\]|\(\d+\))\s*\p{Lu}/u;
+/**
+ * 参考文献の 1 エントリ。`1. Author` の形は章見出しと区別できないので入れない。
+ *
+ * `(1)` の形も入れない。本文の箇条書き（"(1) We introduce a new kernel."）が
+ * まるごと消えていた。`[12]` の形も、参考文献らしい手掛かり（西暦・掲載誌・
+ * ページ番号）が同じ行にあるときだけ furniture にする。無条件に落とすと、
+ * "[12] Recent work extends it to long documents." のような本文が消える。
+ */
+const REFERENCE_ENTRY = /^\[\d+\]\s*\p{Lu}/u;
+const REFERENCE_SHAPE = /\b(?:19|20)\d{2}\b|\bIn\s+Proc|\barXiv|\bJournal\b|\bpp?\.\s*\d|\bpages?\s+\d|\d+\(\d+\):\d/;
 
 /** 行末の式番号 "(3)" / "(3a)" / "[12]"。幅と数式らしさの評価から外す。 */
 const EQUATION_NUMBER = /\s*[([]\d+[a-z]?[)\]]\s*$/;
@@ -462,6 +515,38 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     }
   }
 
+  /**
+   * キャプションと参考文献の**続きの行**も付物にする。
+   *
+   * 段が狭いほどキャプションは折り返す。先頭行しか落とせていないと、
+   * 「pipeline.」のような残骸が本文の文として並び、対訳の相手がいないカードになる。
+   * 終端記号で終わるまでを 1 つの塊として、同じ段の直下に続く行を拾う。
+   */
+  const continuation = new Set<number>();
+  {
+    const ordered = [...lines].sort((a, b) => a.index - b.index);
+    let open = false;
+    let previous: Line | undefined;
+    for (const line of ordered) {
+      const starts = isCaption(line.text) || (REFERENCE_ENTRY.test(line.text) && REFERENCE_SHAPE.test(line.text));
+      const spacing = stats.get(line.page)?.spacing ?? 13;
+      const adjacent =
+        previous !== undefined &&
+        previous.page === line.page &&
+        previous.column === line.column &&
+        line.y - previous.y <= spacing * 1.6;
+      if (starts) {
+        open = !/[.!?]$/.test(line.text);
+      } else if (open && adjacent) {
+        continuation.add(line.index);
+        open = !/[.!?]$/.test(line.text);
+      } else {
+        open = false;
+      }
+      previous = line;
+    }
+  }
+
   // 参考文献より後ろは本文にしない。
   let tailFrom = Number.POSITIVE_INFINITY;
   for (const line of lines) {
@@ -503,7 +588,9 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
 
     if (line.index > tailFrom) return { ...line, role: 'furniture' as const };
     if (footnote.has(line.index)) return { ...line, role: 'furniture' as const };
-    if (isCaption(line.text) || REFERENCE_ENTRY.test(line.text)) {
+    if (continuation.has(line.index)) return { ...line, role: 'furniture' as const };
+    if (isCaption(line.text)) return { ...line, role: 'furniture' as const };
+    if (REFERENCE_ENTRY.test(line.text) && REFERENCE_SHAPE.test(line.text)) {
       return { ...line, role: 'furniture' as const };
     }
     // 複数ページで同じ柱が出ていれば付物。1 ページだけの文書では判定できない。
@@ -524,7 +611,12 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     const isShort = width > 0 && effectiveWidth < width * 0.7;
     const endsOpen = !/[.!?:;,]$/.test(line.text);
 
-    if (isShort && looksLikeFormula(line.text)) {
+    // 数式は幅で門を作らない。段が狭いほど数式は段幅いっぱいになるので、
+    // 「短いこと」を条件にすると 3 段組で軒並み本文に混ざり、しかも終端記号が
+    // 無いので次の文と 1 枚のカードに同居する。
+    // looksLikeFormula 自体が「機能語なし・終端記号なし・演算子あり・
+    // 英字比率 0.6 未満」の 4 条件なので、これ単体で十分に厳しい。
+    if (looksLikeFormula(line.text)) {
       return { ...line, role: 'furniture' as const };
     }
 
