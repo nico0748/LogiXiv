@@ -213,8 +213,14 @@ function sanitizeSeam(value: unknown): SentenceSeam | undefined {
   );
   const rawRects = Array.isArray(value['rects']) ? value['rects'] : [];
   const rects = rawRects.map(sanitizeRect).filter((rect): rect is Rect => rect !== null);
+  // 抜けた中身も持ち越す。書き出しを受け取った側にとって、これがあるかどうかは
+  // 「飛ばすしかない」と「補って訳せる」の違いそのもの。
+  const rawTexts = Array.isArray(value['texts']) ? value['texts'] : [];
+  const texts = rawTexts
+    .map((text) => str(text, 20_000))
+    .filter((text): text is string => text !== null && text.trim().length > 0);
   if (kinds.length === 0 && rects.length === 0) return undefined;
-  return { kinds, rects };
+  return texts.length > 0 ? { kinds, rects, texts } : { kinds, rects };
 }
 
 /**

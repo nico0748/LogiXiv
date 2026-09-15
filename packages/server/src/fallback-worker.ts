@@ -53,6 +53,61 @@ export interface FallbackWorkerOutput extends FallbackResult {
   timings: { extractMs: number; buildMs: number };
 }
 
+/** 向きを決める前の、1 つの文字片。 */
+interface PlacedItem {
+  text: string;
+  /** viewport 座標（左上原点・y 下向き）でのベースライン左端。 */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** viewport 座標での傾き（ラジアン）。 */
+  angle: number;
+}
+
+/** 15 度。これより小さい傾きは、同じ向きの組版の誤差とみなす。 */
+const UPRIGHT_TOLERANCE = Math.PI / 12;
+
+function normalizeAngle(angle: number): number {
+  let value = angle;
+  while (value > Math.PI) value -= 2 * Math.PI;
+  while (value < -Math.PI) value += 2 * Math.PI;
+  return value;
+}
+
+/**
+ * そのページで、いちばん多くの文字を占めている向き。
+ *
+ * 件数ではなく**文字数**で数える。図のラベルは短い文字片が何本も並ぶので、
+ * 件数で数えると本文 3 行の付録ページで軸ラベルが勝ってしまう。
+ * 90 度刻みに丸めるのは、組版が本文を半端な角度で組むことはないため。
+ */
+function dominantAngle(items: readonly PlacedItem[]): number {
+  const weight = new Map<number, number>();
+  for (const item of items) {
+    const quarter = Math.round(normalizeAngle(item.angle) / (Math.PI / 2)) * (Math.PI / 2);
+    weight.set(quarter, (weight.get(quarter) ?? 0) + item.text.length);
+  }
+  let best = 0;
+  let bestWeight = -1;
+  for (const [angle, value] of weight) {
+    // 同点なら横書き（0）を選ぶ。回っていないページを回っていると読まないため。
+    if (value > bestWeight || (value === bestWeight && angle === 0)) {
+      best = angle;
+      bestWeight = value;
+    }
+  }
+  return best;
+}
+
+/** 原点まわりに回す。ページごと回っている版面を、横書きの座標系へ読み直すために使う。 */
+function rotatePoint(x: number, y: number, angle: number): [number, number] {
+  if (angle === 0) return [x, y];
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return [x * cos - y * sin, x * sin + y * cos];
+}
+
 interface PdfJsTextItem {
   str: string;
   transform: number[];
@@ -113,6 +168,7 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
       pageSizes.push({ page: pageNumber, width: viewport.width, height: viewport.height });
 
       const content = await page.getTextContent();
+      const pageItems: PlacedItem[] = [];
       for (const raw of content.items as unknown[]) {
         const item = raw as PdfJsTextItem;
         if (typeof item.str !== 'string' || item.str.length === 0) continue;
@@ -124,51 +180,61 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
         // 文字片の座標は**回転前の座標系のまま**で、viewport だけが回っている。
         // そのまま使うと、そのページの行がすべて同じ y を持ち（行送りは x 方向に出る）、
         // 行のまとめが y で行われるのでページ中の全行が 1 行に潰れる。
-        // 3 つの文の断片が織り込まれ、`text.corresponds` `sizeone` と語がくっつく。
         // 回転の有無は抽出のこの時点でしか確実に分からないので、ここで直す。
         // viewport の変換を掛けると左上原点・y 下向き（＝GROBID と同じ向き）になり、
-        // 回転ページでも文字が横に流れる座標系に揃う。pdf.js 自身のテキストレイヤーと
-        // 同じ求め方（左端 = tx[4]、字高 = hypot(tx[2], tx[3])、上端 = ベースライン - 字高）。
+        // /Rotate を立てたページ（pdflscape）なら文字が横に流れる座標系に揃う。
         const tx = pdfjs.Util.transform(viewport.transform, item.transform);
         const height = Math.hypot(tx[2] ?? 0, tx[3] ?? 0) || (item.height > 0 ? item.height : 10);
-
-        // ページの中で回っている文字（図の y 軸ラベル、\rotatebox の注記）は別に扱う。
-        // matplotlib や pgfplots をベクタで貼った図の軸ラベルはこの形なので、
-        // 図のある論文で普通に起きる。ここを横書きと同じに扱うと、
-        // 縦の長さが横幅として入り、同じ y に潰れて本文と 1 文に繋がっていた
-        // （`Accuracy on the held-out validation splitThroughput in tokens per second Sparse …`）。
-        // 版面の縦書きは本文ではないので、矩形を実際の向きに合わせたうえで、
-        // 行の組み立てが拾わないよう「本文とは別の帯」に置く。
         const angle = Math.atan2(tx[1] ?? 0, tx[0] ?? 1);
-        const upright = Math.abs(angle) < Math.PI / 12;
-        if (!upright) {
-          // 回った文字片は、幅が縦に伸びる。外接矩形をその向きで作る。
-          const width = item.width * Math.hypot(tx[0] ?? 0, tx[1] ?? 0);
-          const dx = Math.cos(angle) * width;
-          const dy = Math.sin(angle) * width;
-          const x0 = Math.min(tx[4] ?? 0, (tx[4] ?? 0) + dx);
-          const y0 = Math.min((tx[5] ?? 0) - height, (tx[5] ?? 0) - height + dy);
+        // item.width は既に viewport の尺度で返るので、字高の係数を掛けてはいけない
+        // （掛けると幅が字高の倍だけ伸び、行の組み立てが総崩れになる）。
+        const width = item.width;
+        pageItems.push({ text: item.str, x: tx[4] ?? 0, y: tx[5] ?? 0, width, height, angle });
+      }
+
+      // 向きは**ページ単位で**決める。
+      //
+      // 図の y 軸ラベル（matplotlib / pgfplots をベクタで貼った図）は「回っている少数派」で、
+      // 本文と同じ扱いにすると縦の長さが横幅として入り、同じ y に潰れて本文と 1 文に繋がる。
+      // 一方 `lscape`（\rotatebox でページごと回す組。/Rotate を立てない）では、
+      // **そのページの本文そのものが回っている**。少数派と同じに扱うと節が丸ごと
+      // 「本文以外」に落ちて読む手段が無くなる（pdflscape と見た目は同じなのに結果が真逆になる）。
+      // だから「そのページの多数派の向き」を本文の向きとみなし、そこから外れたものだけを
+      // 付物へ回す。
+      const dominant = dominantAngle(pageItems);
+      for (const entry of pageItems) {
+        if (chunks.length >= input.maxChunks) {
+          truncatedChunks = true;
+          break;
+        }
+        const relative = normalizeAngle(entry.angle - dominant);
+        if (Math.abs(relative) < UPRIGHT_TOLERANCE) {
+          // 多数派の向き＝このページの「横書き」。その軸に合わせて読み直す。
+          const [x, y] = rotatePoint(entry.x, entry.y - entry.height, -dominant);
           chunks.push({
             page: pageNumber,
-            text: item.str,
-            x: x0,
-            y: y0,
-            w: Math.max(height, Math.abs(dx)),
-            h: Math.max(height, Math.abs(dy)),
-            rotated: true,
+            text: entry.text,
+            x,
+            y,
+            w: entry.width,
+            h: entry.height,
           });
           continue;
         }
-
+        // 多数派から外れた向き＝図のラベルなどの付物。外接矩形をその向きで作る。
+        const dx = Math.cos(entry.angle) * entry.width;
+        const dy = Math.sin(entry.angle) * entry.width;
         chunks.push({
           page: pageNumber,
-          text: item.str,
-          x: tx[4] ?? 0,
-          y: (tx[5] ?? 0) - height,
-          w: item.width,
-          h: height,
+          text: entry.text,
+          x: Math.min(entry.x, entry.x + dx),
+          y: Math.min(entry.y - entry.height, entry.y - entry.height + dy),
+          w: Math.max(entry.height, Math.abs(dx)),
+          h: Math.max(entry.height, Math.abs(dy)),
+          rotated: true,
         });
       }
+
       page.cleanup();
       if (truncatedChunks) break;
     }

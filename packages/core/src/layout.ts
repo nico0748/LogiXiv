@@ -646,6 +646,57 @@ function findNumberBands(numeric: TextChunk[], rest: TextChunk[]): TextChunk[] {
   return found;
 }
 
+/** ルビと認める、本文の文字高に対する高さの比。 */
+const RUBY_HEIGHT_RATIO = 0.65;
+/** ルビと認める、1 ページあたりの最小個数。 */
+const MIN_RUBY = 2;
+/** ルビの字。読み仮名は仮名でしか組まない。 */
+const KANA_ONLY = /^[\p{Script=Hiragana}\p{Script=Katakana}ー]{1,8}$/u;
+
+/**
+ * 本文の上に重ねて組まれたルビ（振り仮名）を見つける。
+ *
+ * 版面と字種だけで決める。ルビは
+ *   - **仮名だけ**の短い文字片で（読み仮名を漢字や欧字で振ることはない）、
+ *   - 本文よりはっきり**小さく**、
+ *   - すぐ下に、**自分の x 範囲を丸ごと含む**本文の文字片があり、
+ *   - 縦には本文の字の箱と重ならない（肩付きの添字・脚注記号はここで外れる）、
+ *   - 1 ページに 2 つ以上ある。
+ *
+ * 添字・肩付き記号は本文の字の箱の**中**に入るので、上の 4 つ目で外れる。
+ * インライン数式の分子も仮名ではないので 1 つ目で外れる。
+ */
+function findRubyChunks(byPage: ReadonlyMap<number, TextChunk[]>): Set<TextChunk> {
+  const found = new Set<TextChunk>();
+  for (const pageChunks of byPage.values()) {
+    const bodyHeight = charHeight(pageChunks);
+    if (bodyHeight <= 0) continue;
+    const candidates = pageChunks.filter(
+      (chunk) => chunk.h <= bodyHeight * RUBY_HEIGHT_RATIO && KANA_ONLY.test(chunk.text.trim()),
+    );
+    if (candidates.length < MIN_RUBY) continue;
+
+    const body = pageChunks.filter((chunk) => chunk.h >= bodyHeight * 0.9);
+    const onPage: TextChunk[] = [];
+    for (const chunk of candidates) {
+      const bottom = chunk.y + chunk.h;
+      const carrier = body.find(
+        (other) =>
+          // すぐ下にある（重ならず、1 行ぶんの送りには足りない距離）。
+          other.y >= bottom - 0.5 &&
+          other.y <= bottom + bodyHeight * 0.7 &&
+          // 自分の x 範囲を丸ごと含む（本文の字の上に載っている）。
+          other.x <= chunk.x + 0.5 &&
+          other.x + other.w >= chunk.x + chunk.w - 0.5,
+      );
+      if (carrier !== undefined) onPage.push(chunk);
+    }
+    if (onPage.length < MIN_RUBY) continue;
+    for (const chunk of onPage) found.add(chunk);
+  }
+  return found;
+}
+
 export function buildLines(chunks: TextChunk[]): Line[] {
   const byPage = new Map<number, TextChunk[]>();
   for (const chunk of chunks) {
@@ -667,6 +718,28 @@ export function buildLines(chunks: TextChunk[]): Line[] {
   if (marginNumbers.size > 0) {
     for (const [page, pageChunks] of byPage) {
       byPage.set(page, pageChunks.filter((chunk) => !marginNumbers.has(chunk)));
+    }
+  }
+
+  /**
+   * ルビ（振り仮名）も、行を組み立てる前に**丸ごと外す**。
+   *
+   * ルビは本文の**すぐ上に重ねて**組まれるので、行にまとめる段で本文の行に紛れ込む。
+   * 実測（XeLaTeX の和文、`\ooalign` で組んだルビ）:
+   *   `そ かく かたまり本論文では疎な注意機構の核について論じる。`
+   *     ← 1 行ぶんのルビが全部**文の先頭に固まる**（別の行になった場合）
+   *   `そ本手法の中心となる考え方は、…`
+   *     ← 別の行のルビが**次の文の頭**に付く（前の行に吸われた場合）
+   * どちらも原文に無い文字列が本文に入る。ルビは 7 文字あることもあるので
+   * 「置き場所を間違えた断片」（4 文字以下）の網にも掛からず、印も申告も出ない。
+   *
+   * ノンブルや行番号と同じ扱いで捨てる。読み仮名は版面に印刷された読みの補助で、
+   * 訳す対象の文ではない（付物として並べても 1〜2 文字の断片が画面を埋めるだけ）。
+   */
+  const ruby = findRubyChunks(byPage);
+  if (ruby.size > 0) {
+    for (const [page, pageChunks] of byPage) {
+      byPage.set(page, pageChunks.filter((chunk) => !ruby.has(chunk)));
     }
   }
 
@@ -953,6 +1026,14 @@ const REFERENCE_SHAPE = /\b(?:19|20)\d{2}\b|\bIn\s+Proc|\barXiv|\bJournal\b|\bpp
  * （擬似コードは必ず複数行あり、偶然の一致はここで消える）。
  */
 const PSEUDOCODE_LINE = /^\d{1,3}:\s/;
+
+/** 塊の穴埋めで一度に拾ってよい行数の上限。 */
+const FILL_MAX_LINES = 3;
+
+/** 逐語ブロックと認める最小の行数。 */
+const MIN_VERBATIM_LINES = 4;
+/** 逐語ブロックと認める、本文の文字高との開き（比）。 */
+const VERBATIM_HEIGHT_GAP = 0.05;
 
 /** 行末の式番号 "(3)" / "(3a)" / "[12]"。幅と数式らしさの評価から外す。 */
 const EQUATION_NUMBER = /\s*[([]\d+[a-z]?[)\]]\s*$/;
@@ -1450,6 +1531,75 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         }
       }
     }
+
+    /**
+     * 塊の**穴埋め**。上下を塊に挟まれた 1 行だけの取りこぼしを拾う。
+     *
+     * 別行立ての塊は行送りが不揃いなので、塊の伸ばし方（上の繰り返し）が
+     * 「間隔が広い」という理由で途中で止まることがある。すると塊の中の行が
+     * **一行おきに**本文に残り、読めない断片が対訳に並ぶ。
+     * 実測（`rotating` の `sidewaystable`、ページごと回った表）:
+     *   `Memory Latency Accuracy Patternblock-4block-8dense`
+     * という文が本文として出ていた。
+     *
+     * 本文を落とさないよう、条件はきつくする。上下がどちらも塊で、
+     *   - 段幅に対して短く、
+     *   - 句読点で閉じておらず、
+     *   - 機能語を 1 つも持たず（`and therefore` のような繋ぎの行を守る）、
+     *   - 語が 3 つ以下
+     * のときだけ塊に入れる。表の見出しのセル（`Memory` / `Accuracy`）はこれに当たる。
+     */
+    const byColumn = new Map<string, Line[]>();
+    for (const line of lines) {
+      const key = `${line.page}:${line.column}`;
+      const list = byColumn.get(key);
+      if (list) list.push(line);
+      else byColumn.set(key, [line]);
+    }
+    for (const columnLines of byColumn.values()) {
+      // 字形の取れなかった行（空文字列）は素通しする。挟まれているかどうかの判定で
+      // これを数えると、間に 1 つ挟まっただけで穴埋めが効かなくなる。
+      const sorted = [...columnLines].sort((a, b) => a.y - b.y).filter((line) => line.text.trim().length > 0);
+      /** 塊の縁。別行立ての行そのものか、その図表のキャプション。 */
+      const edge = (line: Line | undefined): boolean =>
+        line !== undefined && (displayBlock.has(line.index) || isCaption(line.text));
+      /** 塊の続きとして拾ってよい行か（本文を落とさないよう条件はきつくする）。 */
+      const fillable = (line: Line): boolean => {
+        const text = line.text.trim();
+        if (text.length === 0 || CLAUSE_END.test(text)) return false;
+        // 見出しは塊の続きではない。番号つきの節見出しは短くて機能語も句読点も無いので、
+        // ここで外さないと図表に挟まれた節見出しが丸ごと消える
+        // （実測: `1 Setting` が表として落ち、節が 1 つ減っていた）。
+        if (KNOWN_HEADINGS.has(bareHeading(text)) || headingNumber(text) !== null) return false;
+        if (line.height > bodyHeight * 1.12) return false;
+        // `and therefore` のような繋ぎの行を守る。
+        if (FUNCTION_WORDS.test(text)) return false;
+        if ((text.match(/\S+/g) ?? []).length > 3) return false;
+        const width = columnWidth.get(`${line.page}:${line.column}`) ?? 0;
+        return width > 0 && line.right - line.left < width * 0.7;
+      };
+
+      let i = 0;
+      while (i < sorted.length) {
+        if (displayBlock.has(sorted[i]!.index)) {
+          i++;
+          continue;
+        }
+        let j = i;
+        while (j < sorted.length && !displayBlock.has(sorted[j]!.index)) j++;
+        const run = sorted.slice(i, j);
+        if (
+          run.length > 0 &&
+          run.length <= FILL_MAX_LINES &&
+          edge(sorted[i - 1]) &&
+          edge(sorted[j]) &&
+          run.every(fillable)
+        ) {
+          for (const line of run) displayBlock.add(line.index);
+        }
+        i = j + 1;
+      }
+    }
   }
 
   // 擬似コードの行。同じ段で隣り合う行にも行番号があるものだけを塊として落とす。
@@ -1462,6 +1612,121 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         (other) => other !== undefined && other.page === line.page && other.column === line.column,
       );
       if (neighbour !== undefined) pseudocode.add(index);
+    }
+  }
+
+  /**
+   * **本文の文字高**。逐語ブロックの判定だけに使う。
+   *
+   * `bodyTextHeight` は文字数で重み付けするので、コードの塊が本文より字数の多い
+   * ページでは**コードの字高が「本文の字高」になる**（実測: 本文 4 行・
+   * `lstlisting` 18 行のページで 9.96pt ではなく 8.97pt が選ばれた）。
+   * ここは「文章として読める行」だけで測り直す。
+   */
+  const proseHeight = (() => {
+    const weight = new Map<number, number>();
+    for (const line of lines) {
+      if (!readsAsProse(line)) continue;
+      const bucket = Math.round(line.height * 2) / 2;
+      weight.set(bucket, (weight.get(bucket) ?? 0) + line.text.length);
+    }
+    let best = 0;
+    let most = 0;
+    for (const [height, chars] of weight) {
+      if (chars > most) {
+        most = chars;
+        best = height;
+      }
+    }
+    return best || bodyHeight;
+  })();
+
+  /**
+   * 逐語ブロック（`lstlisting` / `verbatim` / `minted`）の行。
+   *
+   * `algorithmic` は行番号 `1:` の形で塊として落とせるが、`listings` は行番号が
+   * 別の小さい書体で左に置かれる（しかも字形が取り出せず**空文字列**になることがある）ので、
+   * その手掛かりが無い。すると行ごとに独立して判定することになり、
+   * `looksLikeFormula` の「英字比率 0.6 未満」という条件を**一行おきに**跨いで、
+   * コードが `body` と `formula` に割れる。実測（`listings` の Python 18 行）:
+   *
+   *   `def sparse_attention (q , k , v , pattern ): mask = build_mask ( pattern , scores .`
+   *   `softmax ( scores , dim = -1) weights = apply_dropout ( weights , p =0.1) We measured
+   *    the runtime of this implementation on a single accelerator and …`
+   *
+   * 直後の本文段落までコード断片と 1 文になり、**原文に無い文**を訳させることになる。
+   * 申告は `coverage: 1` / `readingOrderRisk: low` で何も出ない。
+   *
+   * 塊として見る手掛かりは版面だけで足りる:
+   *   - **本文と違う字の大きさ**が続く（コードは `\ttfamily\small` で組むのがふつう）
+   *   - どの行も**文章として読めない**（この歯止めが本文を守る）
+   *   - それが 4 行以上続く
+   * 空行（行番号だけの行、字形の取れなかった行）は塊を切らない — 切ると
+   * 1 行ずつの断片に割れて、この判定そのものが働かない。
+   */
+  const verbatim = new Set<number>();
+  {
+    const byColumn = new Map<string, Line[]>();
+    for (const line of lines) {
+      const key = `${line.page}:${line.column}`;
+      const list = byColumn.get(key);
+      if (list) list.push(line);
+      else byColumn.set(key, [line]);
+    }
+    for (const columnLines of byColumn.values()) {
+      const sorted = [...columnLines].sort((a, b) => a.y - b.y);
+      /** 空行は塊を切らない（行番号だけの行・字形の取れなかった行）。 */
+      const blank = (line: Line): boolean => line.text.trim().length === 0;
+      /** 本文と違う字の大きさで、文章として読めない行。 */
+      const coded = (line: Line): boolean =>
+        !blank(line) &&
+        Math.abs(line.height - proseHeight) > proseHeight * VERBATIM_HEIGHT_GAP &&
+        !readsAsProse(line);
+
+      /**
+       * 右端がばらけているか。**両端揃えの塊（要旨・引用・箇条書き）を外すための門。**
+       * 組版が折り返した段落はどの行も同じ右端で終わるが、コードは 1 行ごとに
+       * 長さが違う。`\small` の要旨は行の高さも文章らしさも本文と違って見えるので、
+       * この条件が無いと要旨が丸ごと落ちる（実測: onecolumn の Abstract 3 行）。
+       */
+      const scattered = (run: readonly Line[]): boolean => {
+        const counts = new Map<number, number>();
+        for (const line of run) {
+          const key = Math.round(line.right / 2);
+          counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+        let most = 0;
+        for (const count of counts.values()) if (count > most) most = count;
+        return most < run.length * 0.5;
+      };
+
+      let i = 0;
+      while (i < sorted.length) {
+        const start = sorted[i]!;
+        if (!coded(start)) {
+          i++;
+          continue;
+        }
+        const height = start.height;
+        const run: Line[] = [];
+        let end = i;
+        for (let j = i; j < sorted.length; j++) {
+          const line = sorted[j]!;
+          // 空行と、塊の字よりさらに小さい行（行番号・字形の取れなかった行）は素通し。
+          if (blank(line) || line.height < height * 0.7) continue;
+          if (!coded(line) || Math.abs(line.height - height) > height * 0.05) break;
+          run.push(line);
+          end = j;
+        }
+        // 文末記号で閉じる行が 1 つでもあれば文章の塊。コードの行はそう終わらない。
+        const closes = run.some((line) => SENTENCE_END.test(line.text.trim()));
+        if (run.length >= MIN_VERBATIM_LINES && !closes && scattered(run)) {
+          for (let k = i; k <= end; k++) verbatim.add(sorted[k]!.index);
+          i = end + 1;
+        } else {
+          i++;
+        }
+      }
     }
   }
 
@@ -1562,7 +1827,8 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     continuation.has(index) ||
     frontMatterLines.has(index) ||
     displayBlock.has(index) ||
-    pseudocode.has(index);
+    pseudocode.has(index) ||
+    verbatim.has(index);
 
   return lines.map((original) => {
     // 肩付きの脚注記号を外した写しで判定する。記号が本文の文字列に残ると、
@@ -1660,7 +1926,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     // 擬似コードの行。版面では本文と見分けが付かないので、行番号の形で決める
     // （説明は PSEUDOCODE_LINE を参照）。数式の判定より先に見る — 塊の中の行が
     // 「演算子のある行だけ数式、残りは本文」と割れると、かえって読めない断片が並ぶ。
-    if (pseudocode.has(line.index)) {
+    if (pseudocode.has(line.index) || verbatim.has(line.index)) {
       return drop('other');
     }
 
@@ -1677,7 +1943,21 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     // 演算子があれば数式、無ければ表のセルとして扱う。ここは見た目だけでは
     // 決められないので、外れることがある前提の弱い区別。
     if (displayBlock.has(line.index)) {
-      return drop(/[=+\-*/^_<>|∑∏∫√≈≤≥±×·≠∈∀∃]/u.test(stripped) ? 'formula' : 'table');
+      /**
+       * **本文より低くて短い断片は「表」ではない。**
+       *
+       * 分数の分子・分母、添字、∑ の上下の限界は、演算子を 1 つも含まないことが多い
+       * （`4` / `t` / `nμ` / `M` / `k`）。演算子の有無だけで決めていたので、
+       * インライン分数の分母が落ちると画面が「本文として取り出せなかった**表**が
+       * 挟まっています」と言っていた。**PDF に表は無い**ので、読む側が探しに行く羽目になる。
+       * 数式の断片は数式と呼ぶ。
+       */
+      const fragment =
+        line.height < proseHeight * FRAGMENT_HEIGHT_RATIO &&
+        stripped.replace(/\s+/g, '').length <= FRAGMENT_MAX_CHARS;
+      return drop(
+        fragment || /[=+\-*/^_<>|∑∏∫√≈≤≥±×·≠∈∀∃]/u.test(stripped) ? 'formula' : 'table',
+      );
     }
 
     // 見出しは弱い手掛かりの合算で決める。単独の規則には必ず反例がある

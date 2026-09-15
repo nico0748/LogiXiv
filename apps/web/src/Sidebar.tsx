@@ -518,11 +518,16 @@ function SentenceCardView(props: CardProps): React.JSX.Element {
             この文には、本文として取り出せなかった{seamLabel(sentence.seam.kinds)}が挟まっています。
             記号や語が抜けているおそれがあるので、訳す前に PDF を確かめてください。
           </p>
-          {/* 抜けた中身をその場に出す。補題の本体が落ちていることがあり、
-              中身が分かれば「飛ばす」以外の手（補って訳す）が取れる。 */}
-          {sentence.seam.texts && sentence.seam.texts.length > 0 && (
+          {/* 抜けた中身は「継ぎ直せるときだけ」渡される契約。
+              1〜2 文字の断片（分数の分母など）は出しても読む側に何も与えないので、
+              そのときは中身ではなく「PDF を見に行く」ことだけを言う。 */}
+          {sentence.seam.texts && sentence.seam.texts.length > 0 ? (
             <p className="card-seam-text" lang="en">
               抜けたのはここ: {sentence.seam.texts.join(' / ')}
+            </p>
+          ) : (
+            <p className="card-seam-text">
+              抜けたのは記号の断片なので、ここには出せません。左の PDF の該当箇所を見てください。
             </p>
           )}
         </div>

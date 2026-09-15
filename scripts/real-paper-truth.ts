@@ -145,6 +145,22 @@ function toPlainText(input: string, citeNumber: (key: string) => number): string
     text = text.slice(0, at) + second.body + text.slice(second.end);
   }
 
+  /**
+   * `\ruby{漢字}{よみ}` … ルビ（振り仮名）。
+   *
+   * ルビは版面に印刷された**読みの補助**であって、訳す対象の文ではない。
+   * 正解には漢字の側だけを残す（読み仮名が本文に混ざったら壊れている）。
+   */
+  for (let guard = 0; guard < 200; guard++) {
+    const at = text.indexOf('\\ruby{');
+    if (at === -1) break;
+    const first = braced(text, at + 5);
+    if (first === null) break;
+    const second = braced(text, first.end);
+    if (second === null) throw new Error(`\\ruby{...}{...} の 2 つ目の引数がありません: ${input}`);
+    text = text.slice(0, at) + first.body + text.slice(second.end);
+  }
+
   // 単一の記号だけのインライン数式（$d$ など）。中身をそのまま出す。
   // 添字や上付きを含む形は PDF 上の字面が自明でないので、ここでは受け付けない。
   text = text.replace(/\$([A-Za-z0-9 ]+)\$/g, '$1');

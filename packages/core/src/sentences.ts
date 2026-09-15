@@ -92,7 +92,23 @@ const SENTENCE_OPENERS = new Set([
 /** "U.S." "N.A.S.A." "Ph.D." のような、点を含む頭字語。 */
 const DOTTED_ACRONYM = /^(?:\p{L}{1,3}\.)+\p{L}{1,3}$/u;
 
-const TERMINATORS = new Set(['.', '!', '?', '。', '！', '？']);
+/**
+ * 文末記号。
+ *
+ * 全角のピリオド `．`（U+FF0E）が要る。和文の学会誌は句読点を `。、` ではなく
+ * **`．，`** で組むものが多く（情報処理学会・電子情報通信学会の標準表記）、
+ * これが入っていないと**節まるごとが 1 文**になる（実測: 3,648 字・矩形 96 個の
+ * カードが 1 枚、画面には「0 / 1 文」）。ASCII の `.` 側の規則は「直後に空白」を
+ * 求めるので、空白の無い和文では絶対に当たらない。
+ *
+ * 読点（`，` `、`）は入れない。文は終わっていない。
+ * `；` `：` `・` も入れない — 和文でも欧文でも文の切れ目ではない
+ * （長い文を割るときの候補としては BREAK_AFTER で使う）。
+ */
+const TERMINATORS = new Set(['.', '!', '?', '。', '．', '！', '？']);
+
+/** 空白を後ろに要求しない文末記号（全角・和文の約物）。和文には語間の空白が無い。 */
+const CJK_TERMINATOR = /[。．！？]/u;
 
 /**
  * 英語の学術文向けの文分割。
@@ -114,10 +130,13 @@ export function splitIntoSentences(text: string): string[] {
     while (end < text.length && /[)\]}"'’”」』〉》】〕）］｝]/.test(text[end]!)) end++;
 
     if (ch === '.' && !isSentenceEndingPeriod(text, i)) continue;
+    // 全角のピリオドも、数字に挟まれていれば小数点（「０．５」「２．１ 提案手法」）。
+    // 半角と全角は別の文字なので、欧文の "1.5" や "Fig." には一切触れない。
+    if (ch === '．' && DIGIT.test(text[i - 1] ?? '') && DIGIT.test(text[i + 1] ?? '')) continue;
 
     const after = text.slice(end);
     // 欧文の文末には空白が要る（"3.14" のような並びを切らない）。CJK の終端記号は空白不要。
-    if (after.length > 0 && !/^\s/.test(after) && !/[。！？]/.test(ch)) continue;
+    if (after.length > 0 && !/^\s/.test(after) && !CJK_TERMINATOR.test(ch)) continue;
 
     pushSentence(out, text.slice(start, end).trim());
     start = end;
@@ -144,12 +163,27 @@ export function splitIntoSentences(text: string): string[] {
  */
 const MAX_SENTENCE_CHARS = 4_000;
 
+/** 半角・全角の数字。 */
+const DIGIT = /[0-9\uFF10-\uFF19]/u;
+
+/**
+ * この文字の**後ろ**でなら割ってよい、という和文の約物。
+ *
+ * 和文には語間の空白が無いので、空白だけを探すと語の途中で割れる
+ * （実測: `…到達可能な処` / `理速度の…`）。読点・中黒・閉じ括弧の後ろは、
+ * 紙面でも意味でも切れ目になっている。
+ */
+const BREAK_AFTER = /[、，。．！？；：・）」』】〕》〉｝］]/u;
+
 /**
  * 文を 1 つ足す。長すぎるものは上限で割る。
  *
- * 割る位置は**語の切れ目**を探す（上限の手前 1/8 まで遡って空白を探し、無ければ上限ちょうど）。
- * 和文には空白が無いので上限ちょうどで切れるが、そこまで来た時点で既に
- * 「句点の無い和文」という壊れた入力なので、これ以上できることは無い。
+ * 割る位置は、上限の手前 1/8 まで遡って**切れ目**を探す。切れ目は 3 種類:
+ *   - 空白（欧文の語の切れ目）
+ *   - 和文の約物の直後（読点・閉じ括弧。BREAK_AFTER）
+ *   - 和文と欧文の境目（術語の頭や末尾で切れる）
+ * どれも見つからなければ上限ちょうどで切る。欧文では空白しか当たらないので、
+ * 欧文の割り方は前と変わらない（和文の約物も字種の境目も、欧文には現れない）。
  */
 function pushSentence(out: string[], candidate: string): void {
   if (candidate.length <= MAX_SENTENCE_CHARS) {
@@ -161,7 +195,9 @@ function pushSentence(out: string[], candidate: string): void {
     let cut = at + MAX_SENTENCE_CHARS;
     const floor = cut - Math.floor(MAX_SENTENCE_CHARS / 8);
     for (let i = cut; i > floor; i--) {
-      if (/\s/.test(candidate[i - 1]!)) {
+      const before = candidate[i - 1]!;
+      const here = candidate[i]!;
+      if (/\s/.test(before) || BREAK_AFTER.test(before) || isCjk(before) !== isCjk(here)) {
         cut = i;
         break;
       }
@@ -1187,7 +1223,26 @@ function findSeam(
       texts.push(line.text);
     }
   }
-  return rects.length === 0 ? null : { kinds, rects, texts };
+  if (rects.length === 0) return null;
+
+  /**
+   * 落ちた行の本文は、**読む側が継ぎ直せるときだけ**渡す。
+   *
+   * 空白だけの文字片は捨てる。行番号つきのコードでは空文字列が 10 個入り、画面には
+   * 「抜けたのはここ: … / / out = out_proj ( out ) / /」と区切りだけが並んでいた。
+   *
+   * そのうえで、**1 つも読める断片が無いなら `texts` ごと落とす**。インライン分数の
+   * 分母や添字は 1〜2 文字の断片にしかならず（実測: `["4"]` `["c"]` `["δ","2"]`）、
+   * 文中のどこに・どういう関係で入るかが分からないので、「抜けたのはここ: 4」と
+   * 出しても読む側には何も渡せない。矩形と印は残るので「ここが欠けている」ことは
+   * 伝わる — **無いことが分かる**のと、**継ぎ直せる**のは別の話で、texts は後者のためにある。
+   *
+   * 読める断片が 1 つでもあれば、短いものも一緒に残す。同じ式の一部なので、
+   * 長いほうと並べて初めて意味を持つ（`["μˆ = n∑wizi, (1)", "i=1"]` の `i=1`）。
+   */
+  const usable = texts.filter((text) => text.trim().length > 0);
+  const readable = usable.some((text) => text.replace(/\s+/g, '').length >= MIN_SEAM_TEXT_CHARS);
+  return readable ? { kinds, rects, texts: usable } : { kinds, rects };
 }
 
 /**
@@ -1238,6 +1293,14 @@ interface BandInk {
   left: number;
   right: number;
 }
+
+/**
+ * 落ちた行の本文を「読める」と認める最小の文字数（空白を除く）。
+ *
+ * 実測の分かれ目そのもの。継ぎ直せた例はいちばん短いもので `Mm=1 m`（6 字）、
+ * 継ぎ直せなかった例は `4` `c` `δ` `nμ`（1〜2 字）。3 字で切ると両者が分かれる。
+ */
+const MIN_SEAM_TEXT_CHARS = 3;
 
 /** 落とした行が、その帯（縦）と文のインク（横）に実際に重なっているか。 */
 function overlapsBand(band: BandInk, line: ClassifiedLine): boolean {

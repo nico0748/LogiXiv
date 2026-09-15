@@ -565,8 +565,11 @@ test('隣の本文行に押し込まれた断片を抱えた文に、継ぎ目�
   const holder = sentences.find((s) => s.text.startsWith('4 '));
   assert.ok(holder !== undefined, `断片を抱えた文が見つからない: ${sentences.map((s) => s.text.slice(0, 20)).join(' / ')}`);
   assert.ok(holder.seam !== undefined, '移動した断片を抱えた文に印が付いていない');
-  // 落ちた行の本文も渡す（矩形だけだと、読む側にできるのは「飛ばす」だけ）。
-  assert.deepEqual(holder.seam.texts, ['4'], `印に断片の本文が入っていない: ${JSON.stringify(holder.seam.texts)}`);
+  // 断片が 1 文字だと、文中のどこに・どういう関係で入るかが分からない。
+  // 「抜けたのはここ: 4」と出しても読む側には何も渡せないので、本文は渡さず
+  // 印と矩形だけ残す（「無いことが分かる」のと「継ぎ直せる」は別の話）。
+  assert.equal(holder.seam.texts, undefined, `継ぎ直せない断片が本文として渡っている: ${JSON.stringify(holder.seam.texts)}`);
+  assert.equal(holder.seam.rects.length, 1, '抜けている場所を指す矩形が無い');
   // 他の文には付かないこと（誤爆 0 が絶対条件）。
   assert.equal(sentences.filter((s) => s.seam !== undefined).length, 1, '印が余計な文にも付いた');
 });
@@ -611,4 +614,77 @@ test('1 行を 2 文が共有していても、すれ違っただけの別行立
   const { sentences } = buildSentencesFromChunks(chunks, [SEAM_PAGE]);
   const marked = sentences.filter((s) => s.seam !== undefined).map((s) => s.text);
   assert.deepEqual(marked, [], `すれ違っただけで印が付いた: ${marked.join(' / ')}`);
+});
+
+/**
+ * 和文の「，．」表記の回帰テスト。
+ *
+ * 情報処理学会・電子情報通信学会の標準表記で、和文論文の相当な割合がこれ。
+ * 全角のピリオドが文末記号に入っていなかった頃は、**節まるごとが 1 文**になり
+ * （実測: 3,648 字・矩形 96 個のカードが 1 枚、画面には「0 / 1 文」）、
+ * さらに長すぎる文の上限が発火して `…到達可能な処` / `理速度の…` と語の途中で切れていた。
+ */
+
+test('和文の全角ピリオド（．）で文が切れる', () => {
+  const split = splitIntoSentences(
+    '本論文では疎な注意機構の核について論じる．実験では，塊の大きさと処理速度の釣り合いを測った．' +
+      '提案手法は精度を保ったまま遅延を削減できることを示す．',
+  );
+  assert.equal(split.length, 3, `文が切れていない: ${JSON.stringify(split)}`);
+  assert.equal(split[0], '本論文では疎な注意機構の核について論じる．');
+  // 全角の読点（，）では切らない。文は終わっていない。
+  assert.ok(split[1]!.includes('実験では，塊の大きさ'), `読点で切れた: ${split[1]}`);
+});
+
+test('数字に挟まれた全角ピリオドは、小数点として扱う', () => {
+  // 「０．５」「２．１ 提案手法」。節番号と小数のどちらもこの形になる。
+  const split = splitIntoSentences('測定値は０．５であった．２．１ 節で述べた条件を使う．');
+  assert.equal(split.length, 2, `小数点で切れた: ${JSON.stringify(split)}`);
+  assert.ok(split[0]!.includes('０．５'), `小数が割れた: ${split[0]}`);
+});
+
+test('欧文の小数点と略語は、全角の対応を足しても従来どおり', () => {
+  // 半角と全角は別の文字なので、ここには一切触れていないことの確認。
+  assert.equal(splitIntoSentences('The value is 1.5 in every run. The next sentence follows.').length, 2);
+  assert.equal(splitIntoSentences('We report this in Fig. 2 of the appendix.').length, 1);
+});
+
+test('句点の無い和文を上限で割るとき、語の途中では切らない', () => {
+  // 和文には語間の空白が無いので、空白だけを探すと必ず語の途中で切れる。
+  // 読点・約物の直後と、和文と欧文の境目でなら切ってよい。
+  const clause = '実験では固定の記憶容量の下で塊の大きさと到達可能な処理速度の釣り合いを測り、';
+  const text = clause.repeat(200); // 上限の 4,000 字をはるかに超える。終端記号は 1 つも無い
+  const split = splitIntoSentences(text);
+  assert.ok(split.length > 1, '上限で割られていない');
+  for (const piece of split.slice(0, -1)) {
+    assert.ok(piece.endsWith('、'), `語の途中で切れた: …${piece.slice(-12)}`);
+  }
+  assert.equal(split.join(''), text.replace(/、$/, '、'), '割っただけのはずが字面が変わった');
+});
+
+test('継ぎ直せない断片や空白だけの断片は、印の本文に入れない', () => {
+  // 行番号つきのコードでは、空白だけの文字片が空文字列として残り、画面には
+  // 「抜けたのはここ: … / / out = out_proj ( out ) / /」と区切りだけが並んでいた。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 9; i++) {
+    chunks.push({ page: 1, text: `The constant is not optimised in line ${i} of this page.`, x: 50, y: 100 + i * 13, w: 250, h: 9.96 });
+  }
+  // 文末で閉じない行。ここから次の段落の頭まで、1 文が擬似コードをまたぐ。
+  chunks.push({ page: 1, text: 'The listing below shows how the projection is', x: 50, y: 217, w: 250, h: 9.96 });
+  // 落ちる擬似コード。読める行のあいだに、空白だけの行が挟まっている。
+  chunks.push({ page: 1, text: 'out = out_proj ( out )', x: 120, y: 236, w: 110, h: 8.5 });
+  chunks.push({ page: 1, text: '   ', x: 120, y: 249, w: 110, h: 8.5 });
+  chunks.push({ page: 1, text: 'return out', x: 120, y: 262, w: 60, h: 8.5 });
+  for (let i = 0; i < 10; i++) {
+    chunks.push({ page: 1, text: `The constant is not optimised in line ${i + 20} of this page.`, x: i === 0 ? 62 : 50, y: 280 + i * 13, w: 250, h: 9.96 });
+  }
+
+  const { sentences } = buildSentencesFromChunks(chunks, [SEAM_PAGE]);
+  const holder = sentences.find((s) => s.text.startsWith('The listing below'));
+  assert.ok(holder?.seam !== undefined, '擬似コードをまたいだ文に印が付いていない');
+  assert.deepEqual(
+    holder.seam.texts,
+    ['out = out_proj ( out )', 'return out'],
+    `空白だけの断片が本文に入っている: ${JSON.stringify(holder.seam.texts)}`,
+  );
 });

@@ -1265,3 +1265,190 @@ test('本文の途中に落ちた数字の断片をノンブルと間違えな�
   assert.ok(fragment !== undefined, '断片が行として残っていない');
   assert.notEqual(fragment.kind, 'pageNumber', '本文の途中の断片をノンブルとして落とした');
 });
+
+// --- 逐語ブロック（lstlisting） ------------------------------------------
+
+test('lstlisting のコードが本文に漏れない', () => {
+  // `algorithmic` は行番号 `1:` で塊として落とせるが、`listings` は行番号が別の
+  // 小さい書体で左に置かれる（しかも字形が取れず空文字列になることがある）ので、
+  // その手掛かりが無い。行ごとに独立して判定すると「英字比率 0.6 未満」という
+  // 数式の条件を一行おきに跨いでコードが body と formula に割れ、
+  // **直後の本文段落までコード断片と 1 文になる**。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 6; i++) {
+    chunks.push({ page: 1, text: `The kernel is implemented in about thirty lines of Python in run ${i}.`, x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  // コード 8 行。本文より小さい字、行末は文末記号にならない、右端はばらける。
+  const code = [
+    'def sparse_attention (q , k , v , pattern ):',
+    'scores = q @ k . transpose ( -1 , -2)',
+    'mask = build_mask ( pattern , scores . shape )',
+    'weights = torch . softmax ( scores , dim = -1)',
+    'weights = apply_dropout ( weights , p =0.1)',
+    'out = weights @ v',
+    'out = out_proj ( out )',
+    'return out',
+  ];
+  code.forEach((text, i) => {
+    chunks.push({ page: 1, text, x: i === 0 ? 70 : 85, y: 185 + i * 11, w: text.length * 4.3, h: 9 });
+    // 行番号の帯（字形が取れず空文字列になる）。塊を切ってはいけない。
+    chunks.push({ page: 1, text: ' ', x: 60, y: 189 + i * 11, w: 8, h: 5 });
+  });
+  for (let i = 0; i < 4; i++) {
+    chunks.push({ page: 1, text: `We measured the runtime of this implementation in run ${i} here.`, x: 50, y: 290 + i * 13, w: 250, h: 10 });
+  }
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    !sentences.some((s) => /sparse_attention|apply_dropout|out_proj/.test(s.text)),
+    `コードが本文に漏れた: ${JSON.stringify(sentences.filter((s) => /_/.test(s.text)).map((s) => s.text))}`,
+  );
+  assert.ok(
+    sentences.some((s) => s.text === 'We measured the runtime of this implementation in run 0 here.'),
+    `直後の本文段落がコードと 1 文になった: ${JSON.stringify(sentences.map((s) => s.text).slice(-5))}`,
+  );
+});
+
+test('小さい字で両端をそろえた要旨は、逐語ブロックとしない', () => {
+  // 要旨は本文より小さい字で組まれ、字下げも本文と違うので、字の大きさだけで
+  // 逐語ブロックを決めると丸ごと落ちる。組版が折り返した段落はどの行も同じ右端で
+  // 終わる（＝右端がそろう）ので、そこで分ける。
+  const chunks: TextChunk[] = [];
+  chunks.push({ page: 1, text: 'Abstract', x: 150, y: 100, w: 40, h: 9 });
+  for (let i = 0; i < 5; i++) {
+    // 右端がそろった（両端揃えの）小さい字の段落。文末記号は入れない。
+    chunks.push({ page: 1, text: `These notes collect the design decisions behind rule ${i} which are written for`, x: 70, y: 113 + i * 11, w: 220, h: 9 });
+  }
+  for (let i = 0; i < 8; i++) {
+    chunks.push({ page: 1, text: `The block size controls the trade off in run ${i} of the experiment here.`, x: 50, y: 200 + i * 13, w: 250, h: 10 });
+  }
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const abstract = lines.filter((l) => l.text.includes('These notes collect'));
+  assert.equal(abstract.length, 5, '要旨の行が見つからない');
+  assert.ok(
+    abstract.every((l) => l.role === 'body'),
+    `要旨が ${abstract.find((l) => l.role !== 'body')?.kind} として落ちた`,
+  );
+});
+
+// --- ルビ ----------------------------------------------------------------
+
+test('本文に重ねて組まれたルビを本文に混ぜない', () => {
+  // ルビは本文のすぐ上に重ねて組まれるので、行にまとめる段で本文の行に紛れ込む。
+  // 実測: `そ かく かたまり本論文では疎な注意機構の核について論じる。`
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 8; i++) chunks.push(cjkBody(1, 50, 100 + i * 17, i));
+  // 1 行目の漢字の上に、半分以下の大きさの仮名を重ねる。1 行ぶんのルビは行の左右に
+  // 散るので、まとまると段幅の 7 割を超える幅の行になり「短い行」の門を通り抜ける。
+  chunks.push({ page: 1, text: 'そ', x: 70, y: 100 - 7, w: 5.5, h: 5.5 });
+  chunks.push({ page: 1, text: 'かたまり', x: 170, y: 100 - 7, w: 22, h: 5.5 });
+  chunks.push({ page: 1, text: 'かく', x: 265, y: 100 - 7, w: 11, h: 5.5 });
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    !sentences.some((s) => /^(?:そ|かく|かたまり)/.test(s.text)),
+    `ルビが本文に混ざった: ${JSON.stringify(sentences.map((s) => s.text).slice(0, 3))}`,
+  );
+});
+
+test('本文の上に載っていない小さい仮名は落とさない', () => {
+  // ルビの条件は「本文の字の上に重なっている」こと。段の左端から始まる
+  // 小さい字の注記（\footnotesize の但し書き）を落としてはいけない。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 8; i++) chunks.push(cjkBody(1, 50, 100 + i * 17, i));
+  chunks.push({ page: 1, text: 'ただし', x: 50, y: 250, w: 16.5, h: 5.5 });
+  chunks.push({ page: 1, text: 'なお', x: 50, y: 262, w: 11, h: 5.5 });
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  assert.ok(lines.some((l) => l.text.includes('ただし')), '本文の上に無い小さい仮名まで落とした');
+});
+
+// --- 継ぎ目の種類 --------------------------------------------------------
+
+test('インライン分数の断片を「表」と呼ばない', () => {
+  // 分数の分子・分母や添字は演算子を 1 つも含まないことが多い（`4` / `nμ` / `M`）。
+  // 演算子の有無だけで決めていたので、画面が「本文として取り出せなかった**表**が
+  // 挟まっています」と言っていた。PDF に表は無いので、読む側が探しに行く羽目になる。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 12; i++) {
+    chunks.push({ page: 1, text: `The constant is not optimised in line ${i} of this page here.`, x: 50, y: 100 + i * 13, w: 250, h: 9.96 });
+  }
+  // 行と行の間に押し込まれた分母（演算子なし・字下げあり・本文より低い）。
+  chunks.push({ page: 1, text: 'nµ', x: 180, y: 106.5, w: 10, h: 6.97 });
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const fragment = lines.find((l) => l.text.trim() === 'nµ');
+  assert.ok(fragment !== undefined, '断片が行として残っていない');
+  assert.equal(fragment.role, 'furniture', '断片が落ちていない');
+  assert.equal(fragment.kind, 'formula', `分数の断片を ${fragment.kind} と呼んでいる`);
+});
+
+// --- 塊の穴埋め ----------------------------------------------------------
+
+test('別行立ての塊に挟まれた表の見出しセルが本文に残らない', () => {
+  // 別行立ての塊は行送りが不揃いなので、塊の伸ばし方が「間隔が広い」という理由で
+  // 途中で止まり、塊の中の行が一行おきに本文に残る。実測（`rotating` の
+  // `sidewaystable`）: `Memory Latency Accuracy …` という文が本文として出ていた。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) {
+    chunks.push({ page: 1, text: `The wide sweep is reported in Table 1 on page ${i} of the paper.`, x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  // 行送りが不揃いな塊（数値の行と見出しのセルが交互に、間隔もまちまち）。
+  // 数値の行は字下げがあるので塊と分かるが、見出しのセルは段の左端に来るので
+  // 単独では塊に見えない。行送りが広いせいで塊の伸ばし方も届かない。
+  chunks.push({ page: 1, text: '2.1 2.4 6.7', x: 80, y: 250, w: 50, h: 10 });
+  chunks.push({ page: 1, text: 'Memory', x: 50, y: 273, w: 36, h: 10 });
+  chunks.push({ page: 1, text: '13.4 12.1 22.6', x: 80, y: 296, w: 60, h: 10 });
+  chunks.push({ page: 1, text: 'Latency', x: 50, y: 319, w: 34, h: 10 });
+  chunks.push({ page: 1, text: '81.2 82.0 83.8', x: 80, y: 342, w: 60, h: 10 });
+  for (let i = 0; i < 10; i++) {
+    chunks.push({ page: 1, text: `We describe the main trend here and defer run ${i} to the appendix.`, x: 50, y: 380 + i * 13, w: 250, h: 10 });
+  }
+
+  const { sentences } = buildSentencesFromChunks(chunks, pages(1));
+  assert.ok(
+    !sentences.some((s) => /Memory|Latency/.test(s.text)),
+    `表の見出しセルが本文に残った: ${JSON.stringify(sentences.filter((s) => /Memory|Latency/.test(s.text)).map((s) => s.text))}`,
+  );
+});
+
+test('別行立ての式に挟まれた繋ぎの本文行は落とさない', () => {
+  // 穴埋めが本文を巻き込まないための歯止め。`and therefore` のような繋ぎの行は
+  // 短くて句読点も無いが、機能語があるので本文と分かる。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 10; i++) {
+    chunks.push({ page: 1, text: `The bound follows from the assumption in run ${i} of the study.`, x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  chunks.push({ page: 1, text: 'x = y + z (1)', x: 80, y: 250, w: 60, h: 10 });
+  chunks.push({ page: 1, text: 'and therefore', x: 50, y: 273, w: 60, h: 10 });
+  chunks.push({ page: 1, text: 'y = z + w (2)', x: 80, y: 296, w: 60, h: 10 });
+  for (let i = 0; i < 10; i++) {
+    chunks.push({ page: 1, text: `We describe the main trend here and defer run ${i} to the appendix.`, x: 50, y: 330 + i * 13, w: 250, h: 10 });
+  }
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const bridge = lines.find((l) => l.text.includes('and therefore'));
+  assert.ok(bridge !== undefined, '繋ぎの行が見つからない');
+  assert.equal(bridge.role, 'body', `繋ぎの本文行を ${bridge.kind} として落とした`);
+});
+
+test('図表に挟まれた節見出しを塊に巻き込まない', () => {
+  // 番号つきの節見出しは短くて機能語も句読点も無いので、塊の穴埋めの条件を
+  // そのまま満たしてしまう。実測: `1 Setting` が表として落ち、節が 1 つ減っていた。
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < 8; i++) {
+    chunks.push({ page: 1, text: `The bound follows from the assumption in run ${i} of the study.`, x: 50, y: 100 + i * 13, w: 250, h: 10 });
+  }
+  chunks.push({ page: 1, text: '2.1 2.4 6.7', x: 80, y: 220, w: 50, h: 10 });
+  chunks.push({ page: 1, text: '2 Main result', x: 50, y: 245, w: 70, h: 14 });
+  chunks.push({ page: 1, text: '13.4 12.1 22.6', x: 80, y: 272, w: 60, h: 10 });
+  for (let i = 0; i < 8; i++) {
+    chunks.push({ page: 1, text: `We describe the main trend here and defer run ${i} to the appendix.`, x: 50, y: 300 + i * 13, w: 250, h: 10 });
+  }
+
+  const lines = classifyLines(buildLines(chunks), pages(1));
+  const head = lines.find((l) => l.text.includes('Main result'));
+  assert.ok(head !== undefined, '見出しが見つからない');
+  assert.notEqual(head.role, 'furniture', `節見出しを ${head.kind} として落とした`);
+});
