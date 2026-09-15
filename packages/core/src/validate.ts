@@ -32,12 +32,27 @@ export interface SanitizeReport {
   droppedTranslations: number;
   droppedNotes: number;
   droppedGlossary: number;
+  /** 「訳さない」の記録のうち、形が壊れていて落としたもの。 */
+  droppedSkipped: number;
+  /** 文の区切りの直しのうち、形が壊れていて落としたもの。 */
+  droppedEdits: number;
+  /** 節・用紙サイズ・座標のうち落としたもの。 */
+  droppedStructure: number;
   /** 直した点（ハッシュ再計算など）。 */
   repaired: number;
 }
 
 export function emptySanitizeReport(): SanitizeReport {
-  return { droppedSentences: 0, droppedTranslations: 0, droppedNotes: 0, droppedGlossary: 0, repaired: 0 };
+  return {
+    droppedSentences: 0,
+    droppedTranslations: 0,
+    droppedNotes: 0,
+    droppedGlossary: 0,
+    droppedSkipped: 0,
+    droppedEdits: 0,
+    droppedStructure: 0,
+    repaired: 0,
+  };
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -108,9 +123,9 @@ function sanitizeSentences(value: unknown, report: SanitizeReport): Sentence[] {
       report.droppedSentences++;
       continue;
     }
-    const rects = Array.isArray(raw['rects'])
-      ? raw['rects'].map(sanitizeRect).filter((r): r is Rect => r !== null)
-      : [];
+    const rawRects = Array.isArray(raw['rects']) ? raw['rects'] : [];
+    const rects = rawRects.map(sanitizeRect).filter((r): r is Rect => r !== null);
+    report.droppedStructure += rawRects.length - rects.length;
     const hash = sentenceHash(text);
     if (raw['hash'] !== hash) report.repaired++;
     const occurrence = occurrences.get(hash) ?? 0;
@@ -133,9 +148,9 @@ export function sanitizeStructure(value: unknown, report: SanitizeReport): Docum
   const source = isRecord(value) ? value : {};
   const parser = source['parser'] === 'grobid' ? 'grobid' : 'fallback';
   const sentences = sanitizeSentences(source['sentences'], report);
-  const sections = Array.isArray(source['sections'])
-    ? source['sections'].map(sanitizeSection).filter((s): s is Section => s !== null)
-    : [];
+  const rawSections = Array.isArray(source['sections']) ? source['sections'] : [];
+  const sections = rawSections.map(sanitizeSection).filter((s): s is Section => s !== null);
+  report.droppedStructure += rawSections.length - sections.length;
   const knownSections = new Set(sections.map((s) => s.id));
   for (const sentence of sentences) {
     if (sentence.sectionId !== null && !knownSections.has(sentence.sectionId)) sentence.sectionId = null;
@@ -149,12 +164,17 @@ export function sanitizeStructure(value: unknown, report: SanitizeReport): Docum
     parsedAt: isoDate(source['parsedAt'], EPOCH),
     title: str(source['title'], 2000),
     abstract: str(source['abstract'], 50_000),
-    pageSizes: Array.isArray(source['pageSizes'])
-      ? source['pageSizes'].map(sanitizePageSize).filter((p): p is PageSize => p !== null)
-      : [],
+    pageSizes: sanitizePageSizes(source['pageSizes'], report),
     sections,
     sentences,
   };
+}
+
+function sanitizePageSizes(value: unknown, report: SanitizeReport): PageSize[] {
+  const raw = Array.isArray(value) ? value : [];
+  const sizes = raw.map(sanitizePageSize).filter((p): p is PageSize => p !== null);
+  report.droppedStructure += raw.length - sizes.length;
+  return sizes;
 }
 
 export function sanitizeAnnotations(value: unknown, report: SanitizeReport): Annotations {
@@ -229,7 +249,10 @@ export function sanitizeAnnotations(value: unknown, report: SanitizeReport): Ann
   const skipped: Record<string, SkippedSentence> = {};
   if (isRecord(source['skipped'])) {
     for (const [hash, raw] of Object.entries(source['skipped'])) {
-      if (!/^[0-9a-f]{4,64}$/.test(hash) || !isRecord(raw)) continue;
+      if (!/^[0-9a-f]{4,64}$/.test(hash) || !isRecord(raw)) {
+        report.droppedSkipped++;
+        continue;
+      }
       skipped[hash] = {
         sentenceHash: hash,
         reason: str(raw['reason'], 200) ?? 'other',
@@ -243,11 +266,20 @@ export function sanitizeAnnotations(value: unknown, report: SanitizeReport): Ann
   const sentenceEdits: SentenceEdit[] = [];
   if (Array.isArray(source['sentenceEdits'])) {
     for (const raw of source['sentenceEdits']) {
-      if (!isRecord(raw)) continue;
+      if (!isRecord(raw)) {
+        report.droppedEdits++;
+        continue;
+      }
       const type = raw['type'];
-      if (type !== 'merge' && type !== 'split') continue;
+      if (type !== 'merge' && type !== 'split') {
+        report.droppedEdits++;
+        continue;
+      }
       const hashes = sanitizeHashList(raw['hashes']);
-      if (type === 'merge' ? hashes.length < 2 : hashes.length !== 1) continue;
+      if (type === 'merge' ? hashes.length < 2 : hashes.length !== 1) {
+        report.droppedEdits++;
+        continue;
+      }
       const id = str(raw['id'], 64);
       const edit: SentenceEdit = {
         id: id && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : newId('edit'),
@@ -346,6 +378,9 @@ export function describeSanitizeReport(report: SanitizeReport): string | null {
   if (report.droppedTranslations > 0) parts.push(`訳 ${report.droppedTranslations} 件`);
   if (report.droppedNotes > 0) parts.push(`メモ ${report.droppedNotes} 件`);
   if (report.droppedGlossary > 0) parts.push(`用語 ${report.droppedGlossary} 件`);
+  if (report.droppedSkipped > 0) parts.push(`「訳さない」の記録 ${report.droppedSkipped} 件`);
+  if (report.droppedEdits > 0) parts.push(`文の区切りの直し ${report.droppedEdits} 件`);
+  if (report.droppedStructure > 0) parts.push(`節・座標 ${report.droppedStructure} 件`);
   if (parts.length === 0) return null;
   return `形式が不正だったため ${parts.join(' / ')} を取り込みませんでした`;
 }

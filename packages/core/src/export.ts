@@ -24,6 +24,17 @@ export interface BuildExportInput {
   exportedAt?: string;
 }
 
+/**
+ * インラインの <script> / <style> の中身が、自分を閉じるタグを含まないようにする。
+ *
+ * 今のバンドルにはたまたま出てこないが、pdf.js や Vite の更新で文字列リテラルに
+ * "</script" が 1 つ入るだけで、ビューアが起動しない書き出しが黙って量産される。
+ * JS でも CSS でもこの置換は意味を変えない。
+ */
+function sealInline(source: string, kind: 'script' | 'style'): string {
+  return source.replaceAll(`</${kind}`, `<\\/${kind}`);
+}
+
 export const EXPORT_DATA_ELEMENT_ID = 'logixiv-data';
 
 export function buildExportPayload(input: {
@@ -109,7 +120,7 @@ export function buildExportHtml(input: BuildExportInput): string {
 <meta name="generator" content="LogiXiv ${LOGIXIV_VERSION}">
 <title>${title} — LogiXiv</title>
 <style>${STATIC_STYLE}</style>
-<style>${input.viewerStyle}</style>
+<style>${sealInline(input.viewerStyle, 'style')}</style>
 </head>
 <body>
 <div id="lx-root"></div>
@@ -119,7 +130,7 @@ export function buildExportHtml(input: BuildExportInput): string {
 ${staticFallback(input.document)}
 </div>
 <script type="application/json" id="${EXPORT_DATA_ELEMENT_ID}">${json}</script>
-<script>${input.viewerScript}</script>
+<script>${sealInline(input.viewerScript, 'script')}</script>
 </body>
 </html>
 `;

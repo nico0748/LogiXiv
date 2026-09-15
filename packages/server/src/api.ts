@@ -166,10 +166,7 @@ export class LogiXivApi {
 
   /** PDF を解析して新規文書にする。GROBID が落ちていたら黙って劣化させず、警告を返す。 */
   async ingestPdf(pdf: Uint8Array, fileName: string, preference: ParserPreference = 'auto'): Promise<IngestResult> {
-    if (pdf.byteLength === 0) throw new BadRequestError('PDF が空です');
-    if (!(pdf[0] === 0x25 && pdf[1] === 0x50 && pdf[2] === 0x44 && pdf[3] === 0x46)) {
-      throw new BadRequestError('PDF ではないファイルのようです（先頭が %PDF ではありません）');
-    }
+    this.assertLooksLikePdf(pdf);
 
     const { structure, usedFallback, warning } = await this.parseStructure(pdf, fileName, preference);
     const document = createDocument({ structure, sourceFileName: fileName });
@@ -179,6 +176,14 @@ export class LogiXivApi {
     this.bus.publish({ type: 'document.created', documentId: document.id });
 
     return { document, usedFallback, warning };
+  }
+
+  /** アップロードでも取り込みでも同じ入口検査を通す。 */
+  private assertLooksLikePdf(pdf: Uint8Array): void {
+    if (pdf.byteLength === 0) throw new BadRequestError('PDF が空です');
+    if (!(pdf[0] === 0x25 && pdf[1] === 0x50 && pdf[2] === 0x44 && pdf[3] === 0x46)) {
+      throw new BadRequestError('PDF ではないファイルのようです（先頭が %PDF ではありません）');
+    }
   }
 
   private async parseStructure(pdf: Uint8Array, fileName: string, preference: ParserPreference) {
@@ -604,7 +609,11 @@ export class LogiXivApi {
       throw new BadRequestError('この書き出しには PDF か本文が含まれていないため、新規文書として取り込めません');
     }
     const document = parsed.document;
-    await this.store.writePdf(document.id, Buffer.from(parsed.pdfBase64, 'base64'));
+    // 取り込み経路もアップロードと同じ入口検査を通す。ここを素通しにすると、
+    // 任意のバイト列が source.pdf として保存され、/pdf が application/pdf として配る。
+    const pdf = Buffer.from(parsed.pdfBase64, 'base64');
+    this.assertLooksLikePdf(pdf);
+    await this.store.writePdf(document.id, pdf);
     await this.store.write(document);
     this.bus.publish({ type: 'document.created', documentId: document.id });
     return { documentId: document.id, report: null, note: '新しい文書として取り込みました', warning };

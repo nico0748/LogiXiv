@@ -142,7 +142,12 @@ try {
   const exported = await fetch(`${url}/api/documents/${id}/export`);
   assert.equal(exported.status, 200);
   const html = await exported.text();
+  // 属性の正規表現は「見落としの多い網」でしかない（@import、url()、//host、
+  // 後から足された fetch、preload はどれも素通りする）。骨組みの検査として残しつつ、
+  // 本当の保証は下の「ブラウザで開いて外に出ないこと」で取る。
   assert.ok(!/(src|href)\s*=\s*["']https?:/i.test(html), '書き出し HTML が外部 URL を参照している');
+  assert.ok(!/@import\s+(url\()?["']?https?:/i.test(html), '書き出し HTML の CSS が外部を参照している');
+  assert.ok(!/url\(\s*["']?\/\//i.test(html), '書き出し HTML がプロトコル相対の URL を参照している');
   assert.ok(html.includes('人手で直した訳'), '静的フォールバックに訳が入っていない');
   assert.ok(html.includes('ここが主張の核心'), '静的フォールバックにメモが入っていない');
   const exportPath = join(dataDir, 'export.html');

@@ -1,6 +1,6 @@
 import type { Annotations, PaperDocument } from './types.ts';
 import { EXPORT_DATA_ELEMENT_ID } from './export.ts';
-import { findTagEnd, parseAttrs } from './xml.ts';
+import { decodeEntities, findTagEnd } from './xml.ts';
 import { newId } from './hash.ts';
 import { sanitizeAnnotations, sanitizeDocument, emptySanitizeReport, isRecord, type SanitizeReport } from './validate.ts';
 
@@ -30,22 +30,47 @@ interface FoundScript {
   at: number;
 }
 
+/**
+ * HTML の属性を読む。**XML 用の parseAttrs は使わない。**
+ *
+ * HTML の要素名と属性名は大文字小文字を区別せず、属性値は引用符が無くてもよい。
+ * XML の規則で読むと `<SCRIPT id=logixiv-data>` がこちらには見えず、ブラウザには
+ * 見える、という食い違いが作れる。取り込んだ側とビューアが別の payload を読む状態は、
+ * 「同じファイルなのに人によって中身が違う」という最悪の壊れ方になる。
+ */
+function parseHtmlAttrs(source: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const re = /([^\s=/>]+)(?:\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(source)) !== null) {
+    if (match[0].trim().length === 0) {
+      if (re.lastIndex === match.index) re.lastIndex++;
+      continue;
+    }
+    const name = match[1]!.toLowerCase();
+    if (!(name in attrs)) attrs[name] = decodeEntities(match[3] ?? match[4] ?? match[5] ?? '');
+  }
+  return attrs;
+}
+
 function findDataScripts(html: string): FoundScript[] {
+  // 走査は小文字化した写しの上で行う（位置は元の文字列と 1 対 1 で対応する）。
+  const lower = html.toLowerCase();
   const found: FoundScript[] = [];
   let cursor = 0;
   for (;;) {
-    const open = html.indexOf('<script', cursor);
+    const open = lower.indexOf('<script', cursor);
     if (open === -1) break;
     const tagEnd = findTagEnd(html, open);
     if (tagEnd === -1) break;
     // '<script' の直後が名前の続きでないこと（<scripting> のような要素を拾わない）。
-    const afterName = html[open + 7];
-    if (afterName !== undefined && /[A-Za-z0-9_-]/.test(afterName)) {
+    const afterName = lower[open + 7];
+    if (afterName !== undefined && /[a-z0-9_-]/.test(afterName)) {
       cursor = open + 7;
       continue;
     }
-    const attrs = parseAttrs(html.slice(open + 7, tagEnd));
-    const close = html.indexOf('</script', tagEnd + 1);
+    const attrs = parseHtmlAttrs(html.slice(open + 7, tagEnd));
+    const close = lower.indexOf('</script', tagEnd + 1);
     const bodyEnd = close === -1 ? html.length : close;
     if (attrs['id'] === EXPORT_DATA_ELEMENT_ID) {
       found.push({ json: html.slice(tagEnd + 1, bodyEnd), at: open });

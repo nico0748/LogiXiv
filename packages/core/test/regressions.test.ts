@@ -8,8 +8,14 @@ import { splitIntoSentences, buildSentencesFromChunks, type TextChunk } from '..
 import { incomingWins } from '../src/merge.ts';
 import { createDocument, addNote, setTranslation, searchDocument } from '../src/document.ts';
 import { buildExportHtml } from '../src/export.ts';
-import { parseExportHtml, ImportError } from '../src/import.ts';
-import { sanitizeDocument, emptySanitizeReport, sanitizeStructure } from '../src/validate.ts';
+import { extractPayloadJson, parseExportHtml, ImportError } from '../src/import.ts';
+import {
+  describeSanitizeReport,
+  sanitizeAnnotations,
+  sanitizeDocument,
+  emptySanitizeReport,
+  sanitizeStructure,
+} from '../src/validate.ts';
 import { migrateDocument } from '../src/migrate.ts';
 import type { PaperDocument, Translation } from '../src/types.ts';
 
@@ -371,4 +377,63 @@ test('旧バージョンの文書は訳を保ったままハッシュが張り�
 
   // 移行済みの文書を再度通しても何も起きない。
   assert.equal(migrateDocument(result.document).migrated, false);
+});
+
+// --- サイクル6：書き出し HTML の受け取り側 ------------------------------
+
+test('大文字や引用符なしで書かれた script も見つける（取り込みとブラウザで別物を読ませない）', () => {
+  // HTML は要素名も属性名も大小を区別せず、属性値の引用符も省ける。
+  // XML の規則で読むと、こちらには見えずブラウザには見える script を仕込める。
+  const payload = '{"format":"logixiv-export","formatVersion":1}';
+  for (const tag of [
+    '<SCRIPT type="application/json" id="logixiv-data">',
+    '<script type=application/json id=logixiv-data>',
+    '<script type="application/json" ID="logixiv-data">',
+  ]) {
+    assert.equal(extractPayloadJson(`<html><body>${tag}${payload}</script></body></html>`), payload, tag);
+  }
+});
+
+test('綴りの違う 2 つ目のデータ script も重複として断る', () => {
+  const html =
+    '<html><body>' +
+    '<SCRIPT type=application/json id=logixiv-data>{"a":1}</script>' +
+    '<script type="application/json" id="logixiv-data">{"b":2}</script>' +
+    '</body></html>';
+  assert.throws(() => extractPayloadJson(html), /2 個見つかりました/);
+});
+
+test('ビューアのスクリプトに </script が入っても書き出しが壊れない', () => {
+  const document = createDocument({
+    structure: sanitizeStructure({ sentences: [{ text: 'Hello world.' }] }, emptySanitizeReport()),
+    sourceFileName: 'a.pdf',
+  });
+  const html = buildExportHtml({
+    document,
+    pdfBase64: '',
+    viewerScript: 'var X = "</script>"; var Y = 1;',
+    viewerStyle: '/* </style> */ body { color: red; }',
+  });
+  // 閉じタグは、データ script とビューア script の 2 つ、style は 2 つだけ。
+  assert.equal(html.split('</script').length - 1, 2);
+  assert.equal(html.split('</style').length - 1, 2);
+  assert.ok(html.includes('<\\/script>'), 'スクリプト内の </script が無害化されていない');
+});
+
+test('形が壊れた注釈は、落とした件数まで報告する', () => {
+  const report = emptySanitizeReport();
+  sanitizeAnnotations(
+    {
+      translations: {},
+      notes: [],
+      glossary: [],
+      skipped: { 'not-a-hash': { reason: 'x' }, abcdef12: 'nope' },
+      sentenceEdits: [{ type: 'merge', hashes: ['abcdef12'] }, { type: 'nope' }, 'x'],
+    },
+    report,
+  );
+  assert.equal(report.droppedSkipped, 2);
+  assert.equal(report.droppedEdits, 3);
+  assert.match(describeSanitizeReport(report) ?? '', /訳さない/);
+  assert.match(describeSanitizeReport(report) ?? '', /区切りの直し/);
 });

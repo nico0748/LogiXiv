@@ -119,6 +119,12 @@
   outline: 1px solid rgba(245, 158, 11, 0.9);
 }
 
+/* 検索に当たったマーカー。訳の有無にかかわらず見えるようにする。 */
+.lxv-marker.is-match {
+  background: rgba(255, 196, 0, 0.42);
+  outline: 1px solid rgba(180, 120, 0, 0.7);
+}
+
 .lxv-marker.is-filtered-out {
   background: transparent;
   pointer-events: none;

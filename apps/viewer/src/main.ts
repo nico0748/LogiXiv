@@ -1,6 +1,14 @@
 import './style.css';
 import type { ExportPayload, Note, Section, Sentence } from './types.ts';
-import { base64ToBytes, loadPdf, renderPage } from './pdf.ts';
+import {
+  base64ToBytes,
+  isWorkerAvailable,
+  loadPdf,
+  needsMissingResources,
+  pageGeometry,
+  renderPageCanvas,
+  type LoadedPdf,
+} from './pdf.ts';
 
 /**
  * 書き出し HTML の中で動くビューア。
@@ -13,11 +21,29 @@ import { base64ToBytes, loadPdf, renderPage } from './pdf.ts';
 const DATA_ELEMENT_ID = 'logixiv-data';
 const RESIZE_DEBOUNCE_MS = 300;
 
+/**
+ * 埋め込みデータを読む。
+ *
+ * 同じ id の script が複数あるときは読まない。取り込み側（core/import.ts）は
+ * その状態を「どれが本物か判断できない」として断るので、ビューアだけが
+ * 先頭の 1 つを採用すると、同じファイルなのに人によって中身が違うことになる。
+ *
+ * 形も最低限だけ見る。ここを素通しにすると、少し壊れた payload で
+ * 静的フォールバックごと消えた真っ白なページになる。
+ */
 function readPayload(): ExportPayload | null {
-  const element = document.getElementById(DATA_ELEMENT_ID);
-  if (!element) return null;
+  const elements = document.querySelectorAll(`#${DATA_ELEMENT_ID}`);
+  if (elements.length !== 1) return null;
   try {
-    return JSON.parse(element.textContent ?? '') as ExportPayload;
+    const payload = JSON.parse(elements[0]!.textContent ?? '') as ExportPayload;
+    const paper = payload?.document;
+    if (!paper || typeof paper !== 'object') return null;
+    if (!Array.isArray(paper.structure?.sentences)) return null;
+    if (!Array.isArray(paper.structure?.sections)) return null;
+    const annotations = paper.annotations;
+    if (!annotations || typeof annotations !== 'object') return null;
+    if (!Array.isArray(annotations.notes) || typeof annotations.translations !== 'object') return null;
+    return payload;
   } catch {
     return null;
   }
@@ -41,7 +67,9 @@ function boot(): void {
   const staticFallback = document.getElementById('lx-static');
   const root = document.getElementById('lx-root');
   if (!root) return;
-  if (staticFallback) staticFallback.remove();
+  // 静的フォールバックは、画面を組み立て切ってから外す。
+  // 先に外すと、途中で例外が出たときに何も無いページだけが残る。
+  if (staticFallback) staticFallback.hidden = true;
 
   const { document: paper, pdfBase64 } = payload;
   const sentences = paper.structure.sentences;
@@ -155,15 +183,25 @@ function boot(): void {
   }
 
   let renderToken = 0;
+  let pageObserver: IntersectionObserver | null = null;
 
+  /**
+   * ページは「枠だけ先に並べ、見える範囲に入ったら描く」。
+   *
+   * 全ページを一度に描いて持ち続けると、500 ページの論文でブラウザが 3GB 以上使い、
+   * 幅を変えるたびに全ページを描き直して 20 秒固まる。枠の寸法は描かなくても分かるので、
+   * マーカーの位置は最初から正しく置ける。
+   */
   async function renderPdf(): Promise<void> {
     const token = ++renderToken;
+    pageObserver?.disconnect();
+    pageObserver = null;
     pdfColumn.textContent = '';
     markers.clear();
     const status = el('p', 'lxv-status', 'PDF を読み込んでいます…');
     pdfColumn.append(status);
 
-    let pdf: Awaited<ReturnType<typeof loadPdf>>;
+    let pdf: LoadedPdf;
     try {
       pdf = await loadPdf(base64ToBytes(pdfBase64));
     } catch (error) {
@@ -172,6 +210,16 @@ function boot(): void {
     }
     if (token !== renderToken) return;
     status.remove();
+
+    if (!isWorkerAvailable()) {
+      pdfColumn.append(
+        el(
+          'p',
+          'lxv-status',
+          'このブラウザではワーカーを使えないため、PDF の描画が単一スレッドで動きます。ページ数が多いと遅くなります。',
+        ),
+      );
+    }
 
     const cssWidth = Math.max(320, Math.min(pdfColumn.clientWidth - 32, 1400));
     const byPage = new Map<number, Set<Sentence>>();
@@ -183,9 +231,49 @@ function boot(): void {
       }
     }
 
+    const drawn = new Set<number>();
+    const draw = async (container: HTMLElement, pageNumber: number): Promise<void> => {
+      if (drawn.has(pageNumber) || token !== renderToken) return;
+      drawn.add(pageNumber);
+      try {
+        const canvas = await renderPageCanvas(pdf, pageNumber, cssWidth);
+        if (token !== renderToken) return;
+        container.prepend(canvas);
+        if (needsMissingResources()) showResourceWarning();
+      } catch {
+        drawn.delete(pageNumber);
+      }
+    };
+    const release = (container: HTMLElement, pageNumber: number): void => {
+      const canvas = container.querySelector('canvas');
+      if (!canvas) return;
+      // 実体を手放す。width=0 にしないと、要素を外してもピクセルは解放されない。
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas.remove();
+      drawn.delete(pageNumber);
+    };
+
+    pageObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const container = entry.target as HTMLElement;
+          const pageNumber = Number(container.dataset['page']);
+          if (entry.isIntersecting) void draw(container, pageNumber);
+          else if (Math.abs(entry.boundingClientRect.top) > window.innerHeight * 6) release(container, pageNumber);
+        }
+      },
+      { root: null, rootMargin: '800px 0px' },
+    );
+
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
-      const rendered = await renderPage(pdf, pageNumber, cssWidth);
+      const geometry = await pageGeometry(pdf, pageNumber, cssWidth);
       if (token !== renderToken) return;
+      const container = el('div', 'lxv-page');
+      container.style.width = `${geometry.width}px`;
+      container.style.height = `${geometry.height}px`;
+      container.dataset['page'] = String(pageNumber);
+
       const overlay = el('div', 'lxv-overlay');
       for (const sentence of byPage.get(pageNumber) ?? []) {
         for (const rect of sentence.rects) {
@@ -195,10 +283,10 @@ function boot(): void {
           // 文書全体で数千個になるのでタブ順から外す。操作はサイドバーに一本化する。
           marker.tabIndex = -1;
           marker.setAttribute('aria-hidden', 'true');
-          marker.style.left = `${rect.x * rendered.scale}px`;
-          marker.style.top = `${rect.y * rendered.scale}px`;
-          marker.style.width = `${rect.w * rendered.scale}px`;
-          marker.style.height = `${rect.h * rendered.scale}px`;
+          marker.style.left = `${rect.x * geometry.scale}px`;
+          marker.style.top = `${rect.y * geometry.scale}px`;
+          marker.style.width = `${rect.w * geometry.scale}px`;
+          marker.style.height = `${rect.h * geometry.scale}px`;
           marker.title = sentence.text;
           if (paper.annotations.translations[sentence.hash]) marker.classList.add('is-translated');
           // 描画前に選ばれていた文・絞り込み済みの文の状態をここで反映する。
@@ -211,9 +299,25 @@ function boot(): void {
           else markers.set(sentence.id, [marker]);
         }
       }
-      rendered.container.append(overlay);
-      pdfColumn.append(rendered.container);
+      container.append(overlay);
+      pdfColumn.append(container);
+      pageObserver.observe(container);
     }
+  }
+
+  let resourceWarningShown = false;
+  function showResourceWarning(): void {
+    if (resourceWarningShown) return;
+    resourceWarningShown = true;
+    // 外部 URL をゼロにしている代償。黙って白いページを見せるより、理由を出す。
+    pdfColumn.prepend(
+      el(
+        'p',
+        'lxv-status',
+        'この PDF は、このファイルに同梱していない文字コード表（CMap）や標準フォントを必要とします。' +
+          'ページが白く見えることがありますが、原文と訳は右側でそのまま読めます。',
+      ),
+    );
   }
 
   // --- 検索 ---------------------------------------------------------------
@@ -223,7 +327,9 @@ function boot(): void {
       visibleIds = null;
       for (const card of cards.values()) card.hidden = false;
       for (const group of groups) if (group.heading) group.heading.hidden = false;
-      for (const list of markers.values()) for (const marker of list) marker.classList.remove('is-filtered-out');
+      for (const list of markers.values()) {
+        for (const marker of list) marker.classList.remove('is-filtered-out', 'is-match');
+      }
       emptyMessage.hidden = true;
       return;
     }
@@ -251,7 +357,12 @@ function boot(): void {
     }
 
     for (const [id, list] of markers) {
-      for (const marker of list) marker.classList.toggle('is-filtered-out', !visibleIds.has(id));
+      for (const marker of list) {
+        const matched = visibleIds.has(id);
+        marker.classList.toggle('is-filtered-out', !matched);
+        // 未訳のマーカーは背景が無いので、消すだけでは「当たり」が見えない。
+        marker.classList.toggle('is-match', matched);
+      }
     }
     emptyMessage.hidden = visibleIds.size > 0;
   }
@@ -272,11 +383,30 @@ function boot(): void {
   });
 
   lastWidth = pdfColumn.clientWidth;
+  // ここまで来たら画面は組み上がっている。静的フォールバックを外してよい。
+  if (staticFallback) staticFallback.remove();
   void renderPdf();
 }
 
+/**
+ * 何があっても静的フォールバックだけは残す。
+ * このファイルは「誰かが受け取った 1 枚の HTML」なので、読めない理由が何であれ
+ * 真っ白な画面より原文と訳が並んだ素の HTML の方がましである。
+ */
+function safeBoot(): void {
+  try {
+    boot();
+  } catch (error) {
+    const staticFallback = document.getElementById('lx-static');
+    if (staticFallback) staticFallback.hidden = false;
+    const root = document.getElementById('lx-root');
+    if (root) root.replaceChildren();
+    console.error('LogiXiv viewer failed to start', error);
+  }
+}
+
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', boot);
+  document.addEventListener('DOMContentLoaded', safeBoot);
 } else {
-  boot();
+  safeBoot();
 }
