@@ -1,0 +1,14 @@
+{
+  "expectedSentences": [
+    "The kernel is implemented in about thirty lines of Python, reproduced below.",
+    "Line seven is the only place where the sparsity pattern enters the computation.",
+    "We measured the runtime of this implementation on a single accelerator and report the numbers below.",
+    "The sparse kernel reaches the same accuracy as the dense baseline on every task that we tried.",
+    "Throughput improves by a factor of three at the longest sequence length in the suite."
+  ],
+  "expectedNonBody": [
+    "Notes on the Sparse Attention Kernel",
+    "Anonymous"
+  ],
+  "expectedSeams": []
+}

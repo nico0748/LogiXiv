@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0" xml:space="preserve">
+  <teiHeader xml:lang="en">
+    <fileDesc>
+      <titleStmt>
+        <title level="a" type="main">Block Sparse Attention for Long Documents</title>
+      </titleStmt>
+      <sourceDesc>
+        <biblStruct>
+          <analytic>
+            <author><persName><forename type="first">Jane</forename><surname>Doe</surname></persName></author>
+          </analytic>
+        </biblStruct>
+      </sourceDesc>
+    </fileDesc>
+    <profileDesc>
+      <abstract>
+        <div xmlns="http://www.tei-c.org/ns/1.0">
+          <p>
+            <s coords="1,53.80,200.50,240.10,9.50">We present a block-sparse attention kernel.</s>
+            <s coords="1,53.80,212.00,231.40,9.50">It reduces the quadratic cost of self-attention.</s>
+          </p>
+        </div>
+      </abstract>
+    </profileDesc>
+  </teiHeader>
+  <text xml:lang="en">
+    <body>
+      <div xmlns="http://www.tei-c.org/ns/1.0">
+        <head n="1.">Introduction</head>
+        <p>
+          <s coords="1,53.80,320.00,228.70,9.50">Long documents are expensive to process.</s>
+        </p>
+        <figure xml:id="fig_0">
+          <head>Figure 1</head>
+          <figDesc>
+            <s coords="1,53.80,500.00,180.00,9.50">Figure 1: Overview of the proposed pipeline.</s>
+          </figDesc>
+        </figure>
+      </div>
+      <div xmlns="http://www.tei-c.org/ns/1.0">
+        <head n="2.1.">Setup</head>
+        <p>
+          <s coords="2,53.80,120.00,200.00,9.50">We evaluate on three benchmarks.</s>
+        </p>
+        <formula xml:id="formula_0">
+          <s coords="2,53.80,180.00,150.00,9.50">y = softmax(QK^T / sqrt(d)) V</s>
+        </formula>
+      </div>
+    </body>
+  </text>
+  <facsimile>
+    <surface n="1" ulx="0.0" uly="0.0" lrx="595.0" lry="842.0"/>
+    <surface n="2" ulx="0.0" uly="0.0" lrx="595.0" lry="842.0"/>
+  </facsimile>
+</TEI>

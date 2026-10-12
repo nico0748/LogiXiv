@@ -1,39 +1,30 @@
 {
-  "name": "paperlens",
+  "name": "logixiv",
   "version": "0.1.0",
-  "description": "論文を読みながら、訳・用語・数式・読解メモを Markdown に残すローカルファーストのアプリ",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "build:single": "tsc && SINGLE=1 vite build",
-    "test": "vitest run",
-    "typecheck": "tsc",
-    "e2e": "node e2e/smoke.mjs",
-    "sample": "node scripts/make-sample.mjs"
-  },
-  "license": "MIT",
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.133.0",
-    "katex": "^0.16.47",
-    "pdfjs-dist": "^5.4.394",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
-  },
-  "devDependencies": {
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^5.2.0",
-    "pdf-lib": "^1.17.1",
-    "playwright": "^1.64.0",
-    "typescript": "^7.0.2",
-    "vite": "^7.3.7",
-    "vite-plugin-singlefile": "^2.3.3",
-    "vitest": "^3.2.7"
-  },
   "private": true,
+  "description": "論文PDFを1文単位で読むためのローカルファースト対訳リーダー",
+  "license": "MIT",
   "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/server",
+    "packages/mcp",
+    "apps/web",
+    "apps/viewer",
+    "apps/reader"
+  ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "build": "npm run build -w @logixiv/core && npm run build -w @logixiv/server && npm run build -w @logixiv/mcp && npm run build -w @logixiv/viewer && npm run build -w @logixiv/web && npm run build -w @logixiv/reader",
+    "typecheck": "tsc -b packages/core packages/server packages/mcp --pretty false && tsc -p apps/web --noEmit --pretty false && tsc -p apps/viewer --noEmit --pretty false && tsc -p apps/reader --noEmit --pretty false",
+    "test": "npm run test -w @logixiv/core && npm run test -w @logixiv/server && npm run test -w @logixiv/reader",
+    "test:e2e": "node --experimental-strip-types scripts/e2e-smoke.ts",
+    "dev": "npm run dev -w @logixiv/web",
+    "dev:reader": "npm run dev -w @logixiv/reader",
+    "start": "node packages/server/dist/cli.js",
+    "clean": "rm -rf packages/*/dist apps/*/dist packages/*/*.tsbuildinfo",
+    "measure": "npm run build -w @logixiv/core && node --experimental-strip-types scripts/measure-quality.ts"
   }
 }

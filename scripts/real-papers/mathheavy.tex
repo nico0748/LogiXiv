@@ -1,0 +1,113 @@
+% 数学の濃い 2 段組の論文。**この標本がいちばん大事**。
+%
+% 既存の 3 本は組版だけ実物で、中身から数学が抜けていた（onecolumn.tex には `$` が
+% 1 つも無く、twocolumn.tex にも 4 個しかない）。壊すものを取り除いた標本で 100% を
+% 出していたので、この経路でいちばん重い壊れ方が計測の網から漏れていた:
+% インライン数式を含む本文行を「別行立ての数式・表」として落とし、残った断片が
+% **文法の通る英文**に癒着する。実測（このファイルの原型）で本文 4 文が消え、
+% 残骸が "Same prose with inline Greek which proves the claim." になった。
+% もっともらしいので、訳を読む側には「論文がそう書いてある」としか見えない。
+%
+% ML・統計・物理の論文は、技術的な段落のほぼ全行にギリシャ文字か添字が入る。
+% ここではそれを再現する。
+%
+% 正解の取り出し方は twocolumn.tex と同じ（本文 1 文 = \s{...} を 1 行）。
+% インライン数式は \m{組版する TeX}{PDF に出る字面} で書く。第 2 引数は
+% pdftotext と突き合わせて検証されるので、解析器の出力から写してはいけない。
+\documentclass[10pt,twocolumn]{article}
+
+% 書体は既定の Computer Modern のまま（他の 3 本のように mathptmx で Times に
+% しない）。LaTeX の既定であり arXiv のプレプリントの多くがこれ、というだけでなく、
+% **添字の下がり方が書体で変わる**ため。Times では添字が本文行の許容量にぎりぎり
+% 収まってしまい、この標本で測りたい壊れ方（添字が独立した行になり、そこから
+% 塊まとめが本文を道連れにする）が再現しない。PDF は 80KB ほど大きくなる。
+\usepackage[letterpaper,margin=0.75in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{fancyhdr}
+
+\newcommand{\s}[1]{#1}
+\newcommand{\m}[2]{#1}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{Preprint. Under review.}
+\fancyfoot[C]{\thepage}
+
+\title{Ensemble Variance Does Not Calibrate Under Shift}
+\author{Jane Q. Doe}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\s{Deep ensembles are widely used to report predictive uncertainty.}
+\s{We show that a single rescaling of the ensemble variance cannot calibrate two shifts at once.}
+\s{The obstruction is the shared bias term, which the ensemble spread never sees.}
+\end{abstract}
+
+\section{Setting}
+
+% `$f_1,\dots,f_M$` は使わない。行内の "." を文の区切りに取られて 1 文が 2 つに割れる
+% （分割器の側の話で、この標本で測りたい版面の話ではない）。別途 sentences.ts へ報告済み。
+\s{An ensemble is a collection of predictors \m{$f_1$}{f1} through \m{$f_M$}{fM} fit independently from the same procedure.}
+% `$a + b$` の形も使わない。TeX の数式は演算子の前後を細い空きで組むので、
+% 文字片の隙間がしきい値に届かず "f ⋆ +b+εm" と詰まる。これも分割器の側の話で、
+% 別途 sentences.ts へ報告済み。
+\s{Each \m{$f_m$}{fm} decomposes into the Bayes predictor \m{$f^\star$}{f ⋆}, a shared bias \m{$b$}{b}, and member noise \m{$\varepsilon_m$}{εm}.}
+\s{The term \m{$b$}{b} is the component of the error common to all members, and \m{$\varepsilon_m$}{εm} is the member noise.}
+\s{The ensemble mean removes the second term at a rate of \m{$1/M$}{1/M} and leaves the first untouched.}
+
+\s{We assume access to a small labelled sample \m{$S$}{S} of size \m{$n$}{n} drawn from the deployment distribution.}
+\s{The reported variance is \m{$\alpha v$}{αv} for a single scalar \m{$\alpha$}{α} fitted on \m{$S$}{S}.}
+\s{Here \m{$v$}{v} denotes the empirical variance of the member predictions at the query point.}
+
+\section{The Obstruction}
+
+\s{Suppose two shifts \m{$Q_1$}{Q1} and \m{$Q_2$}{Q2} induce shared biases with norms \m{$\beta_1$}{β1} and \m{$\beta_2$}{β2} and identical member variance \m{$v$}{v}.}
+% 文末を `$\dots/M$.` の形にしない。大文字 1 文字の直後のピリオドが人名のイニシャルと
+% 区別できず、次の文と繋がる。添字と上付きが重なる `$\beta_i^2$` も、間に空白が入る。
+% どちらも分割器の側の話で、別途 sentences.ts へ報告済み。
+\s{Calibration under \m{$Q_i$}{Qi} requires the reported variance \m{$\alpha v$}{αv} to equal the true error under that shift.}
+\s{The true error is the squared bias norm plus the member term \m{$v/M$}{v/M }, so \m{$\alpha$}{α} is pinned by \m{$\beta_i$}{βi} and \m{$v$}{v}.}
+\s{Solving for \m{$\alpha$}{α} gives a distinct value for each \m{$i$}{i}, and since the norms differ the two values differ.}
+\s{Hence no single scalar calibrates both shifts, which proves the claim.}
+
+\s{The true squared error of the ensemble prediction at a point is given below, whereas the ensemble variance estimates only the second term.}
+
+\begin{equation}
+\mathbb{E}\bigl\|\bar{f}(x)-f^\star(x)\bigr\|^2 = \|b(x)\|^2 + \tfrac{1}{M}\mathbb{E}\|\varepsilon(x)\|^2 .
+\end{equation}
+
+\s{The first term is invisible to the ensemble no matter how many members we add to it.}
+\s{This is the whole of the problem, and it can be stated in a single line of text.}
+
+\section{Consequences}
+
+\s{A temperature fitted on one shift will be wrong on the next by a factor that grows with the bias gap.}
+\s{We measured the effect on three benchmarks and found the reported variance short by a factor of four.}
+\s{The gap widens as \m{$M$}{M} grows, because the member noise shrinks while the bias does not.}
+\s{Reporting the ensemble spread alone is therefore misleading under shift, and we recommend against it.}
+
+\begin{figure}
+\rule{\linewidth}{36pt}
+\caption{Reported versus true error for three shifts.}
+\end{figure}
+
+\s{We close by noting that the argument is not specific to deep networks.}
+\s{Any procedure whose members share a systematic error has the same obstruction.}
+
+\begin{thebibliography}{9}
+\bibitem{lak} B. Lakshminarayanan and A. Pritzel. Simple and scalable predictive uncertainty. In Proc. NeurIPS, 2017.
+\bibitem{ova} Y. Ovadia and E. Fertig. Can you trust your model's uncertainty? In Proc. NeurIPS, 2019.
+\end{thebibliography}
+
+\appendix
+\section{Proof of the Obstruction}
+
+\s{Assume the two calibration conditions hold at the same scalar and subtract them.}
+\s{The member variance cancels because it is identical under both shifts by assumption.}
+\s{What remains is an equality between the two squared bias norms, contradicting the assumption that they differ.}
+\s{The argument uses only the calibration conditions and no property of the predictor class.}
+
+\end{document}

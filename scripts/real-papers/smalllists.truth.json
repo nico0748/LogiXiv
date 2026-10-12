@@ -1,0 +1,17 @@
+{
+  "expectedSentences": [
+    "Sparse attention reduces the quadratic cost of long context models to a manageable level.",
+    "Our contributions are summarised in the following list.",
+    "• A block sparse attention kernel • An analysis of the memory traffic • A scheduler for mixed block sizes • Experiments on six public corpora • An open source reference implementation",
+    "We use the following notation throughout the paper.",
+    "Block a contiguous span of keys Pattern the set of blocks that a query attends to Budget the number of blocks per query Router the module that selects blocks Kernel the fused implementation on the accelerator",
+    "The original proposal is stated in the following terms, which we quote in full.",
+    "attention is all you need and memory is all you have so spend it where the mass is and nowhere else at all that is the whole of the method",
+    "The sparse kernel reaches the same accuracy as the dense baseline on every task that we tried."
+  ],
+  "expectedNonBody": [
+    "Notes on Block Selection",
+    "Anonymous"
+  ],
+  "expectedSeams": []
+}

@@ -1,0 +1,20 @@
+{
+  "expectedSentences": [
+    "We evaluate three configurations on the standard suite and report the average accuracy across five random seeds.",
+    "The estimator that we analyse in this section is and the weights are chosen so that the variance is minimised over the simplex.",
+    "We now state the main guarantee of the paper.",
+    "For every step size that satisfies the stated bound the iterates satisfy and the constant does not depend on the dimension of the problem.",
+    "Under these assumptions the analysis of the previous section applies verbatim.",
+    "The kernel is implemented once and reused for both training and inference in all of the experiments that we report.",
+    "Training with the sparse kernel from scratch converges in the same number of steps as the dense baseline, which we verified on three seeds."
+  ],
+  "expectedNonBody": [
+    "Block Sparse Attention",
+    "Anonymous",
+    "Accuracy and F1 on the held-out split."
+  ],
+  "expectedSeams": [
+    "The estimator that we analyse in this section is and the weights are chosen so that the variance is minimised over the simplex.",
+    "For every step size that satisfies the stated bound the iterates satisfy and the constant does not depend on the dimension of the problem."
+  ]
+}

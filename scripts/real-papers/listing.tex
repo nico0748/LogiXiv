@@ -1,0 +1,71 @@
+% `lstlisting`（`listings` パッケージ）のコードが本文に漏れる組み方。
+%
+% CS 系の論文では普通に出る環境。`algorithmic` は行番号 `1:` の形で塊として落とせるが、
+% `listings` は行番号が別の小さい書体で左に置かれ、しかも字形が取り出せず**空文字列**に
+% なることがあるので、その手掛かりが無い。すると行ごとに独立した判定になり、
+% 「英字比率 0.6 未満」という数式の条件を**一行おきに**跨いでコードが割れる。
+%
+% 直す前の実測（本文 3 文が 5 文になり、うち 3 文が原文に無い）:
+%
+%   `def sparse_attention (q , k , v , pattern ): mask = build_mask ( pattern , scores .`
+%   `softmax ( scores , dim = -1) weights = apply_dropout ( weights , p =0.1) We measured
+%    the runtime of this implementation on a single accelerator and report the numbers …`
+%
+% **最後の本文段落がコード断片と 1 文になる**ので、訳させると原文に無い文が返る。
+% 申告は 3 つとも low（継ぎ目の印なし・採録 100%・読み順 low）。
+%
+% コードは本文として取り出さないのが正しい（付物として残す）。ここで測るのは
+% 「コードが本文に混ざらないこと」と「本文 3 文がそのまま取れること」。
+%
+% 正解の取り出し方は他の real-papers/*.tex と同じ（本文 1 文 = \s{...} を 1 行）。
+\documentclass[10pt]{article}
+
+\usepackage{mathptmx}
+\usepackage[margin=2cm]{geometry}
+\usepackage{listings}
+\lstset{basicstyle=\ttfamily\small,numbers=left,numberstyle=\tiny,stepnumber=1,xleftmargin=2em}
+
+\newcommand{\s}[1]{#1}
+
+\title{Notes on the Sparse Attention Kernel}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Implementation}
+
+\s{The kernel is implemented in about thirty lines of Python, reproduced in Listing 1.}
+\s{Line seven is the only place where the sparsity pattern enters, and the rest of the code is the usual attention computation.}
+
+\begin{lstlisting}
+def sparse_attention(q, k, v, pattern):
+    scores = q @ k.transpose(-1, -2)
+    scores = scores / math.sqrt(q.shape[-1])
+    mask = build_mask(pattern, scores.shape)
+    scores = scores.masked_fill(mask, float("-inf"))
+    weights = torch.softmax(scores, dim=-1)
+    weights = apply_dropout(weights, p=0.1)
+    out = weights @ v
+    out = out.reshape(q.shape[0], -1)
+    out = out_proj(out)
+    out = layer_norm(out)
+    out = residual(out, q)
+    out = clip_values(out, lo=-10, hi=10)
+    out = cast_back(out, q.dtype)
+    out = record_stats(out, pattern)
+    out = maybe_checkpoint(out)
+    out = finalize(out)
+    return out
+\end{lstlisting}
+
+\s{We measured the runtime of this implementation on a single accelerator and report the numbers in the following section of the paper.}
+
+\section{Results}
+
+\s{The sparse kernel reaches the same accuracy as the dense baseline on every task that we tried.}
+\s{Throughput improves by a factor of three at the longest sequence length in the suite.}
+\s{The remaining gap to the theoretical peak is explained by the cost of building the mask.}
+
+\end{document}

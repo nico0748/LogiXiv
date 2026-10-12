@@ -1,0 +1,60 @@
+% 素の `\begin{verbatim}`（LaTeX 標準）。**本文と同じ大きさ**の `\ttfamily` で組まれる。
+%
+% 逐語ブロックの入口を「本文の文字高と 5% 以上違う」で決めていた頃、`listings` は
+% `\ttfamily\small` で組むのがふつうなので通ったが、`verbatim` は字高の差がゼロなので
+% 塊として見えず、コードが `body` と `formula` に一行おきに割れていた。
+%
+% 直す前の実測（本文 4 文が 4 文のままだが、うち 1 文が原文に無い）:
+%
+%   `def sparse_attention(q, k, v, pattern): scores = scores / math.sqrt(q.shape[-1])
+%    … return out We measured the runtime of this implementation on a single
+%    accelerator and report the numbers below.`
+%
+% **直後の本文段落までコードと 1 文になる**ので、訳させると原文に無い文が返る。
+% さらにコード 2 行だけが別に `formula` へ落ちて、コードとしても歯抜けになっていた。
+% 申告は 3 つとも low。
+%
+% 正解の取り出し方は他の real-papers/*.tex と同じ（本文 1 文 = \s{...} を 1 行）。
+\documentclass[10pt]{article}
+
+\usepackage{mathptmx}
+\usepackage[margin=2cm]{geometry}
+
+\newcommand{\s}[1]{#1}
+
+\title{Notes on the Sparse Attention Kernel}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Implementation}
+
+\s{The kernel is implemented in about thirty lines of Python, reproduced below.}
+\s{Line seven is the only place where the sparsity pattern enters the computation.}
+
+\begin{verbatim}
+def sparse_attention(q, k, v, pattern):
+    scores = q @ k.transpose(-1, -2)
+    scores = scores / math.sqrt(q.shape[-1])
+    mask = build_mask(pattern, scores.shape)
+    scores = scores.masked_fill(mask, float("-inf"))
+    weights = torch.softmax(scores, dim=-1)
+    weights = apply_dropout(weights, p=0.1)
+    out = weights @ v
+    out = out.reshape(q.shape[0], -1)
+    out = out_proj(out)
+    out = layer_norm(out)
+    out = residual(out, q)
+    return out
+\end{verbatim}
+
+\s{We measured the runtime of this implementation on a single accelerator and report the numbers below.}
+
+\section{Results}
+
+\s{The sparse kernel reaches the same accuracy as the dense baseline on every task that we tried.}
+\s{Throughput improves by a factor of three at the longest sequence length in the suite.}
+
+\end{document}

@@ -1,0 +1,34 @@
+{
+  "expectedSentences": [
+    "This report describes the greedy selection procedure in enough detail to reimplement it.",
+    "The procedure takes a set of query blocks and a set of key blocks and returns a mask.",
+    "It runs once per layer and its cost is dominated by a single pass over the block summaries.",
+    "We deliberately keep the procedure free of learned parameters so that it can be dropped into an existing model.",
+    "We follow the notation of prior work and write block summaries with a bar over the symbol.",
+    "Every block has the same number of positions, and the last block is padded when the sequence does not divide evenly.",
+    "We assume that the summaries are computed before the selection pass and are available in fast memory.",
+    "The mask is stored as a list of retained key block indices per query block rather than as a dense matrix.",
+    "The selection pass compares every query summary with every key summary.",
+    "This is quadratic in the number of blocks but the number of blocks is the sequence length divided by the block size.",
+    "With a block size of sixty four the selection matrix is four thousand times smaller than the attention matrix.",
+    "In wall clock terms the pass takes under two percent of the time of a dense attention call.",
+    "The procedure never returns an empty mask because the diagonal block is always retained.",
+    "It is deterministic given the summaries, so two runs on the same input produce the same mask.",
+    "Ties in the top scoring set are broken by the block index, which keeps the output stable across hardware.",
+    "Padded positions receive a summary of zero and therefore never enter the retained set.",
+    "Causal masking is applied after selection, so a retained block may contribute no positions at all.",
+    "This is wasteful in principle but costs less than filtering the block list on the fly.",
+    "The procedure is written for a single attention head and is launched once per head.",
+    "Sharing the mask across heads saves time but costs about one point of accuracy in our tests.",
+    "Sharing the mask across adjacent layers is almost free and we recommend it above eight thousand tokens.",
+    "We did not find a setting in which sharing across both heads and layers was worth the loss.",
+    "The report covers only the selection procedure and not the fused attention kernel.",
+    "Numerical behaviour under half precision summaries is discussed in the companion paper.",
+    "We have not evaluated the procedure on encoder decoder models."
+  ],
+  "expectedNonBody": [
+    "Greedy block selection",
+    "Technical Report"
+  ],
+  "expectedSeams": []
+}

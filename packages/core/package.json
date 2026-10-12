@@ -1,0 +1,14 @@
+{
+  "name": "@logixiv/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test --experimental-strip-types test/*.test.ts"
+  },
+  "devDependencies": { "typescript": "5.9.3", "@types/node": "22.18.1" }
+}

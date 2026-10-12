@@ -1,0 +1,34 @@
+{
+  "name": "@logixiv/reader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PaperLens: 論文を読みながら、訳・用語・数式・読解メモを Markdown に残すアプリ",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "build:single": "SINGLE=1 vite build",
+    "test": "node --test --experimental-strip-types src/lib/template.test.ts",
+    "e2e": "node e2e/smoke.mjs",
+    "sample": "node scripts/make-sample.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.133.0",
+    "katex": "0.16.47",
+    "pdfjs-dist": "5.4.394",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.1",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.1.1",
+    "pdf-lib": "1.17.1",
+    "playwright": "1.56.1",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vite-plugin-singlefile": "2.3.3"
+  }
+}

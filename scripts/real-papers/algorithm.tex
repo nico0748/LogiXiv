@@ -1,0 +1,101 @@
+% 擬似コードのある 2 段組論文。**表題を持たない**（\title / \maketitle を使わない）。
+%
+% ここで測りたい壊れ方:
+%   - algorithm 環境（フロートは [t]）の途中の行だけが本文に紛れ込む
+%   - しかもそれが order = 0 に来るので、表題の無い PDF では文書の**題名**になる
+%   - "1.1 Notation and Assumptions" のような小見出しが次の文に癒着する
+%
+% 正解の取り出し方は twocolumn.tex と同じ（本文 1 文 = \s{...} を 1 行）。
+\documentclass[10pt,twocolumn,a4paper]{article}
+
+\usepackage{mathptmx}
+\usepackage[margin=2cm,columnsep=12pt]{geometry}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+% 擬似コードをその場に固定する（[H]）。ML 系の論文でよく使われる置き方で、
+% フロートの直後に小見出しが来る配置が作れる。
+\restylefloat{algorithm}
+\usepackage{fancyhdr}
+
+\newcommand{\s}[1]{#1}
+
+% 小見出しを本文と同じ大きさの太字にする（IEEE / ACL 系のテンプレートの体裁）。
+% 文字の大きさが見出しの手掛かりにならなくなるので、見出しの判定が
+% 「番号の連番」と「上下の空き」だけで足りているかがここで試される。
+\makeatletter
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-2.5ex \@plus -1ex \@minus -.2ex}%
+  {0.8ex \@plus .2ex}%
+  {\normalfont\normalsize\bfseries}}
+\makeatother
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{Technical Report}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+
+\begin{document}
+
+\section{Greedy Block Selection}
+
+\s{This report describes the greedy selection procedure in enough detail to reimplement it.}
+\s{The procedure takes a set of query blocks and a set of key blocks and returns a mask.}
+\s{It runs once per layer and its cost is dominated by a single pass over the block summaries.}
+\s{We deliberately keep the procedure free of learned parameters so that it can be dropped into an existing model.}
+
+\subsection{Notation and Assumptions}
+
+\s{We follow the notation of prior work and write block summaries with a bar over the symbol.}
+\s{Every block has the same number of positions, and the last block is padded when the sequence does not divide evenly.}
+\s{We assume that the summaries are computed before the selection pass and are available in fast memory.}
+\s{The mask is stored as a list of retained key block indices per query block rather than as a dense matrix.}
+
+\begin{algorithm}[H]
+\caption{Greedy block selection}
+\label{alg:greedy}
+\begin{algorithmic}[1]
+\State $M \gets \emptyset$
+\For{each query block $i$}
+  \State $S \gets \textsc{TopK}(\bar{q}_i, \bar{K}, k)$
+  \State $M \gets M \cup \{(i, j) : j \in S\}$
+\EndFor
+\State \Return $M$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Cost of the Selection Pass}
+
+\s{The selection pass compares every query summary with every key summary.}
+\s{This is quadratic in the number of blocks but the number of blocks is the sequence length divided by the block size.}
+\s{With a block size of sixty four the selection matrix is four thousand times smaller than the attention matrix.}
+\s{In wall clock terms the pass takes under two percent of the time of a dense attention call.}
+
+\section{Correctness}
+
+\s{The procedure never returns an empty mask because the diagonal block is always retained.}
+\s{It is deterministic given the summaries, so two runs on the same input produce the same mask.}
+\s{Ties in the top scoring set are broken by the block index, which keeps the output stable across hardware.}
+
+\subsection{Padding and Masking}
+
+\s{Padded positions receive a summary of zero and therefore never enter the retained set.}
+\s{Causal masking is applied after selection, so a retained block may contribute no positions at all.}
+\s{This is wasteful in principle but costs less than filtering the block list on the fly.}
+
+\section{Practical Notes}
+
+\s{The procedure is written for a single attention head and is launched once per head.}
+\s{Sharing the mask across heads saves time but costs about one point of accuracy in our tests.}
+\s{Sharing the mask across adjacent layers is almost free and we recommend it above eight thousand tokens.}
+\s{We did not find a setting in which sharing across both heads and layers was worth the loss.}
+
+\section{Limitations}
+
+\s{The report covers only the selection procedure and not the fused attention kernel.}
+\s{Numerical behaviour under half precision summaries is discussed in the companion paper.}
+\s{We have not evaluated the procedure on encoder decoder models.}
+
+\end{document}

@@ -1,0 +1,86 @@
+% 行番号つきの投稿稿（`\usepackage{lineno}` + `\linenumbers`）。
+%
+% 査読稿・投稿稿・校正刷り（NeurIPS / ICLR / ACL の投稿稿、学術誌のゲラ）はこの形で、
+% この道具がいちばん読まれる対象そのもの。左余白の行番号が**本文の中に入り込んで
+% 全文が壊れていた**（実測: 本文 18 文すべて）:
+%
+%   `Sparse attention reduces the 2 Block Sparse Attention Under Review`
+%   `We evaluate three configurations on the stan- 4 dard benchmark suite …`
+%
+% 行番号が割り込むので行末ハイフンの結合も効かず `stan- 4 dard` が画面に残り、
+% 左外の細い帯が段の切れ目に見えて段組の検出まで狂っていた。壊れているのは訳ではなく
+% **原文**なので、画面から直す手段が無い。
+%
+% **本文は右の段まで届く長さにしてある。** もとの標本は 2 段組なのに本文が左の段で
+% 終わっていて右の段が空だったので、`lineno` が 2 段組で番号を**柱間**（＝ページの
+% 本文 x 範囲の内側）に落とす経路が一度も計測の網に掛かっていなかった。
+% 実測（この長さにした版）: 右段の番号が左段の行末に飲み込まれ
+% `We evaluate three configurations on the standard suite49` となり、
+% 行末ハイフンの結合も効かず `Informa-55 tion retrieval` が残った。申告は low のまま。
+%
+% 正解の取り出し方は他の real-papers/*.tex と同じ（本文 1 文 = \s{...} を 1 行）。
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage{mathptmx}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{lineno}
+\linenumbers
+
+\newcommand{\s}[1]{#1}
+
+\title{Block Sparse Attention Under Review}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+\s{Sparse attention reduces the quadratic cost of self-attention in long documents that exceed the usual context window.}
+\s{We evaluate three configurations on the standard benchmark suite and report the results in the following section.}
+\s{The results indicate a consistent improvement over the dense baseline across all of the datasets we considered.}
+\s{Our method scales to sequences of sixty-four thousand tokens without exhausting accelerator memory.}
+\s{Each block is processed independently before the aggregation step that combines the partial attention scores.}
+\s{We report the mean and the standard deviation over five random seeds for every configuration in the study.}
+\s{Prior work by Smith and colleagues introduced a related decomposition that we build upon in this paper.}
+\s{The state of the art model uses a hierarchical routing scheme with five levels of granularity.}
+
+\section{Method}
+
+\s{Large systems benefit most from stage nine of the proposed pipeline that we describe in this section.}
+\s{Sparse attention reduces the quadratic cost of self-attention in setting thirty for all of our runs.}
+\s{We evaluate configuration eleven on the test, and then report the results in the following table.}
+\s{Our block sparse kernel outperforms the dense baseline by twelve points overall in this configuration.}
+\s{Information retrieval benefits from the same sparsity pattern at greater depth in the encoder stack.}
+\s{Large systems benefit most from the earlier stages of the pipeline described in the previous paragraph.}
+
+\s{The routing scheme assigns every query block to a small set of key blocks chosen by a learned scorer.}
+\s{We train the scorer jointly with the rest of the network using a straight-through estimator.}
+\s{Ablations show that removing the scorer costs four points of accuracy on the longest split.}
+\s{The kernel is implemented once in a portable fashion and reused for both training and inference.}
+\s{Training from scratch with the sparse kernel converges in the same number of steps as the dense baseline.}
+\s{Memory use grows linearly with the sequence length rather than quadratically as in the dense case.}
+\s{We measure wall clock time on a single accelerator with the batch size fixed at thirty two.}
+\s{The speedup over the dense baseline reaches a factor of six at sixty-four thousand tokens.}
+
+\section{Experiments}
+
+\s{We compare against four published baselines under an identical training budget and tokeniser.}
+\s{Every number in this section is the mean over five seeds with the standard deviation in brackets.}
+\s{The largest gain appears on the retrieval task where long range dependencies matter most.}
+\s{On the short context tasks the sparse and the dense models are statistically indistinguishable.}
+\s{We also report results with the scorer frozen after the first epoch of training.}
+\s{Freezing the scorer early loses one point of accuracy but halves the cost of a training step.}
+\s{The block size of sixty four was chosen on the validation split and kept fixed thereafter.}
+\s{A smaller block size improves accuracy slightly but the kernel becomes memory bound.}
+
+\section{Discussion}
+
+\s{The results support the view that most attention mass is concentrated in a few blocks.}
+\s{We did not observe any degradation on the tasks that require dense global mixing.}
+\s{A limitation of the present study is that we evaluate a single model family at one scale.}
+\s{Extending the analysis to encoder decoder architectures is left for future work.}
+\s{We release the kernel and the training scripts so that the results can be reproduced.}
+
+\end{document}

@@ -1,0 +1,97 @@
+% 1 段組の論文（プレプリント体裁）。2 段組で起きる崩れの対照として要る。
+% 段組を見ない実装に戻ったときでも 1 段組は通ってしまうので、ここが 100% でも
+% 何の保証にもならない — そのことを可視化しておくための対照群。
+%
+% 正解の取り出し方は twocolumn.tex と同じ（本文 1 文 = \s{...} を 1 行）。
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{mathptmx}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath}
+\usepackage{fancyhdr}
+\usepackage{booktabs}
+
+\newcommand{\s}[1]{#1}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{Sparse Attention Notes}
+\fancyfoot[C]{\thepage}
+
+\title{Notes on Selecting Attention Blocks}
+\author{Mei Tanaka}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\s{These notes collect the design decisions behind the block selection rule.}
+\s{They are written for readers who have already seen the main paper and want the details.}
+\s{We cover the choice of block size, the treatment of padding and the cost of the selection pass.}
+\end{abstract}
+
+\section{Block Size}
+
+\s{The block size controls the trade off between the cost of selection and the granularity of the pattern.}
+\s{Small blocks approximate dense attention closely but make the selection matrix large.}
+\s{Large blocks make the selection cheap and force the kernel to read positions it does not need.}
+\s{We measured both effects on a single node with eight accelerators.}
+\s{A block size of sixty four was the best compromise on that hardware.}
+
+\s{The optimal block size depends on the memory system rather than on the model.}
+\s{On a machine with a larger cache the optimum moved to one hundred and twenty eight.}
+\s{We therefore expose the block size as a configuration value rather than hard coding it.}
+
+\section{Padding}
+
+\s{Sequences rarely divide evenly into blocks, so the last block is padded.}
+\s{Padded positions are given a summary of zero and a score of negative infinity.}
+\s{This keeps the padded block out of the retained set without a separate branch in the kernel.}
+\s{The same trick is used for the causal mask inside a retained block.}
+
+\s{The cost of the selection pass is the product of the number of query blocks and key blocks.}
+\begin{equation}
+  C = \frac{n^2}{b^2} \, d ,
+  \label{eq:cost}
+\end{equation}
+\s{Here n is the sequence length, b is the block size and d is the head dimension.}
+
+\begin{table}[t]
+  \centering
+  \begin{tabular}{lrr}
+    \toprule
+    Block size & Selection cost & Accuracy \\
+    \midrule
+    16 & 12.4 & 88.9 \\
+    64 & 1.9 & 88.7 \\
+    256 & 0.4 & 85.1 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Cost of the selection pass in percent of a dense attention call, and accuracy on the held out split.}
+  \label{tab:block}
+\end{table}
+
+\section{Discussion}
+
+\s{The selection rule is simple enough that it can be reimplemented in an afternoon.}
+\s{Most of the engineering effort went into the fused kernel rather than into the rule itself.}
+\s{We expect better summaries to matter more than a better selection rule \cite{tanaka2023blocks}.}
+\s{A learned summary would add parameters, which we wanted to avoid for this release.}
+
+\begin{thebibliography}{9}
+\bibitem{tanaka2023blocks}
+M. Tanaka. Block structured kernels. In Proc. ICML, pages 991--1002, 2023.
+\bibitem{roe2025efficient}
+R. Roe. Efficient attention in practice. Journal of ML, 12(3):45--67, 2025.
+\end{thebibliography}
+
+\appendix
+
+\section{Measurement Protocol}
+
+\s{Every number in these notes is the mean of five runs.}
+\s{We discard the first run of each configuration because it includes kernel compilation.}
+\s{The machine was otherwise idle and the clocks were locked to their base frequency.}
+
+\end{document}
