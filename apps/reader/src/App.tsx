@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { SettingsPage } from "./components/SettingsPage.tsx";
 import { GraphView } from "./components/GraphView.tsx";
 import { PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView.tsx";
 import { type Busy, RightPanel, type Tab } from "./components/RightPanel.tsx";
@@ -13,36 +14,31 @@ import {
   toTex,
   translate,
 } from "./lib/claude.ts";
-import { type Annotations, emptyAnnotations, newId } from "./lib/model.ts";
-import {
-  type PaperSummary,
-  collectGraph,
-  ensureLayout,
-  importPaper,
-  listPapers,
-  loadAnnotations,
-  loadNote,
-  loadPdf,
-  saveAnnotations,
-  writeField,
-  writeStatus,
-} from "./lib/papers.ts";
+import { type Backend, type Link, VaultBackend, connectServer } from "./lib/backend.ts";
+import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId } from "./lib/model.ts";
+import type { PaperSummary } from "./lib/papers.ts";
 import { openPdf } from "./lib/pdf.ts";
 import { getFrontmatter } from "./lib/template.ts";
-import type { Vault } from "./lib/vault.ts";
 
 type SaveState = { kind: "idle" | "saving" | "saved" } | { kind: "error"; msg: string };
 
 export function App() {
-  const [vault, setVault] = useState<Vault | null>(null);
-  if (!vault) return <Welcome onOpen={setVault} />;
-  return <Workspace vault={vault} onClose={() => setVault(null)} />;
+  // ローカルサーバーで動いていればその保存先を使う。単体の HTML として開いたときは、保管庫を選んでもらう
+  const [backend, setBackend] = useState<Backend | null | undefined>(undefined);
+  useEffect(() => {
+    void connectServer().then((b) => setBackend(b));
+  }, []);
+  if (backend === undefined) return <div className="welcome" aria-busy="true" />;
+  if (!backend) return <Welcome onOpen={(v) => setBackend(new VaultBackend(v))} />;
+  return <Workspace key={backend.name} backend={backend} onClose={backend.kind === "browser" ? () => setBackend(null) : undefined} />;
 }
 
-function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
+type View = "paper" | "graph" | "settings";
+
+function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => void }) {
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
-  const [view, setView] = useState<"paper" | "graph">("paper");
+  const [view, setView] = useState<View>("paper");
   const [pdf, setPdf] = useState<ArrayBuffer | null>(null);
   const [ann, setAnn] = useState<Annotations>(emptyAnnotations());
   const [note, setNote] = useState("");
@@ -54,12 +50,16 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
   const [ai, setAi] = useState<AiSettings>(loadAiSettings);
   const [dialog, setDialog] = useState<"settings" | "template" | null>(null);
   const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number } | null>(null);
-  const [links, setLinks] = useState<{ paper: string; term: string }[]>([]);
+  const [links, setLinks] = useState<Link[]>([]);
   const wide = typeof window === "undefined" || window.innerWidth > 900;
   const [leftOpen, setLeftOpen] = useState(wide);
   const [rightOpen, setRightOpen] = useState(wide);
   const fileRef = useRef<HTMLInputElement>(null);
   const annRef = useRef(ann);
+  /** 保存先にある（と分かっている）注釈。画面での変更は、これとの差分として保存する */
+  const baseRef = useRef(ann);
+  const currentRef = useRef(current);
+  currentRef.current = current;
   const lastNote = useRef("");
   const timers = useRef(new Map<string, number>());
   const contexts = useRef(new Map<string, string>());
@@ -68,17 +68,16 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
 
   // 動作確認用。URL に #debug を付けたときだけ保管庫を参照できるようにする
   useEffect(() => {
-    if (location.hash === "#debug") (window as unknown as { __vault: Vault }).__vault = vault;
-  }, [vault]);
+    if (location.hash === "#debug" && backend instanceof VaultBackend) (window as unknown as { __vault: unknown }).__vault = backend.vault;
+  }, [backend]);
   const title = getFrontmatter(note).title || papers.find((p) => p.id === current)?.title || "";
   const status = getFrontmatter(note).status || "未読";
 
   const refresh = useCallback(async () => {
-    await ensureLayout(vault);
-    const list = await listPapers(vault);
+    const list = await backend.listPapers();
     setPapers(list);
     return list;
-  }, [vault]);
+  }, [backend]);
 
   useEffect(() => {
     void refresh().then((list) => list[0] && setCurrent((c) => c ?? list[0].id));
@@ -91,12 +90,13 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
     setPdf(null);
     setActiveId(null);
     setBusy({});
-    void Promise.all([loadPdf(vault, current), loadAnnotations(vault, current), loadNote(vault, current)]).then(
+    void Promise.all([backend.loadPdf(current), backend.loadAnnotations(current), backend.loadNote(current)]).then(
       ([p, a, n]) => {
         if (cancelled) return;
         setPdf(p);
         setAnn(a);
         annRef.current = a;
+        baseRef.current = a;
         setNote(n);
         lastNote.current = n;
         setNoteKey(`${current}-${Date.now()}`);
@@ -105,30 +105,60 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, [vault, current]);
+  }, [backend, current]);
 
   // 別のアプリ（Obsidian など）でノートを書き換えたら読み直す
-  useEffect(() => {
-    if (!current) return;
-    const onFocus = async () => {
-      try {
-        const n = await loadNote(vault, current);
-        if (n !== lastNote.current) {
-          lastNote.current = n;
-          setNote(n);
-          setNoteKey(`${current}-${Date.now()}`);
-        }
-      } catch {
-        // 読めないときは何もしない。次に保存するときに再度読み直す
+  const reloadNote = useCallback(async () => {
+    const id = currentRef.current;
+    if (!id) return;
+    try {
+      const n = await backend.loadNote(id);
+      if (n !== lastNote.current && id === currentRef.current) {
+        lastNote.current = n;
+        setNote(n);
+        setNoteKey(`${id}-${Date.now()}`);
       }
-    };
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [vault, current]);
+    } catch {
+      // 読めないときは何もしない。次に保存するときに再度読み直す
+    }
+  }, [backend]);
+
+  /** 保存先の注釈を読み直し、まだ保存していない画面の変更を上に重ねる。 */
+  const reloadAnnotations = useCallback(async () => {
+    const id = currentRef.current;
+    if (!id) return;
+    const fresh = await backend.loadAnnotations(id);
+    if (id !== currentRef.current) return;
+    const mine = diffAnnotations(baseRef.current, annRef.current);
+    baseRef.current = fresh;
+    const next = applyOps(fresh, mine);
+    annRef.current = next;
+    setAnn(next);
+  }, [backend]);
 
   useEffect(() => {
-    if (view === "graph") void collectGraph(vault, papers).then(setLinks);
-  }, [view, vault, papers]);
+    window.addEventListener("focus", reloadNote);
+    return () => window.removeEventListener("focus", reloadNote);
+  }, [reloadNote]);
+
+  // MCP サーバー（AI エージェント）や Obsidian による変更を、その場で画面に映す
+  useEffect(
+    () =>
+      backend.subscribe((e) => {
+        if (e.kind === "config") return location.reload();
+        if (e.kind === "papers" || e.kind === "note") void refresh();
+        if (e.paper && e.paper === currentRef.current) {
+          if (e.kind === "note") void reloadNote();
+          if (e.kind === "annotations") void reloadAnnotations().catch(() => undefined);
+        }
+        if (view === "graph" && (e.kind === "annotations" || e.kind === "papers")) void backend.graph().then(setLinks);
+      }),
+    [backend, refresh, reloadNote, reloadAnnotations, view],
+  );
+
+  useEffect(() => {
+    if (view === "graph") void backend.graph().then(setLinks);
+  }, [view, backend, papers]);
 
   const debounce = (key: string, fn: () => Promise<void>, ms = 500) => {
     const t = timers.current.get(key);
@@ -158,21 +188,33 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
       const next = fn(annRef.current);
       annRef.current = next;
       setAnn(next);
-      debounce(`ann-${id}`, async () => applyNote(await saveAnnotations(vault, id, annRef.current)));
+      debounce(`ann-${id}`, async () => {
+        // 保存先と画面の差分だけを送る。AI エージェントが同時に足した項目は消えない
+        const sent = annRef.current;
+        const ops = diffAnnotations(baseRef.current, sent);
+        if (!ops.length) return;
+        const r = await backend.changeAnnotations(id, ops);
+        if (id !== currentRef.current) return;
+        baseRef.current = r.annotations;
+        const merged = applyOps(r.annotations, diffAnnotations(sent, annRef.current));
+        annRef.current = merged;
+        setAnn(merged);
+        applyNote(r.note);
+      });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [current, vault],
+    [current, backend],
   );
 
   const onField = (field: string, value: string) => {
     if (!current) return;
     const id = current;
-    debounce(`f-${id}-${field}`, async () => applyNote(await writeField(vault, id, field, value)));
+    debounce(`f-${id}-${field}`, async () => applyNote(await backend.writeField(id, field, value)));
   };
 
   const onStatus = async (s: string) => {
     if (!current) return;
-    applyNote(await writeStatus(vault, current, s));
+    applyNote(await backend.writeMeta(current, "status", s));
     setPapers((ps) => ps.map((p) => (p.id === current ? { ...p, status: s } : p)));
   };
 
@@ -275,7 +317,7 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
     } catch {
       // 題名が取れなくてもファイル名で取り込む
     }
-    const id = await importPaper(vault, f.name, data, t);
+    const id = await backend.importPaper(f.name, data, t);
     await refresh();
     setView("paper");
     setCurrent(id);
@@ -286,24 +328,35 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
   const jump = (page: number, y: number) => setJumpTo({ page, y, n: Date.now() });
 
   const saveLabel =
-    save.kind === "saving" ? "保存しています" : save.kind === "saved" ? (vault.persistent ? "フォルダに保存しました" : "保存しました（メモリ）") : save.kind === "error" ? `保存できませんでした: ${save.msg}` : "";
+    save.kind === "saving" ? "保存しています" : save.kind === "saved" ? (backend.persistent ? "フォルダに保存しました" : "保存しました（メモリ）") : save.kind === "error" ? `保存できませんでした: ${save.msg}` : "";
 
-  const cls = ["app", leftOpen ? "show-left" : "left-closed", rightOpen ? "show-right" : "right-closed"].join(" ");
+  const page = view === "settings";
+  const cls = ["app", page ? "page-mode" : "", leftOpen ? "show-left" : "left-closed", rightOpen ? "show-right" : "right-closed"].join(" ");
+  const crumb = view === "settings" ? " / 設定" : view === "graph" ? " / グラフ" : title ? ` / ${title}` : "";
 
   return (
     <div className={cls}>
       <header className="topbar">
         <button className="icon-btn" aria-label={leftOpen ? "論文一覧を閉じる" : "論文一覧を開く"} aria-expanded={leftOpen} onClick={() => setLeftOpen((v) => !v)}>☰</button>
         <div className="brand"><span className="brand-mark" aria-hidden="true">PL</span>PaperLens</div>
-        <span className="crumb">{vault.name}{view === "paper" && title ? ` / ${title}` : view === "graph" ? " / グラフ" : ""}</span>
+        <span className="crumb">{backend.name}{crumb}</span>
         <span className="spacer" />
         <span className={`save-state${save.kind === "error" ? " err" : ""}`} role="status">{saveLabel}</span>
-        {vault.persistent && current && view === "paper" && (
-          <a className="btn text sm" href={`obsidian://open?vault=${encodeURIComponent(vault.name)}&file=${encodeURIComponent(`papers/${current}/note.md`)}`}>Obsidian で開く</a>
+        {backend.persistent && current && view === "paper" && (
+          <a className="btn text sm" href={`obsidian://open?vault=${encodeURIComponent(backend.name)}&file=${encodeURIComponent(`papers/${current}/note.md`)}`}>Obsidian で開く</a>
         )}
         <ThemeToggle />
         <button className="icon-btn" aria-label={rightOpen ? "補足情報を閉じる" : "補足情報を開く"} aria-expanded={rightOpen} onClick={() => setRightOpen((v) => !v)}>▤</button>
       </header>
+
+      <nav className="rail" aria-label="主要メニュー">
+        {RAIL.map((r) => (
+          <button key={r.id} className="rail-item" aria-current={view === r.id ? "page" : undefined} onClick={() => setView(r.id)}>
+            <RailIcon name={r.id} />
+            <span>{r.label}</span>
+          </button>
+        ))}
+      </nav>
 
       <nav className="left" aria-label="論文一覧">
         <div className="pane-head">
@@ -331,12 +384,15 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
           </button>
           <button className="btn text sm" onClick={() => setDialog("template")}>テンプレートを編集</button>
           <button className="btn text sm" onClick={() => setDialog("settings")}>Claude の設定</button>
-          <button className="btn text sm" onClick={onClose}>別の保管庫を開く</button>
+          <button className="btn text sm mobile-only" onClick={() => setView("settings")}>設定（保存先・AI エージェント）</button>
+          {onClose && <button className="btn text sm" onClick={onClose}>別の保管庫を開く</button>}
         </div>
       </nav>
 
       <main className="center" aria-label="論文">
-        {view === "graph" ? (
+        {view === "settings" ? (
+          <SettingsPage backend={backend} onOpenClaude={() => setDialog("settings")} onOpenTemplate={() => setDialog("template")} onClose={onClose} aiReady={aiReady} />
+        ) : view === "graph" ? (
           <GraphView papers={papers} links={links} onOpen={(id) => { setCurrent(id); setView("paper"); }} />
         ) : pdf ? (
           <PdfView data={pdf} highlights={ann.highlights} activeId={activeId} onAction={onAction} onHighlightClick={(id) => { setActiveId(id); setTab("translate"); setRightOpen(true); }} jumpTo={jumpTo} />
@@ -380,8 +436,27 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
           onSave={(s) => { setAi(s); saveAiSettings(s); setDialog(null); }}
         />
       )}
-      {dialog === "template" && <TemplateDialog vault={vault} onClose={() => setDialog(null)} />}
+      {dialog === "template" && <TemplateDialog backend={backend} onClose={() => setDialog(null)} />}
     </div>
+  );
+}
+
+const RAIL: { id: View; label: string }[] = [
+  { id: "paper", label: "論文" },
+  { id: "graph", label: "グラフ" },
+  { id: "settings", label: "設定" },
+];
+
+function RailIcon({ name }: { name: View }) {
+  const d = {
+    paper: "M6 3h9l5 5v13H6z M15 3v5h5 M9 13h8 M9 17h8",
+    graph: "M6 7a2 2 0 1 0 0-.01 M18 6a2 2 0 1 0 0-.01 M12 18a2 2 0 1 0 0-.01 M7.5 8l3.5 8.5 M16.5 7.5l-3.5 9 M8 6.5h8",
+    settings: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M12 2v3 M12 19v3 M2 12h3 M19 12h3 M4.9 4.9l2.1 2.1 M17 17l2.1 2.1 M4.9 19.1L7 17 M17 7l2.1-2.1",
+  }[name];
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
   );
 }
 

@@ -159,11 +159,14 @@ Introduction と Results に出てくれば、1 件の訳が両方に反映さ�
 ## PaperLens（読解ノートアプリ）
 
 `apps/reader` には、論文を読みながら訳・用語・数式・読解メモを Markdown のノートに残すアプリ PaperLens がある。
-LogiXiv のサーバーや GROBID は使わず、選んだフォルダに直接保存する。
+LogiXiv のサーバーや GROBID は使わず、保存先フォルダ（Obsidian の保管庫として開ける）に直接保存する。
+ローカルサーバー＋デスクトップ版（Electron）＋ MCP サーバーの構成で、AI エージェントからもすべての操作ができる。
 
 ```bash
 npm install
-npm run dev:reader   # http://localhost:5173 を Chrome か Edge で開く
+cd apps/reader
+npm run app          # デスクトップ版
+# または npm run build && npm start で http://127.0.0.1:5175 を開く
 ```
 
 ほかの起動方法と使い方は [apps/reader/README.md](apps/reader/README.md)、設計は [apps/reader/docs/design.md](apps/reader/docs/design.md) にある。
@@ -191,7 +194,7 @@ packages/server   ローカル API（GROBIDプロキシ、ファイルストア�
 packages/mcp      Claude 用 MCP サーバー（stdio、ツール11個＋プロンプト1個）
 apps/web          Vite + React の本体 UI
 apps/viewer       書き出しHTMLに埋め込む単一ファイルビューア（pdf.js 同梱）
-apps/reader       PaperLens。読解ノートを Markdown で残すアプリ（フォルダに直接保存）
+apps/reader       PaperLens。読解ノートを Markdown で残すアプリ（ローカルサーバー・デスクトップ版・MCP サーバー）
 ```
 
 データは `~/.logixiv/documents/<id>/` に `document.json` と `source.pdf` を置くだけ。DB は無い。

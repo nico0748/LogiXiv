@@ -8,4 +8,6 @@ export default defineConfig({
   build: { target: "es2022", outDir: process.env.SINGLE ? "dist-single" : "dist" },
   worker: { format: "iife" },
   assetsInclude: ["**/*.pdf"],
+  // npm run dev では、API をローカルサーバー（scripts/dev.mjs が起動する）へ中継する
+  server: { proxy: { "/api": "http://127.0.0.1:5175" } },
 });

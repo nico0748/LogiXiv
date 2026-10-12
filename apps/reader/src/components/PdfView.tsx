@@ -293,6 +293,8 @@ function PageView({
         <div style={{ position: "absolute", inset: 0, zIndex: 3, pointerEvents: "none" }}>
           {highlights.map((hl) => {
             const r = hl.rects[0];
+            // 位置が分からないマーカー（AI エージェントが本文から見つけられなかったもの）は、訳タブにだけ出す
+            if (!r) return null;
             return (
               <button
                 key={hl.id}

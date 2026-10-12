@@ -1,0 +1,5 @@
+dist-server/
+release/
+# 開発時の保存先と設定（個人のデータ）
+data/
+paperlens.config.json

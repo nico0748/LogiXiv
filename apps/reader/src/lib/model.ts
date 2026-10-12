@@ -74,7 +74,7 @@ export function newId(prefix: string) {
 
 export function renderHighlights(list: Highlight[]): string {
   return [...list]
-    .sort((a, b) => a.page - b.page || a.rects[0]?.y - b.rects[0]?.y)
+    .sort((a, b) => a.page - b.page || (a.rects[0]?.y ?? 0) - (b.rects[0]?.y ?? 0))
     .map((h) => {
       const lines = [
         `> [!quote] p.${h.page}（${MARKER_LABEL[h.color]}）`,
@@ -119,4 +119,64 @@ function quote(text: string) {
     .trim()
     .split("\n")
     .map((l) => `> ${l}`);
+}
+
+// --- 注釈の差分 -------------------------------------------------------------
+// 画面と AI エージェント（MCP）が同じ論文を同時に触っても上書きし合わないように、
+// 注釈は「丸ごと保存」ではなく「追加・更新・削除の操作」で書き込む。
+// 書き込む側は保存直前にファイルを読み直し、そこへ操作を当てる。
+
+export type ListName = "highlights" | "terms" | "equations";
+type Item<L extends ListName> = Annotations[L][number];
+
+export type AnnotationOp =
+  | { op: "add"; list: ListName; item: Highlight | Term | Equation }
+  | { op: "update"; list: ListName; id: string; patch: Partial<Highlight & Term & Equation> }
+  | { op: "remove"; list: ListName; id: string };
+
+export const LISTS: ListName[] = ["highlights", "terms", "equations"];
+
+/** マーカーは末尾に、用語と数式は先頭に足す（画面で新しいものが上に来る並び）。 */
+const PREPEND: Record<ListName, boolean> = { highlights: false, terms: true, equations: true };
+
+export function applyOps(a: Annotations, ops: AnnotationOp[]): Annotations {
+  const out: Annotations = { ...a, highlights: [...a.highlights], terms: [...a.terms], equations: [...a.equations] };
+  for (const op of ops) {
+    const list = out[op.list] as Item<ListName>[];
+    if (op.op === "add") {
+      const i = list.findIndex((x) => x.id === op.item.id);
+      if (i >= 0) list[i] = { ...list[i], ...op.item } as Item<ListName>;
+      else if (PREPEND[op.list]) list.unshift(op.item);
+      else list.push(op.item);
+    } else if (op.op === "update") {
+      const i = list.findIndex((x) => x.id === op.id);
+      if (i >= 0) list[i] = { ...list[i], ...op.patch, id: op.id } as Item<ListName>;
+    } else {
+      const i = list.findIndex((x) => x.id === op.id);
+      if (i >= 0) list.splice(i, 1);
+    }
+  }
+  return out;
+}
+
+/** base から next への変化を操作の列にする。 */
+export function diffAnnotations(base: Annotations, next: Annotations): AnnotationOp[] {
+  const ops: AnnotationOp[] = [];
+  for (const list of LISTS) {
+    const before = new Map((base[list] as Item<ListName>[]).map((x) => [x.id, x]));
+    const after = next[list] as Item<ListName>[];
+    const ids = new Set(after.map((x) => x.id));
+    for (const x of before.values()) if (!ids.has(x.id)) ops.push({ op: "remove", list, id: x.id });
+    const added = after.filter((x) => !before.has(x.id));
+    // 先頭に足す一覧は、逆順に足すと画面と同じ並びになる
+    for (const x of PREPEND[list] ? [...added].reverse() : added) ops.push({ op: "add", list, item: x });
+    for (const x of after) {
+      const b = before.get(x.id);
+      if (!b || JSON.stringify(b) === JSON.stringify(x)) continue;
+      const patch: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(x)) if (JSON.stringify((b as unknown as Record<string, unknown>)[k]) !== JSON.stringify(v)) patch[k] = v;
+      ops.push({ op: "update", list, id: x.id, patch });
+    }
+  }
+  return ops;
 }

@@ -75,7 +75,7 @@ export function RightPanel(p: Props) {
 // --- 訳 -------------------------------------------------------------------
 
 function TranslateList(p: Props) {
-  const list = [...p.ann.highlights].sort((a, b) => a.page - b.page || a.rects[0].y - b.rects[0].y);
+  const list = [...p.ann.highlights].sort((a, b) => a.page - b.page || (a.rects[0]?.y ?? 0) - (b.rects[0]?.y ?? 0));
   const refs = useRef(new Map<string, HTMLDivElement>());
   useEffect(() => {
     if (p.activeId) refs.current.get(p.activeId)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -101,7 +101,7 @@ function TranslateList(p: Props) {
           >
             <div className="card-head">
               <span className={`dot ${h.color}`} aria-hidden="true" />
-              <button className="btn text sm" style={{ padding: 0, minHeight: 0 }} onClick={() => { p.setActive(h.id); p.jump(h.page, h.rects[0].y); }}>
+              <button className="btn text sm" style={{ padding: 0, minHeight: 0 }} onClick={() => { p.setActive(h.id); p.jump(h.page, h.rects[0]?.y ?? 0); }}>
                 p.{h.page}
               </button>
               <span>{MARKER_LABEL[h.color]}</span>

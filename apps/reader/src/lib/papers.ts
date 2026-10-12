@@ -9,15 +9,19 @@
 
 import { DEFAULT_TEMPLATE } from "./defaultTemplate.ts";
 import {
+  type AnnotationOp,
   type Annotations,
+  applyOps,
   emptyAnnotations,
   renderEquations,
   renderHighlights,
   renderTerms,
 } from "./model.ts";
 import {
+  type FieldDef,
   fillPlaceholders,
   getFrontmatter,
+  parseFields,
   setField,
   setFrontmatter,
   setList,
@@ -34,9 +38,15 @@ export interface PaperSummary {
   year: string;
 }
 
-const notePath = (id: string) => `${PAPERS_DIR}/${id}/note.md`;
-const pdfPath = (id: string) => `${PAPERS_DIR}/${id}/paper.pdf`;
-const dataPath = (id: string) => `${PAPERS_DIR}/${id}/paperlens.json`;
+export const notePath = (id: string) => `${PAPERS_DIR}/${id}/note.md`;
+export const pdfPath = (id: string) => `${PAPERS_DIR}/${id}/paper.pdf`;
+export const dataPath = (id: string) => `${PAPERS_DIR}/${id}/paperlens.json`;
+
+/** 論文 ID はフォルダ名そのもの。保管庫の外を指す ID は受け付けない。 */
+export function checkId(id: string) {
+  if (!id || /[\\/]/.test(id) || id === "." || id === "..") throw new Error(`論文 ID が正しくありません: ${id}`);
+  return id;
+}
 
 export async function ensureLayout(vault: Vault) {
   if (!(await vault.exists(TEMPLATE_PATH))) {
@@ -105,16 +115,16 @@ export async function importPaper(
 }
 
 export async function loadPdf(vault: Vault, id: string) {
-  return vault.readBinary(pdfPath(id));
+  return vault.readBinary(pdfPath(checkId(id)));
 }
 
 export async function loadNote(vault: Vault, id: string) {
-  return vault.readText(notePath(id));
+  return vault.readText(notePath(checkId(id)));
 }
 
 export async function loadAnnotations(vault: Vault, id: string): Promise<Annotations> {
   try {
-    const parsed = JSON.parse(await vault.readText(dataPath(id))) as Annotations;
+    const parsed = JSON.parse(await vault.readText(dataPath(checkId(id)))) as Annotations;
     return { ...emptyAnnotations(), ...parsed };
   } catch {
     return emptyAnnotations();
@@ -126,26 +136,28 @@ export async function loadAnnotations(vault: Vault, id: string): Promise<Annotat
  * 書き込む直前にファイルを読み直し、指定した範囲だけを書き換える。
  * Obsidian など別のアプリで同時に編集していても、範囲外の変更は残る。
  */
-// 同じノートへの書き込みは順番に処理する。読み直しと書き込みの間に別の更新が入らないようにする。
+// 同じファイルへの書き込みは順番に処理する。読み直しと書き込みの間に別の更新が入らないようにする。
 const queues = new Map<string, Promise<unknown>>();
+
+function serial<T>(key: string, job: () => Promise<T>): Promise<T> {
+  const prev = queues.get(key) ?? Promise.resolve();
+  const next = prev.catch(() => undefined).then(job);
+  queues.set(key, next);
+  return next;
+}
 
 export function updateNote(
   vault: Vault,
   id: string,
   edit: (md: string) => string,
 ): Promise<string> {
-  const path = notePath(id);
-  const prev = queues.get(path) ?? Promise.resolve();
-  const job = prev
-    .catch(() => undefined)
-    .then(async () => {
-      const current = await vault.readText(path);
-      const next = edit(current);
-      if (next !== current) await vault.writeText(path, next);
-      return next;
-    });
-  queues.set(path, job);
-  return job;
+  const path = notePath(checkId(id));
+  return serial(path, async () => {
+    const current = await vault.readText(path);
+    const next = edit(current);
+    if (next !== current) await vault.writeText(path, next);
+    return next;
+  });
 }
 
 export const writeField = (vault: Vault, id: string, field: string, value: string) =>
@@ -157,15 +169,84 @@ export const writeStatus = (vault: Vault, id: string, status: string) =>
 export const writeMeta = (vault: Vault, id: string, key: string, value: string) =>
   updateNote(vault, id, (md) => setFrontmatter(md, key, value));
 
-/** 補助データを保存し、ノートの一覧部分を書き直す。 */
+const renderLists = (md: string, a: Annotations) => {
+  let out = setList(md, "highlights", renderHighlights(a.highlights), "マーカーと訳");
+  out = setList(out, "terms", renderTerms(a.terms), "用語");
+  out = setList(out, "equations", renderEquations(a.equations), "数式");
+  return out;
+};
+
+/** 補助データを丸ごと保存し、ノートの一覧部分を書き直す。 */
 export async function saveAnnotations(vault: Vault, id: string, a: Annotations) {
-  await vault.writeText(dataPath(id), JSON.stringify(a, null, 2));
-  return updateNote(vault, id, (md) => {
-    let out = setList(md, "highlights", renderHighlights(a.highlights), "マーカーと訳");
-    out = setList(out, "terms", renderTerms(a.terms), "用語");
-    out = setList(out, "equations", renderEquations(a.equations), "数式");
-    return out;
+  await serial(dataPath(checkId(id)), () => vault.writeText(dataPath(id), JSON.stringify(a, null, 2)));
+  return updateNote(vault, id, (md) => renderLists(md, a));
+}
+
+/**
+ * 注釈に操作を当てて保存し、ノートの一覧部分を書き直す。
+ * 保存直前に読み直すので、別の書き手（画面と AI エージェントなど）の変更を消さない。
+ */
+export async function changeAnnotations(vault: Vault, id: string, ops: AnnotationOp[]) {
+  const path = dataPath(checkId(id));
+  const annotations = await serial(path, async () => {
+    const next = applyOps(await loadAnnotations(vault, id), ops);
+    await vault.writeText(path, JSON.stringify(next, null, 2));
+    return next;
   });
+  const note = await updateNote(vault, id, (md) => renderLists(md, annotations));
+  return { annotations, note };
+}
+
+export async function readTemplate(vault: Vault) {
+  return (await vault.exists(TEMPLATE_PATH)) ? vault.readText(TEMPLATE_PATH) : DEFAULT_TEMPLATE;
+}
+
+export async function writeTemplate(vault: Vault, text: string) {
+  await vault.writeText(TEMPLATE_PATH, text);
+}
+
+export interface PaperDetail extends PaperSummary {
+  frontmatter: Record<string, string>;
+  fields: FieldDef[];
+  annotations: Annotations;
+}
+
+/** 論文1本の記録をまとめて返す。AI エージェント向け。 */
+export async function paperDetail(vault: Vault, id: string): Promise<PaperDetail> {
+  const note = await loadNote(vault, checkId(id));
+  const fm = getFrontmatter(note);
+  return {
+    id,
+    title: fm.title || id,
+    status: fm.status || "未読",
+    year: fm.year || "",
+    frontmatter: fm,
+    fields: parseFields(note),
+    annotations: await loadAnnotations(vault, id),
+  };
+}
+
+export interface SearchHit {
+  paper: string;
+  file: string;
+  line: number;
+  text: string;
+}
+
+/** すべての読解ノートから語句を含む行を探す。大文字と小文字は区別しない。 */
+export async function searchNotes(vault: Vault, query: string, limit = 50): Promise<SearchHit[]> {
+  const needle = query.toLowerCase();
+  const hits: SearchHit[] = [];
+  for (const p of await listPapers(vault)) {
+    const lines = (await loadNote(vault, p.id)).split("\n");
+    for (let i = 0; i < lines.length && hits.length < limit; i++) {
+      if (lines[i].toLowerCase().includes(needle)) {
+        hits.push({ paper: p.id, file: notePath(p.id), line: i + 1, text: lines[i].trim().slice(0, 300) });
+      }
+    }
+    if (hits.length >= limit) break;
+  }
+  return hits;
 }
 
 /** 保管庫全体の用語リンクを集める。グラフ表示に使う。 */

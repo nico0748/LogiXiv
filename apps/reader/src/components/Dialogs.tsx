@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { type AiSettings, DEFAULT_MODEL } from "../lib/claude.ts";
 import { DEFAULT_TEMPLATE } from "../lib/defaultTemplate.ts";
+import type { Backend } from "../lib/backend.ts";
 import { TEMPLATE_PATH } from "../lib/papers.ts";
 import { parseFields } from "../lib/template.ts";
-import type { Vault } from "../lib/vault.ts";
 
 function useModal(onClose: () => void) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -56,13 +56,13 @@ export function SettingsDialog({ value, onSave, onClose }: { value: AiSettings; 
   );
 }
 
-export function TemplateDialog({ vault, onClose }: { vault: Vault; onClose: () => void }) {
+export function TemplateDialog({ backend, onClose }: { backend: Backend; onClose: () => void }) {
   const ref = useModal(onClose);
   const [text, setText] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
   useEffect(() => {
-    void vault.readText(TEMPLATE_PATH).then(setText, () => setText(DEFAULT_TEMPLATE));
-  }, [vault]);
+    void backend.readTemplate().then(setText, () => setText(DEFAULT_TEMPLATE));
+  }, [backend]);
   const count = text ? parseFields(text).length : 0;
   return (
     <dialog ref={ref} className="wide" aria-labelledby="tpl-title">
@@ -86,7 +86,7 @@ export function TemplateDialog({ vault, onClose }: { vault: Vault; onClose: () =
           disabled={text === null}
           onClick={async () => {
             if (text === null) return;
-            await vault.writeText(TEMPLATE_PATH, text);
+            await backend.writeTemplate(text);
             setMsg("保存しました");
           }}
         >
