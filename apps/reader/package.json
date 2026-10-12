@@ -1,0 +1,74 @@
+{
+  "name": "@logixiv/reader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PaperLens: 論文を読みながら、訳・用語・数式・読解メモを Markdown に残すアプリ",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite",
+    "build": "vite build && vite build -c vite.server.config.ts",
+    "start": "node dist-server/server.js",
+    "mcp": "node dist-server/mcp.js",
+    "app": "npm run build && electron .",
+    "dist": "npm run build && electron-builder",
+    "preview": "vite preview",
+    "build:single": "SINGLE=1 vite build",
+    "test": "node --test --experimental-strip-types --no-warnings src/lib/*.test.ts server/*.test.ts",
+    "e2e": "node e2e/smoke.mjs && node e2e/server.mjs",
+    "sample": "node scripts/make-sample.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.133.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "katex": "0.16.47",
+    "pdfjs-dist": "5.4.394",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.1",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.1.1",
+    "electron": "38.8.6",
+    "electron-builder": "26.0.20",
+    "pdf-lib": "1.17.1",
+    "playwright": "1.56.1",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vite-plugin-singlefile": "2.3.3"
+  },
+  "main": "electron/main.js",
+  "build": {
+    "appId": "dev.logixiv.paperlens",
+    "productName": "PaperLens",
+    "directories": {
+      "output": "release"
+    },
+    "asar": false,
+    "files": [
+      "electron/**",
+      "dist/**",
+      "dist-server/**",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "target": [
+        "dmg"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
+  }
+}

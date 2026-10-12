@@ -16,8 +16,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      # サーバーのテストはビルド済みのビューア（apps/viewer/dist）を配るため、ビルドを先に行う。
       - run: npm run build
+      - run: npm test
       # GROBID は CI で立てない。E2E はフォールバック経路を通す。
       - run: npm run test:e2e
       # 解析品質の門番。ここを外すと、レイアウトの後退が黙って通る。
