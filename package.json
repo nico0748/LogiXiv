@@ -5,9 +5,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "preview": "vite preview",
     "build:single": "tsc && SINGLE=1 vite build",
     "test": "vitest run",
     "typecheck": "tsc",
+    "e2e": "node e2e/smoke.mjs",
     "sample": "node scripts/make-sample.mjs"
   },
   "license": "MIT",
@@ -30,5 +32,8 @@
     "vitest": "^3.2.7"
   },
   "private": true,
-  "type": "module"
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
 }

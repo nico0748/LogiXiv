@@ -1,4 +1,3 @@
-import * as pdfjs from "pdfjs-dist";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GraphView } from "./components/GraphView";
 import { PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView";
@@ -28,6 +27,7 @@ import {
   writeField,
   writeStatus,
 } from "./lib/papers";
+import { openPdf } from "./lib/pdf";
 import { getFrontmatter } from "./lib/template";
 import type { Vault } from "./lib/vault";
 
@@ -267,7 +267,7 @@ function Workspace({ vault, onClose }: { vault: Vault; onClose: () => void }) {
     const data = await f.arrayBuffer();
     let t = f.name.replace(/\.pdf$/i, "");
     try {
-      const doc = await pdfjs.getDocument({ data: new Uint8Array(data.slice(0)) }).promise;
+      const doc = await openPdf(data).promise;
       const meta = await doc.getMetadata();
       const metaTitle = (meta.info as { Title?: string } | undefined)?.Title?.trim();
       if (metaTitle && metaTitle.length > 3) t = metaTitle;

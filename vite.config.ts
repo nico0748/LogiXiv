@@ -6,6 +6,6 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 export default defineConfig({
   plugins: [react(), ...(process.env.SINGLE ? [viteSingleFile()] : [])],
   build: { target: "es2022", outDir: process.env.SINGLE ? "dist-single" : "dist" },
-  worker: { format: "es" },
+  worker: { format: "iife" },
   assetsInclude: ["**/*.pdf"],
 });

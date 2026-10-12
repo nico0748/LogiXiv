@@ -1,10 +1,9 @@
 import * as pdfjs from "pdfjs-dist";
-import PdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker&inline";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Highlight, MarkerColor, Rect } from "../lib/model";
+import { openPdf } from "../lib/pdf";
 
-pdfjs.GlobalWorkerOptions.workerPort = new PdfWorker();
 
 export interface SelectionInfo {
   page: number;
@@ -47,7 +46,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
     setDoc(null);
     setError(null);
     texts.current.clear();
-    const task = pdfjs.getDocument({ data: new Uint8Array(data.slice(0)) });
+    const task = openPdf(data);
     task.promise.then(
       (d) => {
         if (cancelled) return;
