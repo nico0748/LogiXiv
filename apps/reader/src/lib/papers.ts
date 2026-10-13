@@ -18,7 +18,7 @@ import {
   renderTerms,
 } from "./model.ts";
 import { type FmValue, fmText, readFrontmatter, setFrontmatterValue } from "./frontmatter.ts";
-import { type FieldDef, fillPlaceholders, getFrontmatter, parseFields, setField, setList } from "./template.ts";
+import { type FieldDef, fillPlaceholders, parseFields, setField, setList } from "./template.ts";
 import type { Vault } from "./vault.ts";
 
 export const TEMPLATE_PATH = "_templates/reading-note.md";
@@ -29,6 +29,23 @@ export interface PaperSummary {
   title: string;
   status: string;
   year: string;
+  /** 著者。frontmatter が文字列のとき（古いノート）は 1 要素の配列 */
+  authors: string[];
+  /** arXiv の ID（版の番号を除く）。無ければ "" */
+  arxiv: string;
+}
+
+/** frontmatter から一覧に出す項目を取り出す。 */
+function summaryOf(id: string, fm: Record<string, FmValue>): PaperSummary {
+  const a = fm.authors;
+  return {
+    id,
+    title: fmText(fm.title) || id,
+    status: fmText(fm.status) || "未読",
+    year: fmText(fm.year),
+    authors: Array.isArray(a) ? a : a?.trim() ? [a.trim()] : [],
+    arxiv: fmText(fm.arxiv),
+  };
 }
 
 export const notePath = (id: string) => `${PAPERS_DIR}/${id}/note.md`;
@@ -53,13 +70,7 @@ export async function listPapers(vault: Vault): Promise<PaperSummary[]> {
   const out: PaperSummary[] = [];
   for (const d of dirs) {
     try {
-      const fm = getFrontmatter(await vault.readText(notePath(d.name)));
-      out.push({
-        id: d.name,
-        title: fm.title || d.name,
-        status: fm.status || "未読",
-        year: fm.year || "",
-      });
+      out.push(summaryOf(d.name, readFrontmatter(await vault.readText(notePath(d.name)))));
     } catch {
       // note.md が無いフォルダは論文として扱わない
     }
@@ -209,10 +220,7 @@ export async function paperDetail(vault: Vault, id: string): Promise<PaperDetail
   const note = await loadNote(vault, checkId(id));
   const fm = readFrontmatter(note);
   return {
-    id,
-    title: fmText(fm.title) || id,
-    status: fmText(fm.status) || "未読",
-    year: fmText(fm.year),
+    ...summaryOf(id, fm),
     frontmatter: fm,
     fields: parseFields(note),
     annotations: await loadAnnotations(vault, id),

@@ -118,6 +118,15 @@ export class VaultBackend implements Backend {
 /** この画面を見分ける ID。自分の書き込みで届いた通知を無視するのに使う。 */
 const CLIENT_ID = Math.random().toString(36).slice(2);
 
+/** サーバーが断ったときの誤り。status は HTTP の状態（409 は書き換えられない frontmatter の項目） */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, msg: string) {
+    super(msg);
+    this.status = status;
+  }
+}
+
 async function call<T>(url: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = { "x-paperlens-client": CLIENT_ID };
   if (typeof init.body === "string") headers["content-type"] = "application/json";
@@ -130,7 +139,7 @@ async function call<T>(url: string, init: RequestInit = {}): Promise<T> {
     } catch {
       // 本文が JSON でないときは状態コードだけを伝える
     }
-    throw new Error(msg);
+    throw new ApiError(res.status, msg);
   }
   const type = res.headers.get("content-type") ?? "";
   if (type.includes("application/json")) return (await res.json()) as T;

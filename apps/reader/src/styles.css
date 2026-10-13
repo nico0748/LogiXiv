@@ -429,6 +429,12 @@ button, input, textarea, select { font: inherit; color: inherit; letter-spacing:
 }
 .phase-steps button:is([aria-pressed="true"], [aria-checked="true"])::after { content: "✓"; order: -1; }
 .phase-steps .chip-count { font-weight: 400; font-size: 12px; letter-spacing: 0; }
+/* 書誌情報（記録タブの最上部の折りたたみ欄） */
+.biblio { padding: 0; margin-bottom: 16px; }
+.biblio > summary { cursor: pointer; padding: 10px 16px; font-size: 15px; font-weight: 700; border-radius: var(--md-shape-md); }
+.biblio-body { display: grid; gap: 10px; padding: 0 16px 12px; }
+.biblio-body .input { min-height: 40px; }
+.biblio-arxiv { font-size: 14px; }
 .record-section { margin: 18px 0 8px; font-size: 15px; font-weight: 700; padding-bottom: 4px; border-bottom: 1px solid var(--md-sys-color-outline-variant); }
 .record-field { margin-bottom: 14px; }
 

@@ -21,6 +21,7 @@ import {
   writeMeta,
   writeTemplate,
 } from "../src/lib/papers.ts";
+import { toBibtex } from "../src/lib/bibtex.ts";
 import { parseFields, setField } from "../src/lib/template.ts";
 import { dataRoot, readConfig, writeConfig } from "../server/config.ts";
 import { NodeVault } from "../server/nodeVault.ts";
@@ -127,6 +128,21 @@ const READ: Tool[] = [
       const v = await vault();
       await requirePaper(v, paper);
       return json(await paperDetail(v, paper));
+    },
+  },
+  {
+    name: "get_bibtex",
+    config: {
+      title: "BibTeX",
+      description:
+        "論文の frontmatter（題名・著者・年・掲載先・DOI・arXiv）から BibTeX を作って返します。画面の「BibTeX をコピー」と同じ内容です。",
+      inputSchema: { paper: PAPER },
+      annotations: { readOnlyHint: true },
+    },
+    handler: async ({ paper }) => {
+      const v = await vault();
+      await requirePaper(v, paper);
+      return text(toBibtex((await paperDetail(v, paper)).frontmatter, paper));
     },
   },
   {

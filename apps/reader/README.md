@@ -127,6 +127,7 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 | --- | --- |
 | `get_settings` | 保存先、フォルダ構成、読解の段階、テンプレートの記録欄 |
 | `list_papers` / `get_paper` / `get_note` | 論文の一覧、論文1本の記録（記録欄・マーカー・用語・数式）、ノートの本文 |
+| `get_bibtex` | 論文の BibTeX（画面の「BibTeX をコピー」と同じ内容） |
 | `read_paper_text` / `find_in_paper` | PDF の本文をページごとに読む、本文の中を探す |
 | `search_notes` / `get_graph` | すべてのノートの横断検索、論文と用語のつながり |
 | `import_paper` | 端末の PDF や URL（arXiv など）から取り込む |

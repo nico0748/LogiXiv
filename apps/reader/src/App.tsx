@@ -14,7 +14,9 @@ import {
   toTex,
   translate,
 } from "./lib/claude.ts";
-import { type Backend, type Link, VaultBackend, connectServer } from "./lib/backend.ts";
+import { ApiError, type Backend, type Link, VaultBackend, connectServer } from "./lib/backend.ts";
+import { type FmValue, FrontmatterError } from "./lib/frontmatter.ts";
+import { type Snack, Snackbar } from "./components/Snackbar.tsx";
 import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId } from "./lib/model.ts";
 import type { PaperSummary } from "./lib/papers.ts";
 import { openPdf } from "./lib/pdf.ts";
@@ -51,6 +53,9 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [dialog, setDialog] = useState<"settings" | "template" | null>(null);
   const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number } | null>(null);
   const [links, setLinks] = useState<Link[]>([]);
+  const [metaError, setMetaError] = useState<Record<string, string>>({});
+  const [snack, setSnack] = useState<Snack | null>(null);
+  const notify = useCallback((message: string, extra: Partial<Snack> = {}) => setSnack({ message, n: Date.now(), ...extra }), []);
   const wide = typeof window === "undefined" || window.innerWidth > 900;
   const [leftOpen, setLeftOpen] = useState(wide);
   const [rightOpen, setRightOpen] = useState(wide);
@@ -90,6 +95,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     setPdf(null);
     setActiveId(null);
     setBusy({});
+    setMetaError({});
     void Promise.all([backend.loadPdf(current), backend.loadAnnotations(current), backend.loadNote(current)]).then(
       ([p, a, n]) => {
         if (cancelled) return;
@@ -210,6 +216,33 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     if (!current) return;
     const id = current;
     debounce(`f-${id}-${field}`, async () => applyNote(await backend.writeField(id, field, value)));
+  };
+
+  /** 書誌情報の欄。800ms 待ってから項目ごとに保存し、題名・年・著者は一覧も直す */
+  const onMeta = (key: string, value: FmValue) => {
+    if (!current) return;
+    const id = current;
+    debounce(
+      `m-${id}-${key}`,
+      async () => {
+        try {
+          applyNote(await backend.writeMeta(id, key, value));
+          setMetaError(({ [key]: _, ...rest }) => rest);
+        } catch (e) {
+          // 複数行の値の項目は書き換えない。その欄を読み取り専用にして理由を出す
+          if (e instanceof FrontmatterError || (e instanceof ApiError && e.status === 409)) setMetaError((m) => ({ ...m, [key]: e.message }));
+          throw e;
+        }
+        if (key === "title" || key === "year" || key === "authors") {
+          setPapers((ps) =>
+            ps.map((p) =>
+              p.id !== id ? p : key === "authors" ? { ...p, authors: Array.isArray(value) ? value : [value] } : { ...p, [key]: Array.isArray(value) ? value.join(", ") : value || (key === "title" ? id : "") },
+            ),
+          );
+        }
+      },
+      800,
+    );
   };
 
   const onStatus = async (s: string) => {
@@ -423,6 +456,10 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
             onField={onField}
             onStatus={(s) => void onStatus(s)}
             onOpenSettings={() => setDialog("settings")}
+            paperId={current}
+            onMeta={onMeta}
+            metaError={metaError}
+            notify={notify}
           />
         ) : (
           <p className="empty">論文を開くと、訳・用語・数式・記録が表示されます。</p>
@@ -437,6 +474,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
         />
       )}
       {dialog === "template" && <TemplateDialog backend={backend} onClose={() => setDialog(null)} />}
+      <Snackbar snack={snack} onClose={() => setSnack(null)} />
     </div>
   );
 }

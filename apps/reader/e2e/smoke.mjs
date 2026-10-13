@@ -111,6 +111,22 @@ await step("段階のチップを矢印キーで選ぶ", async () => {
   if (!(await noteMd()).includes("status: 精読")) throw new Error("左矢印キーで段階が戻らない");
 });
 
+await step("書誌情報を入れて BibTeX をコピーする", async () => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://localhost:4321" });
+  const biblio = page.locator("details.biblio");
+  if (!(await biblio.evaluate((d) => d.open))) await biblio.locator("summary").click();
+  await page.getByLabel("著者", { exact: true }).fill("A. Example\nB. Sample");
+  await page.getByLabel("年", { exact: true }).fill("2026");
+  await page.waitForTimeout(1300);
+  const note = await noteMd();
+  if (!/\nauthors:\n {2}- "?A\. Example"?\n {2}- "?B\. Sample"?\n/.test(note)) throw new Error(`著者が一覧になっていない:\n${note.slice(0, 400)}`);
+  await page.getByRole("button", { name: "BibTeX をコピー" }).click();
+  await page.locator(".snackbar", { hasText: "BibTeX をコピーしました" }).waitFor();
+  const bib = await page.evaluate(() => navigator.clipboard.readText());
+  if (!bib.includes(" and ") || !bib.startsWith("@misc{example2026sparse,")) throw new Error(`BibTeX が違う: ${bib}`);
+  await page.screenshot({ path: `${shotDir}/08-biblio.png` });
+});
+
 let md;
 await step("note.md に反映されている", async () => {
   md = await page.evaluate(async () => {

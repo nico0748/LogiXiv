@@ -130,3 +130,10 @@ test("複数行の値の項目を画面から書き換えると 409 で断る", 
   await api(`/api/papers/${id}/meta`, { method: "PUT", body: JSON.stringify({ key: "year", value: "2025" }) });
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("venue: |\n  line1\n  line2\n", 'venue: ""\n'));
 });
+
+test("MCP: get_bibtex は frontmatter から BibTeX を作る", async () => {
+  const t = TOOLS.find((x) => x.name === "get_bibtex")!;
+  const r = await t.handler({ paper: id });
+  assert.match(r.content[0].text, /^@misc\{example2025sparse,\n {2}title = \{\{Sparse Window Attention/);
+  assert.match(r.content[0].text, /author = \{A\. Example and B\. Sample\}/);
+});

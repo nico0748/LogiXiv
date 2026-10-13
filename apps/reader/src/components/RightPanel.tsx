@@ -2,6 +2,8 @@ import katex from "katex";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Annotations, Equation, Highlight, Term } from "../lib/model.ts";
 import { MARKER_LABEL } from "../lib/model.ts";
+import { toBibtex } from "../lib/bibtex.ts";
+import { type FmValue, fmText, parseFrontmatter, readFrontmatter } from "../lib/frontmatter.ts";
 import { type FieldDef, parseFields } from "../lib/template.ts";
 import { EmptyState } from "./EmptyState.tsx";
 import { StatusChips } from "./StatusChips.tsx";
@@ -30,6 +32,13 @@ interface Props {
   onField: (id: string, value: string) => void;
   onStatus: (s: string) => void;
   onOpenSettings: () => void;
+  paperId: string;
+  /** frontmatter の1項目を書く（書誌情報の欄） */
+  onMeta: (key: string, value: FmValue) => void;
+  /** 書き込めなかった項目と、その理由 */
+  metaError: Record<string, string>;
+  /** 画面の下に短い知らせを出す */
+  notify: (message: string) => void;
 }
 
 export function RightPanel(p: Props) {
@@ -67,7 +76,12 @@ export function RightPanel(p: Props) {
         {p.tab === "translate" && <TranslateList {...p} />}
         {p.tab === "terms" && <TermList {...p} />}
         {p.tab === "math" && <MathList {...p} />}
-        {p.tab === "record" && <RecordForm key={p.noteKey} note={p.note} status={p.status} onField={p.onField} onStatus={p.onStatus} />}
+        {p.tab === "record" && (
+          <>
+            <BiblioSection key={`b-${p.noteKey}`} note={p.note} paperId={p.paperId} onMeta={p.onMeta} metaError={p.metaError} notify={p.notify} />
+            <RecordForm key={p.noteKey} note={p.note} status={p.status} onField={p.onField} onStatus={p.onStatus} />
+          </>
+        )}
       </div>
     </>
   );
@@ -293,6 +307,120 @@ function MathList(p: Props) {
         );
       })}
     </>
+  );
+}
+
+// --- 書誌情報 ---------------------------------------------------------------
+
+const BIB_FIELDS: { key: string; label: string; hint?: string; multi?: boolean; numeric?: boolean }[] = [
+  { key: "title", label: "題名", hint: "題名を変えても、ノート本文の見出し（# の行）は変わりません。" },
+  { key: "authors", label: "著者", hint: "1 行に 1 人ずつ書きます。", multi: true },
+  { key: "year", label: "年", numeric: true },
+  { key: "venue", label: "掲載先", hint: "会議名・論文誌名。arXiv だけの場合は arXiv" },
+  { key: "doi", label: "DOI", hint: "10. から始まる番号。URL でも構いません" },
+];
+const OPEN_KEY = "paperlens.ui.biblioOpen";
+
+/** 欄の文字列を、frontmatter に書く値に直す。著者は 1 行 1 人の配列、DOI は URL の前置きを外す */
+function toMeta(key: string, text: string): FmValue {
+  if (key === "authors") return text.split("\n").map((x) => x.trim()).filter(Boolean);
+  if (key === "doi") return text.trim().replace(/^https?:\/\/(dx\.)?doi\.org\//i, "");
+  return text;
+}
+
+function BiblioSection({ note, paperId, onMeta, metaError, notify }: Pick<Props, "note" | "paperId" | "onMeta" | "metaError" | "notify">) {
+  const meta = useMemo(() => readFrontmatter(note), [note]);
+  // 複数行の値など、PaperLens から書き換えない項目
+  const opaque = useMemo(() => new Set((parseFrontmatter(note)?.entries ?? []).filter((e) => e.kind === "opaque").map((e) => e.key)), [note]);
+  const [local, setLocal] = useState<Record<string, string>>({});
+  const [fallback, setFallback] = useState<string | null>(null);
+  const fallbackRef = useRef<HTMLTextAreaElement>(null);
+  const text = (k: string) => local[k] ?? (Array.isArray(meta[k]) ? (meta[k] as string[]).join("\n") : fmText(meta[k]));
+  const empty = ["authors", "year", "venue", "doi"].every((k) => !fmText(meta[k]).trim());
+  const [open, setOpen] = useState(() => {
+    if (empty) return true;
+    try {
+      return localStorage.getItem(OPEN_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    if (fallback !== null) fallbackRef.current?.select();
+  }, [fallback]);
+
+  const current = { ...meta, ...Object.fromEntries(Object.entries(local).map(([k, v]) => [k, toMeta(k, v)])) };
+  const canCopy = !!(fmText(current.title).trim() || fmText(current.authors).trim());
+  const copy = async () => {
+    const bib = toBibtex(current, paperId);
+    try {
+      await navigator.clipboard.writeText(bib);
+      setFallback(null);
+      notify("BibTeX をコピーしました");
+    } catch {
+      // 権限が無いときや file:// で開いたときは、選択した状態で見せて手でコピーしてもらう
+      setFallback(bib);
+    }
+  };
+  const errorOf = (k: string) =>
+    metaError[k] ?? (opaque.has(k) ? `frontmatter の「${k}」は複数行の値のため、PaperLens からは書き換えません。Obsidian で直してください。` : undefined);
+
+  return (
+    <details
+      className="card biblio"
+      open={open}
+      onToggle={(e) => {
+        const v = (e.currentTarget as HTMLDetailsElement).open;
+        setOpen(v);
+        try {
+          localStorage.setItem(OPEN_KEY, v ? "1" : "0");
+        } catch {
+          // 覚えられなくても開閉はできる
+        }
+      }}
+    >
+      <summary>書誌情報</summary>
+      <div className="biblio-body">
+        {BIB_FIELDS.map((f) => {
+          const err = errorOf(f.key);
+          const common = {
+            id: `bib-${f.key}`,
+            value: text(f.key),
+            readOnly: !!err,
+            "aria-describedby": [f.hint ? `bibh-${f.key}` : "", err ? `bibe-${f.key}` : ""].filter(Boolean).join(" ") || undefined,
+            onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+              setLocal((l) => ({ ...l, [f.key]: e.target.value }));
+              onMeta(f.key, toMeta(f.key, e.target.value));
+            },
+          };
+          return (
+            <div key={f.key}>
+              <label className="field-label" htmlFor={`bib-${f.key}`}>{f.label}</label>
+              {f.hint && <span className="field-hint" id={`bibh-${f.key}`}>{f.hint}</span>}
+              {f.multi ? (
+                <textarea className="textarea" rows={Math.max(2, text(f.key).split("\n").length)} {...common} />
+              ) : (
+                <input className="input" inputMode={f.numeric ? "numeric" : undefined} {...common} />
+              )}
+              {err && <p className="err-msg" id={`bibe-${f.key}`}>{err}</p>}
+            </div>
+          );
+        })}
+        {fmText(meta.arxiv) && (
+          <div className="biblio-arxiv"><span className="field-label">arXiv</span>{fmText(meta.arxiv)}</div>
+        )}
+        <div className="card-actions">
+          {!canCopy && <span className="field-hint" style={{ margin: "0 auto 0 0" }}>題名を入れると BibTeX を作れます。</span>}
+          <button className="btn text sm" disabled={!canCopy} onClick={() => void copy()}>BibTeX をコピー</button>
+        </div>
+        {fallback !== null && (
+          <div>
+            <p className="field-hint" id="bib-fallback-hint">コピーできませんでした。選択した文字を Ctrl+C（mac は ⌘C）でコピーしてください。</p>
+            <textarea ref={fallbackRef} className="textarea tex-input" readOnly rows={8} value={fallback} aria-label="BibTeX" aria-describedby="bib-fallback-hint" />
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
