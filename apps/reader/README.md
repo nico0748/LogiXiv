@@ -86,6 +86,8 @@ npm run build:single
 ### 3. 使い始める
 
 1. 左端のリボンの「論文一覧」（`⌘/Ctrl + \`）を開き、PDF を取り込みます（ドロップでも取り込めます）。取り込むと、テンプレートから読解ノートを作り、1 文ずつへの解析を始めます。
+   一覧の上の「論文を追加」から「URL から追加」を選ぶと、PDF の URL か arXiv の番号（例 2410.12345）から取り込めます。arXiv の論文は、題名・著者・年も自動で入ります。
+   1 つの HTML ファイルにまとめた版では、URL からは取り込めません。
 2. 右側の「対訳」タブに文が並びます。カードを押すと PDF のその位置へ、PDF 上の文の枠を押すとそのカードへ移ります。`j` / `k` で前後の文へ、`n` で次の未訳の文へ移ります。
    カードでは、訳の手直し、メモ、「訳す対象から外す」、次の文との結合、文の分割ができます。解析方式（GROBID / 簡易解析）と崩れの疑いは、タブの上部とステータスバーに出ます。
 3. 全文の訳は、MCP サーバーを登録した Claude に頼みます（「AI エージェントから使う」を参照）。訳は画面にすぐ反映されます。
@@ -95,8 +97,11 @@ npm run build:single
    - 用語を調べる: 選んだ語の説明を作る
    - 数式にする: 選んだ数式を TeX に書き起こす
 5. 右側の「記録」タブに読解メモを入力します。入力は note.md に自動で保存されます。
-6. 左端の「リスト」（`⌘/Ctrl + Shift + L`）で、すべての論文の用語（対訳の用語集を含む）と数式を、単語帳と数式帳として引けます。
-7. 左端の「グラフ」で、論文と用語のつながりを見られます。
+   タブの最上部の「書誌情報」で題名・著者・年・掲載先・DOI を直せます。「BibTeX をコピー」で BibTeX をコピーできます。
+6. 論文一覧の検索欄で、題名・著者・年と、ノートの中を探せます。段階のチップで一覧を絞り込めます。
+7. PDF の上のページ番号の欄に数字を入れて Enter を押すと、そのページへ移ります。論文を開き直すと、前回の位置から表示します。
+8. 左端の「リスト」（`⌘/Ctrl + Shift + L`）で、すべての論文の用語（対訳の用語集を含む）と数式を、単語帳と数式帳として引けます。
+9. 左端の「グラフ」で、論文と用語のつながりを見られます。
 
 サイドバーの開閉と幅は、保存先の `.paperlens/workspace.json` に保存します。キーボード操作の一覧は、左端の「ヘルプ」にあります。
 
@@ -145,10 +150,11 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 | --- | --- |
 | `get_settings` | 保存先、フォルダ構成、読解の段階、テンプレートの記録欄 |
 | `list_papers` / `get_paper` / `get_note` | 論文の一覧、論文1本の記録（記録欄・マーカー・用語・数式）、ノートの本文 |
+| `get_bibtex` | 論文の BibTeX（画面の「BibTeX をコピー」と同じ内容） |
 | `read_paper_text` / `find_in_paper` | PDF の本文をページごとに読む、本文の中を探す |
 | `search_notes` / `get_graph` | すべてのノートの横断検索、論文と用語のつながり |
 | `import_paper` | 端末の PDF や URL（arXiv など）から取り込む |
-| `set_fields` / `set_status` / `set_meta` | 記録欄、読解の段階、書誌情報（著者・年など）を書く |
+| `set_fields` / `set_status` / `set_meta` | 記録欄、読解の段階、書誌情報（著者・年など）を書く。著者など一覧の項目は配列で渡す |
 | `add_highlight` / `update_highlight` | 本文の文にマーカーと訳を付ける。PDF の該当位置にも色が付く |
 | `add_term` / `update_term` / `add_equation` / `update_equation` | 用語と数式を登録する |
 | `remove_annotation` | マーカー・用語・数式を消す |
@@ -186,6 +192,15 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
     sentences.status.json       解析の進み具合（解析中・失敗・完了）
 ```
 
+## 保管庫を共有するとき
+
+arXiv などから取り込んだ PDF は、多くの場合、再配布が許されていません。保管庫を公開の Git リポジトリにする場合は、PDF を入れないでください。
+保管庫の `.gitignore` に次の行を書くと、ノートだけを共有できます。
+
+```
+papers/*/paper.pdf
+```
+
 ## テンプレートを変える
 
 保存先の `_templates/reading-note.md` を編集すると、これから取り込む論文のノートに反映されます。
@@ -205,7 +220,7 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 
 | コマンド | 内容 |
 | --- | --- |
-| `npm test` | 単体テスト（テンプレート、注釈の差分、サーバーの API、対訳の保存と解析、MCP のツール、画面の配置、リスト） |
+| `npm test` | 単体テスト（テンプレート、frontmatter、BibTeX、検索、前回の位置、URL 取得の安全策、注釈の差分、サーバーの API、対訳の保存と解析、MCP のツール、画面の配置、リスト） |
 | `npx tsc --noEmit` | 型を検査する。最上位の `npm run typecheck` にも含まれます |
 | `npm run e2e` | ヘッドレス Chromium で操作を確認する。先に `npm run build:single` と `npm run build` を実行してください |
 | `npm run sample` | お試し用のサンプル PDF（`src/demo/sample.pdf`）を作り直す |
@@ -229,6 +244,8 @@ src/         画面（React）。src/components/shell/ に Obsidian 風の枠（
 | エージェントが別のフォルダを見ている | 設定画面に表示される登録方法で登録し直してください。保存先を `PAPERLENS_DATA` で固定している場合は、その値がアプリとそろっているか確かめてください |
 | 訳を頼むと「API キーが正しくありません」と表示される | 設定画面でキーを入れ直してください |
 | PDF の文を選択できない | 画像だけの PDF（スキャンした PDF）は文字情報が無いため選択できません。OCR をかけてから取り込んでください |
+| 大学や会社のネットワークで、URL から取り込めない | プロキシの内側では URL から取得できません。ブラウザで PDF を保存し、論文一覧の「PDF を追加」で取り込んでください |
+| 構内だけで公開されている機関リポジトリの URL が「ローカルネットワークの URL は使えません」と断られる | 環境変数 `PAPERLENS_ALLOW_PRIVATE_URLS=1` を付けてサーバー（`npm start`）か MCP サーバーを起動してください。端末内やローカルネットワークの URL も取得するようになるため、必要なときだけ付けてください |
 | 対訳が「簡易解析」になる | GROBID に届いていません。`docker compose -f docker/grobid.yml up -d` で起動してから、対訳タブの「解析し直す」で GROBID を選んでください |
 | 対訳の文が途中で切れている、2 段組の左右が混ざっている | 簡易解析の限界です。GROBID で解析し直してください。リポジトリの最上位の README の「簡易解析で何が起きうるか」に詳しく書いています |
 | 対訳を単一の HTML に書き出したい | まだ PaperLens 本体にはありません。旧 LogiXiv の Web 画面（`apps/web`。リポジトリの最上位で `npm start`）で行えます |

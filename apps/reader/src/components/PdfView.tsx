@@ -3,10 +3,14 @@ import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Highlight, MarkerColor, Rect } from "../lib/model.ts";
 import { openPdf } from "../lib/pdf.ts";
+import type { Pos } from "../lib/position.ts";
 import { setSentenceFocus, setSentenceMarksVisible, useSentenceFocus, useSentenceMarksVisible } from "../lib/sentenceFocus.ts";
 import { type SentenceMark, hitTest, marksByPage, sentenceAnchor } from "../lib/sentencesView.ts";
 import { SentenceMarkLayer } from "./sentences/SentenceMarks.tsx";
 import { useSentences } from "./sentences/useSentences.ts";
+
+/** ページの大きさ（拡大率 1 のとき） */
+type Size = { w: number; h: number };
 
 
 export interface SelectionInfo {
@@ -31,7 +35,14 @@ interface Props {
   onAction: (a: SelectionAction, s: SelectionInfo) => void;
   onHighlightClick: (id: string) => void;
   onLoaded?: (doc: PDFDocumentProxy) => void;
-  jumpTo?: { page: number; y: number; n: number } | null;
+  /** 移動の指示。instant のときは、離れていなくてもすぐに移る（「先頭に戻る」など） */
+  jumpTo?: { page: number; y: number; n: number; instant?: boolean } | null;
+  /** 前回の位置。全ページの寸法がそろった直後に 1 回だけ使う。先に jumpTo が来ていれば使わない */
+  initialPos?: Pos | null;
+  /** 前回の位置へ移動したときに呼ぶ */
+  onRestored?: (page: number) => void;
+  /** スクロールのたびに、今の位置を知らせる（requestAnimationFrame で間引く） */
+  onPosition?: (pos: Pos) => void;
   /** 開いている論文の id。あれば対訳の文の枠を描き、対訳タブと選択を同期する。 */
   paperId?: string | null;
   /** そのページの先頭までスクロールする。nonce が変わるたびに動く。 */
@@ -43,8 +54,21 @@ const NO_MARKS: SentenceMark[] = [];
 
 const COLORS: MarkerColor[] = ["yellow", "cyan", "magenta", "green"];
 
-export function PdfView({ data, highlights, activeId, onAction, onHighlightClick, onLoaded, jumpTo, paperId, scrollToPage }: Props) {
+export function PdfView({ data, highlights, activeId, onAction, onHighlightClick, onLoaded, jumpTo, initialPos, onRestored, onPosition, paperId, scrollToPage }: Props) {
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
+  /** 全ページの寸法。そろうまではページを描かない（仮の高さで並べると、移動先がずれるため） */
+  const [sizes, setSizes] = useState<Size[] | null>(null);
+  const [curPage, setCurPage] = useState(1);
+  const [pageDraft, setPageDraft] = useState<string | null>(null);
+  /** 寸法がそろう前に来た移動の指示 */
+  const pendingJump = useRef<Props["jumpTo"]>(null);
+  const initialRef = useRef(initialPos);
+  const posRef = useRef({ onPosition, onRestored });
+  posRef.current = { onPosition, onRestored };
+  const curPageRef = useRef(curPage);
+  curPageRef.current = curPage;
+  const sizesRef = useRef(sizes);
+  sizesRef.current = sizes;
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [width, setWidth] = useState(800);
@@ -64,14 +88,25 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
   useEffect(() => {
     let cancelled = false;
     setDoc(null);
+    setSizes(null);
     setError(null);
     texts.current.clear();
     const task = openPdf(data);
     task.promise.then(
-      (d) => {
+      async (d) => {
         if (cancelled) return;
         setDoc(d);
         onLoaded?.(d);
+        // getPage は描画を伴わないので、全ページでも短い時間で終わる
+        const all = await Promise.all(
+          Array.from({ length: d.numPages }, (_, i) =>
+            d.getPage(i + 1).then((p) => {
+              const v = p.getViewport({ scale: 1 });
+              return { w: v.width, h: v.height };
+            }),
+          ),
+        );
+        if (!cancelled) setSizes(all);
       },
       (e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)),
     );
@@ -91,36 +126,99 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
     return () => ro.disconnect();
   }, []);
 
+  /** ページの中の位置へ移る。y はページの高さに対する割合、margin は上に空ける幅（px） */
+  const goTo = useCallback((page: number, y: number, smooth: boolean, margin = 0) => {
+    const box = scrollRef.current;
+    const el = box?.querySelector<HTMLElement>(`[data-page="${page}"]`);
+    if (!box || !el) return;
+    box.scrollTo({ top: Math.max(0, el.offsetTop + el.offsetHeight * y - margin), behavior: smooth ? "smooth" : "auto" });
+    setCurPage(page);
+  }, []);
+
+  const jump = useCallback(
+    (j: NonNullable<Props["jumpTo"]>) => {
+      if (j.instant) return goTo(j.page, j.y, false);
+      // 遠くへ smooth で移ると途中のページをすべて描くので、3 ページ以上離れていればすぐに移る
+      goTo(j.page, j.y, Math.abs(j.page - curPageRef.current) < 3, 120);
+    },
+    [goTo],
+  );
+
   useEffect(() => {
-    if (!jumpTo || !scrollRef.current) return;
-    const page = scrollRef.current.querySelector<HTMLElement>(`[data-page="${jumpTo.page}"]`);
-    if (!page) return;
-    scrollRef.current.scrollTo({
-      top: page.offsetTop + page.offsetHeight * jumpTo.y - 120,
-      behavior: "smooth",
-    });
+    if (!jumpTo) return;
+    if (!sizesRef.current) pendingJump.current = jumpTo;
+    else jump(jumpTo);
+    // jumpTo が変わったときだけ動かす
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jumpTo]);
 
-  const scrollToFraction = useCallback((pageNo: number, y: number, smooth: boolean) => {
-    const el = scrollRef.current;
-    const page = el?.querySelector<HTMLElement>(`[data-page="${pageNo}"]`);
-    if (!el || !page) return;
-    el.scrollTo({ top: Math.max(0, page.offsetTop + page.offsetHeight * y - 120), behavior: smooth ? "smooth" : "auto" });
+  // 寸法がそろい、ページを並べた直後: 先に来た移動の指示か、前回の位置へ移る
+  useEffect(() => {
+    if (!sizes) return;
+    const j = pendingJump.current;
+    const init = initialRef.current;
+    pendingJump.current = null;
+    initialRef.current = null;
+    if (j) jump(j);
+    else if (init && init.page <= sizes.length) {
+      goTo(init.page, init.y, false);
+      posRef.current.onRestored?.(init.page);
+    }
+  }, [sizes, jump, goTo]);
+
+  // 今のページ（表示している範囲の上から 1/3 の位置にあるページ）と、上端の位置を知らせる
+  const frame = useRef(0);
+  const onScroll = useCallback(() => {
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const box = scrollRef.current;
+      if (!box) return;
+      const els = box.querySelectorAll<HTMLElement>(".pdf-page");
+      if (!els.length) return;
+      const probe = box.scrollTop + box.clientHeight / 3;
+      // ページは上から順に並ぶので、二分探索で探す
+      let lo = 0;
+      let hi = els.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (els[mid].offsetTop <= probe) lo = mid;
+        else hi = mid - 1;
+      }
+      const el = els[lo];
+      const page = lo + 1;
+      setCurPage(page);
+      posRef.current.onPosition?.({ page, y: (box.scrollTop - el.offsetTop) / el.offsetHeight });
+    });
   }, []);
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
+
+  const commitPage = () => {
+    if (pageDraft === null || !doc) return;
+    const n = Number.parseInt(pageDraft, 10);
+    setPageDraft(null);
+    if (!Number.isFinite(n)) return;
+    // 範囲外の数値は、1 か最後のページに丸める
+    goTo(Math.min(doc.numPages, Math.max(1, n)), 0, false, 8);
+  };
 
   // 対訳タブ（やキー操作）で選んだ文まで動かす。PDF 上で選んだときは動かさない。
   useEffect(() => {
     if (!sdoc || !paperId || focus.paperId !== paperId || !focus.id || focus.origin === "pdf") return;
     const at = sentenceAnchor(sdoc, focus.id);
-    if (at) scrollToFraction(at.page, at.y, focus.origin === "panel");
+    if (at) goTo(at.page, at.y, focus.origin === "panel", 120);
     // 選び直したとき（nonce）だけ動かす。訳が届いて文書が変わっただけでは動かさない。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus.nonce]);
 
+  // リストから来たページへの移動。寸法がそろう前なら、そろってから移る
   useEffect(() => {
-    if (scrollToPage && doc) scrollToFraction(scrollToPage.page, 0, false);
+    if (!scrollToPage) return;
+    const j = { page: scrollToPage.page, y: 0, n: scrollToPage.nonce, instant: true };
+    if (!sizesRef.current) pendingJump.current = j;
+    else jump(j);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrollToPage?.nonce, doc]);
+  }, [scrollToPage?.nonce]);
 
   const pageText = useCallback(
     async (n: number) => {
@@ -182,12 +280,34 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
     window.getSelection()?.removeAllRanges();
   };
 
-  const pages = useMemo(() => (doc ? Array.from({ length: doc.numPages }, (_, i) => i + 1) : []), [doc]);
+  const pages = useMemo(() => (sizes ? sizes.map((_, i) => i + 1) : []), [sizes]);
 
   return (
     <>
       <div className="pdf-toolbar" role="toolbar" aria-label="表示の操作">
-        <span>{doc ? `${doc.numPages} ページ` : "読み込み中"}</span>
+        {doc ? (
+          <>
+            <input
+              className="input page-input"
+              type="number"
+              inputMode="numeric"
+              aria-label="ページ番号"
+              min={1}
+              max={doc.numPages}
+              value={pageDraft ?? String(curPage)}
+              onChange={(e) => setPageDraft(e.target.value)}
+              onFocus={(e) => e.currentTarget.select()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitPage();
+                if (e.key === "Escape") setPageDraft(null);
+              }}
+              onBlur={commitPage}
+            />
+            <span>/ {doc.numPages} ページ</span>
+          </>
+        ) : (
+          <span>読み込み中</span>
+        )}
         <span className="spacer" />
         {sdoc && (
           <button
@@ -208,15 +328,18 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
         className="pdf-scroll"
         ref={scrollRef}
         onMouseUp={onMouseUp}
+        onScroll={onScroll}
         style={{ position: "relative" }}
       >
         {error && <p className="err-msg">PDF を開けませんでした。{error}</p>}
         {doc &&
+          sizes &&
           pages.map((n) => (
             <PageView
               key={n}
               doc={doc}
               n={n}
+              size={sizes[n - 1]}
               width={width * zoom}
               highlights={highlights.filter((h) => h.page === n)}
               activeId={activeId}
@@ -228,7 +351,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
           ))}
         {menu && (
           <div
-            className="sel-menu"
+            className="sel-menu menu-surface"
             style={{ left: Math.max(8, menu.x - 180), top: menu.y }}
             onMouseUp={(e) => e.stopPropagation()}
             role="menu"
@@ -259,6 +382,7 @@ const COLOR_NAME: Record<MarkerColor, string> = { yellow: "黄色", cyan: "水�
 function PageView({
   doc,
   n,
+  size,
   width,
   highlights,
   activeId,
@@ -269,6 +393,7 @@ function PageView({
 }: {
   doc: PDFDocumentProxy;
   n: number;
+  size: Size;
   width: number;
   highlights: Highlight[];
   activeId: string | null;
@@ -319,8 +444,8 @@ function PageView({
     return () => io.disconnect();
   }, []);
 
-  const base = page?.getViewport({ scale: 1 });
-  const scale = base ? width / base.width : 1;
+  // 大きさは先に集めた寸法から決める。ページを読み込む前から正しい高さで並ぶ
+  const scale = width / size.w;
   const vp = page?.getViewport({ scale });
 
   useEffect(() => {
@@ -349,8 +474,8 @@ function PageView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, scale, visible]);
 
-  const w = vp?.width ?? width;
-  const h = vp?.height ?? width * 1.294;
+  const w = width;
+  const h = size.h * scale;
   return (
     <div
       className="pdf-page"

@@ -3,7 +3,7 @@
 
 export const DEFAULT_TEMPLATE = `---
 title: {{title}}
-authors: ""
+authors: []
 year: ""
 venue: ""
 doi: ""

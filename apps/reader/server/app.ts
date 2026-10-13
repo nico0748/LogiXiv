@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { type FmValue, FrontmatterError } from "../src/lib/frontmatter.ts";
 import type { AnnotationOp } from "../src/lib/model.ts";
 import {
   PAPERS_DIR,
@@ -26,7 +27,9 @@ import {
 import { APP_ROOT, dataRoot, readConfig, writeConfig } from "./config.ts";
 import { mcpInfo } from "./mcpinfo.ts";
 import { NodeVault } from "./nodeVault.ts";
-import { importBytes, paperText, requirePaper } from "./service.ts";
+import { normalizeSource } from "./arxiv.ts";
+import { FetchFailed, FetchRefused, MAX_BODY } from "./fetchpdf.ts";
+import { importBytes, importFrom, paperText, requirePaper } from "./service.ts";
 import { collectLists } from "./lists.ts";
 import { readWorkspace, writeWorkspace } from "./workspace.ts";
 import {
@@ -179,7 +182,6 @@ class HttpError extends Error {
   }
 }
 
-const MAX_BODY = 200 * 1024 * 1024;
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -207,6 +209,12 @@ async function jsonBody<T>(r: Req): Promise<T> {
 const str = (v: unknown, name: string) => {
   if (typeof v !== "string") throw new HttpError(400, `${name} を文字列で指定してください。`);
   return v;
+};
+
+/** frontmatter の値。文字列か、文字列の配列（一覧） */
+const fmValue = (v: unknown, name: string): FmValue => {
+  if (typeof v === "string" || (Array.isArray(v) && v.every((x) => typeof x === "string"))) return v as FmValue;
+  throw new HttpError(400, `${name} を文字列か文字列の配列で指定してください。`);
 };
 
 class Raw {
@@ -244,6 +252,22 @@ route("POST", "/api/papers", async (r) => {
   startParse(id, "auto");
   return { id };
 });
+// URL か arXiv の番号から取り込む。端末のパスは受け付けない（MCP だけが使う）
+route("POST", "/api/papers/from-url", async (r) => {
+  const { url, title } = await jsonBody<{ url?: string; title?: string }>(r);
+  const s = str(url, "url").trim();
+  const n = normalizeSource(s);
+  if (n.kind === "url" && !/^https?:\/\//i.test(s)) throw new HttpError(400, "http または https で始まる URL か、arXiv の番号を指定してください。");
+  try {
+    const res = await importFrom(vaultFor(r.origin), s, typeof title === "string" ? title : undefined);
+    if (!res.existing) startParse(res.id, "auto");
+    return res;
+  } catch (e) {
+    if (e instanceof FetchRefused) throw new HttpError(400, e.message);
+    if (e instanceof FetchFailed) throw new HttpError(502, e.message);
+    throw e;
+  }
+});
 route("GET", "/api/papers/:id", async (r) => paperDetail(vaultFor(r.origin), r.params[0]));
 route("GET", "/api/papers/:id/pdf", async (r) => {
   const v = vaultFor(r.origin);
@@ -258,11 +282,17 @@ route("PUT", "/api/papers/:id/fields/:field", async (r) => {
   return { note: await writeField(v, r.params[0], r.params[1], str(value, "value")) };
 });
 route("PUT", "/api/papers/:id/meta", async (r) => {
-  const { key, value } = await jsonBody<{ key?: string; value?: string }>(r);
+  const { key, value } = await jsonBody<{ key?: string; value?: unknown }>(r);
   if (!/^[\w-]+$/.test(str(key, "key"))) throw new HttpError(400, "key には英数字・ハイフン・下線だけを使えます。");
   const v = vaultFor(r.origin);
   await requirePaper(v, r.params[0]);
-  return { note: await writeMeta(v, r.params[0], key as string, str(value, "value")) };
+  try {
+    return { note: await writeMeta(v, r.params[0], key as string, fmValue(value, "value")) };
+  } catch (e) {
+    // 複数行の値の項目は書き換えない。画面ではその欄を読み取り専用にする
+    if (e instanceof FrontmatterError) throw new HttpError(409, e.message);
+    throw e;
+  }
 });
 route("GET", "/api/papers/:id/annotations", async (r) => loadAnnotations(vaultFor(r.origin), r.params[0]));
 route("PATCH", "/api/papers/:id/annotations", async (r) => {

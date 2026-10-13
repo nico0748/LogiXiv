@@ -1,13 +1,13 @@
 import { ExternalLink, FileText, PanelLeft, PanelRight, Waypoints } from "lucide-react";
-import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GraphView } from "./components/GraphView.tsx";
 import { ListModal } from "./components/ListModal";
 import { PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView.tsx";
 import { type Busy, RightPanel, type Tab } from "./components/RightPanel.tsx";
-import { SettingsDialog, TemplateDialog } from "./components/Dialogs.tsx";
+import { SettingsDialog, TemplateDialog, UrlImportDialog } from "./components/Dialogs.tsx";
 import { Welcome } from "./components/Welcome.tsx";
 import { HelpModal } from "./components/shell/HelpModal.tsx";
-import { LeftSidebar, type SearchHit } from "./components/shell/LeftSidebar.tsx";
+import { LeftSidebar } from "./components/shell/LeftSidebar.tsx";
 import { ResizeHandle } from "./components/shell/ResizeHandle.tsx";
 import { Ribbon, type RibbonItem } from "./components/shell/Ribbon.tsx";
 import { SentenceStatus } from "./components/shell/SentenceStatus.tsx";
@@ -25,9 +25,12 @@ import {
   toTex,
   translate,
 } from "./lib/claude.ts";
-import { type Backend, type Link, VaultBackend, connectServer } from "./lib/backend.ts";
+import { ApiError, type Backend, type Link, ServerBackend, VaultBackend, connectServer } from "./lib/backend.ts";
+import { type Pos, loadPos, posKey, savePos, throttleTrailing } from "./lib/position.ts";
+import { type FmValue, FrontmatterError } from "./lib/frontmatter.ts";
+import { type Snack, Snackbar } from "./components/Snackbar.tsx";
 import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId } from "./lib/model.ts";
-import { type PaperSummary, searchNotes } from "./lib/papers.ts";
+import type { PaperSummary, SearchHit } from "./lib/papers.ts";
 import { openPdf } from "./lib/pdf.ts";
 import { getFrontmatter } from "./lib/template.ts";
 
@@ -61,15 +64,28 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [busy, setBusy] = useState<Busy>({});
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
   const [ai, setAi] = useState<AiSettings>(loadAiSettings);
-  const [dialog, setDialog] = useState<"settings" | "template" | null>(null);
-  const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number } | null>(null);
+  const [dialog, setDialog] = useState<"settings" | "template" | "url" | null>(null);
+  const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number; instant?: boolean } | null>(null);
   /** リストから論文のページへ飛ぶとき。nonce を変えると同じページでももう一度飛ぶ */
   const [scrollToPage, setScrollToPage] = useState<{ page: number; nonce: number } | undefined>(undefined);
-  const [links, setLinks] = useState<Link[]>([]);
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [resizing, setResizing] = useState(false);
   const { ws, patch, ready } = useWorkspace(backend);
   const setRightOpen = (v: boolean) => patch({ rightOpen: v });
+  /** 開いた論文の前回の位置（2 ページ目以降のときだけ） */
+  const [initialPos, setInitialPos] = useState<Pos | null>(null);
+  /** 取り込んだ直後の論文。前回の位置へは移らない */
+  const skipRestore = useRef<string | null>(null);
+  const [links, setLinks] = useState<Link[]>([]);
+  const [metaError, setMetaError] = useState<Record<string, string>>({});
+  const [snack, setSnack] = useState<Snack | null>(null);
+  /** 検索の当たりから開いた記録欄。記録タブを開いたあとにフォーカスを移す */
+  const [focusField, setFocusField] = useState<{ id: string; paper: string; n: number } | null>(null);
+  /** 検索の当たり（マーカーと訳）。論文を読み終えてから、当たった行のマーカーを選ぶ */
+  const [pendingHit, setPendingHit] = useState<SearchHit | null>(null);
+  /** 読み込みを終えた論文の ID */
+  const [loaded, setLoaded] = useState<string | null>(null);
+  const notify = useCallback((message: string, extra: Partial<Snack> = {}) => setSnack({ message, n: Date.now(), ...extra }), []);
   const annRef = useRef(ann);
   /** 保存先にある（と分かっている）注釈。画面での変更は、これとの差分として保存する */
   const baseRef = useRef(ann);
@@ -87,6 +103,15 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   }, [backend]);
   const title = getFrontmatter(note).title || papers.find((p) => p.id === current)?.title || "";
   const status = getFrontmatter(note).status || "未読";
+
+  // 前回の位置のキー。サーバー版は保存先のフルパスを使い、名前が同じ別の保管庫と混ざらないようにする
+  const keyFor = useCallback(
+    (id: string) => posKey(backend instanceof ServerBackend ? backend.meta.dataRoot : backend.name, id),
+    [backend],
+  );
+  // 保存は 1 秒に 1 回まで。論文を切り替えるときは、待っている値をすぐに保存する
+  const posSaver = useMemo(() => throttleTrailing((key: string, pos: Pos) => savePos(key, pos), 1000), []);
+  useEffect(() => () => posSaver.flush(), [current, posSaver]);
 
   const refresh = useCallback(async () => {
     const list = await backend.listPapers();
@@ -118,11 +143,17 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     if (!current) return;
     let cancelled = false;
     setPdf(null);
+    // 前の論文への移動の指示は捨てる（新しい論文では、前回の位置か先頭から表示する）
+    setJumpTo(null);
     setActiveId(null);
     setBusy({});
+    setMetaError({});
     void Promise.all([backend.loadPdf(current), backend.loadAnnotations(current), backend.loadNote(current)]).then(
       ([p, a, n]) => {
         if (cancelled) return;
+        const pos = skipRestore.current === current ? null : loadPos(keyFor(current));
+        skipRestore.current = null;
+        setInitialPos(pos && pos.page >= 2 ? pos : null);
         setPdf(p);
         setAnn(a);
         annRef.current = a;
@@ -130,6 +161,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
         setNote(n);
         lastNote.current = n;
         setNoteKey(`${current}-${Date.now()}`);
+        setLoaded(current);
       },
     );
     return () => {
@@ -240,6 +272,33 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     if (!current) return;
     const id = current;
     debounce(`f-${id}-${field}`, async () => applyNote(await backend.writeField(id, field, value)));
+  };
+
+  /** 書誌情報の欄。800ms 待ってから項目ごとに保存し、題名・年・著者は一覧も直す */
+  const onMeta = (key: string, value: FmValue) => {
+    if (!current) return;
+    const id = current;
+    debounce(
+      `m-${id}-${key}`,
+      async () => {
+        try {
+          applyNote(await backend.writeMeta(id, key, value));
+          setMetaError(({ [key]: _, ...rest }) => rest);
+        } catch (e) {
+          // 複数行の値の項目は書き換えない。その欄を読み取り専用にして理由を出す
+          if (e instanceof FrontmatterError || (e instanceof ApiError && e.status === 409)) setMetaError((m) => ({ ...m, [key]: e.message }));
+          throw e;
+        }
+        if (key === "title" || key === "year" || key === "authors") {
+          setPapers((ps) =>
+            ps.map((p) =>
+              p.id !== id ? p : key === "authors" ? { ...p, authors: Array.isArray(value) ? value : [value] } : { ...p, [key]: Array.isArray(value) ? value.join(", ") : value || (key === "title" ? id : "") },
+            ),
+          );
+        }
+      },
+      800,
+    );
   };
 
   const onStatus = async (s: string) => {
@@ -360,20 +419,68 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     }
     await refresh();
     if (!last) return;
+    skipRestore.current = last;
     setView("paper");
     setCurrent(last);
     setTab("record");
   };
 
+  /** URL か arXiv の番号から取り込む。新しい論文なら記録タブと書誌情報の欄を開く */
+  const onImportUrl = async (url: string) => {
+    if (!backend.importUrl) return;
+    const r = await backend.importUrl(url);
+    await refresh();
+    setDialog(null);
+    setView("paper");
+    if (r.existing) {
+      notify("この論文は既に取り込んでいます。開きました。");
+    } else {
+      skipRestore.current = r.id;
+      setTab("record");
+      setRightOpen(true);
+      try {
+        localStorage.setItem("paperlens.ui.biblioOpen", "1");
+      } catch {
+        // 覚えられなくても、書誌情報の欄は開閉できる
+      }
+    }
+    setCurrent(r.id);
+  };
 
   const jump = (page: number, y: number) => setJumpTo({ page, y, n: Date.now() });
 
   const openPaper = (id: string) => {
     setView("paper");
     setCurrent(id);
+    // リストから来たページへの移動は、別の開き方では使わない
+    setScrollToPage(undefined);
     // 狭い画面では、選んだら一覧を閉じて論文を見せる
     if (window.innerWidth <= 900) patch({ leftOpen: false });
   };
+
+  /** 検索の当たりを押したとき。論文を開き、当たった場所のタブへ移る */
+  const onHit = (h: SearchHit) => {
+    openPaper(h.paper);
+    setRightOpen(true);
+    if (h.region === "field" && h.field) {
+      setTab("record");
+      setFocusField({ id: h.field, paper: h.paper, n: Date.now() });
+    } else if (h.region === "list:highlights") {
+      setTab("translate");
+      setPendingHit(h);
+    } else if (h.region === "list:terms") setTab("terms");
+    else if (h.region === "list:equations") setTab("math");
+    else setTab("record");
+  };
+
+  // 当たった行の文を含むマーカーを探して選ぶ。見つからなければタブを開くだけ
+  useEffect(() => {
+    if (!pendingHit || loaded !== pendingHit.paper) return;
+    const needle = pendingHit.text.replace(/^>\s*/, "").replace(/^(訳|メモ):\s*/, "").trim().toLowerCase();
+    const h = needle && ann.highlights.find((x) => [x.text, x.translation, x.memo].some((s) => s && (s.toLowerCase().includes(needle) || needle.includes(s.toLowerCase()))));
+    if (h) setActiveId(h.id);
+    setPendingHit(null);
+  }, [pendingHit, loaded, ann]);
 
   /** リストの項目から、その論文の該当ページへ飛ぶ */
   const onListJump = (paperId: string, page?: number) => {
@@ -383,16 +490,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     if (page) setScrollToPage({ page, nonce: Date.now() });
   };
 
-  /** サーバーがあればその検索を、無ければ保管庫を直接探す */
-  const search = useCallback(
-    async (q: string): Promise<SearchHit[]> => {
-      if (backend instanceof VaultBackend) return searchNotes(backend.vault, q);
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-      if (!res.ok) throw new Error(`検索できませんでした（${res.status}）`);
-      return (await res.json()) as SearchHit[];
-    },
-    [backend],
-  );
+  /** 読解ノートの検索。サーバー版はサーバーで、それ以外は保管庫を直接探す */
+  const search = useCallback((q: string) => backend.search(q), [backend]);
 
   const toggleLeft = (tab?: LeftTab) =>
     patch((w) => (tab && (!w.leftOpen || w.leftTab !== tab) ? { leftOpen: true, leftTab: tab } : { leftOpen: !w.leftOpen }));
@@ -443,12 +542,15 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       <aside className="sidebar left" aria-label="左サイドバー" aria-hidden={!leftOpen} inert={!leftOpen}>
         <div className="sidebar-inner">
           <LeftSidebar
+            backend={backend}
             tab={ws.leftTab}
             setTab={(t) => patch({ leftTab: t })}
             papers={papers}
             current={view === "paper" ? current : null}
             onOpenPaper={openPaper}
             onImport={(fs) => void onImport(fs)}
+            onImportUrl={backend.importUrl ? () => setDialog("url") : undefined}
+            onHit={onHit}
             search={search}
             vaultName={backend.name}
             onOpenSettings={() => setOverlay("settings")}
@@ -505,8 +607,17 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
               onAction={onAction}
               onHighlightClick={(id) => { setActiveId(id); setTab("translate"); setRightOpen(true); }}
               jumpTo={jumpTo}
-              paperId={current}
+              // 対訳（文の枠）はサーバー版だけ。1 ファイル版で渡すと /api/events への接続を試みてしまう
+              paperId={backend.kind === "server" ? current : null}
               scrollToPage={scrollToPage}
+              initialPos={initialPos}
+              onRestored={(page) =>
+                notify(`前回の位置（p.${page}）から表示しています`, {
+                  ms: 6000,
+                  action: { label: "先頭に戻る", onClick: () => setJumpTo({ page: 1, y: 0, n: Date.now(), instant: true }) },
+                })
+              }
+              onPosition={(pos) => current && posSaver.call(keyFor(current), pos)}
             />
           ) : (
             <div className="drop-hint">
@@ -544,6 +655,12 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
               onField={onField}
               onStatus={(s) => void onStatus(s)}
               onOpenSettings={() => setDialog("settings")}
+              onMeta={onMeta}
+              metaError={metaError}
+              notify={notify}
+              focusField={focusField && focusField.paper === loaded ? focusField : null}
+              onFocused={() => setFocusField(null)}
+              sentences={backend.kind === "server"}
             />
           ) : (
             <p className="empty">論文を開くと、訳・用語・数式・記録が表示されます。</p>
@@ -583,6 +700,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
         />
       )}
       {dialog === "template" && <TemplateDialog backend={backend} onClose={() => setDialog(null)} />}
+      {dialog === "url" && <UrlImportDialog onClose={() => setDialog(null)} onImport={onImportUrl} />}
+      <Snackbar snack={snack} onClose={() => setSnack(null)} />
     </div>
   );
 }
