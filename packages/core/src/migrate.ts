@@ -35,8 +35,8 @@ export function migrateDocument(document: PaperDocument): MigrationResult {
   // しかも版の印は新しいままなので、将来の移行が二度と走らない。
   if (from > STRUCTURE_VERSION) {
     throw new FutureStructureError(
-      `この文書は新しい版の LogiXiv で作られています（構造 v${from} / このプログラムは v${STRUCTURE_VERSION} まで）。` +
-        'LogiXiv を更新してください。',
+      `この文書は新しい版の PaperLens で作られています（構造 v${from} / このプログラムは v${STRUCTURE_VERSION} まで）。` +
+        'PaperLens を更新してください。',
     );
   }
   if (from >= STRUCTURE_VERSION) {

@@ -29,7 +29,7 @@ let close: () => Promise<void> = async () => {};
 let mcp: Client;
 
 before(async () => {
-  dataDir = await mkdtemp(join(tmpdir(), 'logixiv-mcp-search-test-'));
+  dataDir = await mkdtemp(join(tmpdir(), 'paperlens-mcp-search-test-'));
   const started = await start({ port: 0, dataDir, grobidUrl: 'http://127.0.0.1:9', webDir: null });
   baseUrl = started.url;
   port = (started.server.address() as { port: number }).port;

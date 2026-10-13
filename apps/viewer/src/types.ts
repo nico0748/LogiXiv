@@ -70,7 +70,8 @@ export interface NonBodySentence extends Sentence {
 }
 
 export interface ExportPayload {
-  format: 'logixiv-export';
+  /** 改名前（LogiXiv）の書き出しは 'logixiv-export'。 */
+  format: 'paperlens-export' | 'logixiv-export';
   formatVersion: 1;
   exportedAt: string;
   pdfBase64: string;

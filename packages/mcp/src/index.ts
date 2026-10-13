@@ -9,13 +9,14 @@ import { createMcpServer } from './server.ts';
  * console.log を 1 行足すだけで Claude 側の接続が壊れる。
  */
 
-const baseUrl = (process.env['LOGIXIV_URL'] ?? 'http://127.0.0.1:4173').replace(/\/$/, '');
+// 改名前の LOGIXIV_URL も読む（既存の MCP 設定をそのまま動かすため）。
+const baseUrl = (process.env['PAPERLENS_SERVER_URL'] || process.env['LOGIXIV_URL'] || 'http://127.0.0.1:4173').replace(/\/$/, '');
 
 const server = createMcpServer(baseUrl);
 const transport = new StdioServerTransport();
 
 await server.connect(transport);
-process.stderr.write(`logixiv-mcp: ${baseUrl} に接続する設定で起動しました\n`);
+process.stderr.write(`paperlens-server-mcp: ${baseUrl} に接続する設定で起動しました\n`);
 
 const shutdown = async (): Promise<void> => {
   await server.close();

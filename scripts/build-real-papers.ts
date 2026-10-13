@@ -39,7 +39,7 @@ const sources = [
 ].sort();
 if (sources.length === 0) throw new Error(`${papersDir} に .tex がありません`);
 
-const work = mkdtempSync(join(tmpdir(), 'logixiv-tex-'));
+const work = mkdtempSync(join(tmpdir(), 'paperlens-tex-'));
 try {
   for (const source of sources) {
     const name = source.replace(/\.tex$/, '');

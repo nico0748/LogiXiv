@@ -1253,7 +1253,7 @@ function findSeam(
  * `RangeError: Maximum call stack size exceeded` で落ちる。`covered` は文 1 つの**文字数**
  * なので、文末記号が 1 つも無い文書（OCR で句点が落ちた稿、終止符を使わない言語、
  * 本文と判定された付録のデータ列）では簡単に超える。実測: 1 行 54 字の PDF で
- * 2400 行＝約 53 ページから落ち、しかも画面には「PDF が壊れているか、LogiXiv が
+ * 2400 行＝約 53 ページから落ち、しかも画面には「PDF が壊れているか、PaperLens が
  * 扱えない作りのファイルです」と出ていた（壊れていない）。
  */
 function lastLineOfOwners(covered: readonly CharOwner[]): number {

@@ -60,20 +60,44 @@ function envString(name: string): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
+/**
+ * 新しい名前の環境変数を読み、無ければ LogiXiv 時代の古い名前を読む。
+ * 名前を変えたことで、既存の設定（シェルの rc や MCP の設定）が黙って効かなくなるのを防ぐ。
+ */
+export function envWithLegacy(name: string, legacyName: string): string | undefined {
+  return envString(name) ?? envString(legacyName);
+}
+
+/** 既定のデータ置き場。改名前の ~/.logixiv だけがあるなら、そちらを使い続ける。 */
+export function defaultDataDir(home: string = homedir()): string {
+  const current = join(home, '.paperlens-server');
+  const legacy = join(home, '.logixiv');
+  if (!existsSync(current) && existsSync(legacy)) return legacy;
+  return current;
+}
+
 export function loadConfig(overrides: Partial<Config> = {}): Config {
-  const dataDir = overrides.dataDir ?? envString('LOGIXIV_DATA_DIR') ?? join(homedir(), '.logixiv');
-  const host = overrides.host ?? envString('LOGIXIV_HOST') ?? '127.0.0.1';
-  const port = overrides.port ?? Number.parseInt(envString('LOGIXIV_PORT') ?? '4173', 10);
+  // apps/reader（PaperLens アプリ）が PAPERLENS_PORT / PAPERLENS_DATA を別の既定値で使うため、
+  // こちらは PAPERLENS_SERVER_* と名前を分けている。GROBID の URL は意味も既定値も同じなので共通。
+  const dataDir =
+    overrides.dataDir ?? envWithLegacy('PAPERLENS_SERVER_DATA_DIR', 'LOGIXIV_DATA_DIR') ?? defaultDataDir();
+  const host = overrides.host ?? envWithLegacy('PAPERLENS_SERVER_HOST', 'LOGIXIV_HOST') ?? '127.0.0.1';
+  const port =
+    overrides.port ?? Number.parseInt(envWithLegacy('PAPERLENS_SERVER_PORT', 'LOGIXIV_PORT') ?? '4173', 10);
   return {
     host,
     port,
-    mcpEntry: overrides.mcpEntry ?? envString('LOGIXIV_MCP_ENTRY') ?? findMcpEntry(),
+    mcpEntry: overrides.mcpEntry ?? envWithLegacy('PAPERLENS_SERVER_MCP_ENTRY', 'LOGIXIV_MCP_ENTRY') ?? findMcpEntry(),
     publicUrl: overrides.publicUrl ?? `http://${host}:${port}`,
     claudeConfigPath: overrides.claudeConfigPath ?? claudeDesktopConfigPath(),
     dataDir: resolve(dataDir),
-    grobidUrl: (overrides.grobidUrl ?? envString('LOGIXIV_GROBID_URL') ?? 'http://localhost:8070').replace(/\/$/, ''),
-    webDir: overrides.webDir ?? envString('LOGIXIV_WEB_DIR') ?? null,
-    viewerDir: overrides.viewerDir ?? envString('LOGIXIV_VIEWER_DIR') ?? null,
+    grobidUrl: (
+      overrides.grobidUrl ??
+      envWithLegacy('PAPERLENS_GROBID_URL', 'LOGIXIV_GROBID_URL') ??
+      'http://localhost:8070'
+    ).replace(/\/$/, ''),
+    webDir: overrides.webDir ?? envWithLegacy('PAPERLENS_SERVER_WEB_DIR', 'LOGIXIV_WEB_DIR') ?? null,
+    viewerDir: overrides.viewerDir ?? envWithLegacy('PAPERLENS_SERVER_VIEWER_DIR', 'LOGIXIV_VIEWER_DIR') ?? null,
   };
 }
 

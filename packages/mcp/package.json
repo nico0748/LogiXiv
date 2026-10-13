@@ -1,18 +1,18 @@
 {
-  "name": "@logixiv/mcp",
+  "name": "@paperlens/mcp",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "logixiv-mcp": "./dist/index.js"
+    "paperlens-server-mcp": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc -b && chmod +x dist/index.js"
   },
   "dependencies": {
-    "@logixiv/core": "0.1.0",
+    "@paperlens/core": "0.1.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "3.25.76"
   },

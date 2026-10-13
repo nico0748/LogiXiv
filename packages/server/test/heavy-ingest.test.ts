@@ -27,7 +27,7 @@ let dataDir = '';
 let close: () => Promise<void> = async () => {};
 
 before(async () => {
-  dataDir = await mkdtemp(join(tmpdir(), 'logixiv-heavy-test-'));
+  dataDir = await mkdtemp(join(tmpdir(), 'paperlens-heavy-test-'));
   // 到達しないポートを指定して、フォールバック解析（ワーカー経路）を必ず通す。
   const started = await start({ port: 0, dataDir, grobidUrl: 'http://127.0.0.1:9', webDir: null });
   baseUrl = started.url;

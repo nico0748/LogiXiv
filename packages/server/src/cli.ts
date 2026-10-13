@@ -12,16 +12,17 @@ function flag(name: string): string | undefined {
 }
 
 if (args.includes('--help') || args.includes('-h')) {
-  console.log(`LogiXiv — 論文を1文単位で読む対訳リーダー
+  console.log(`PaperLens — 論文を1文単位で読む対訳リーダー
 
-  logixiv [options]
+  paperlens-server [options]
 
   --port <number>    待ち受けポート (既定 4173)
   --host <addr>      bind するアドレス (既定 127.0.0.1)
-  --data <dir>       データ置き場 (既定 ~/.logixiv)
+  --data <dir>       データ置き場 (既定 ~/.paperlens-server。それが無く ~/.logixiv があればそちら)
   --grobid <url>     GROBID の URL (既定 http://localhost:8070)
 
-環境変数 LOGIXIV_PORT / LOGIXIV_HOST / LOGIXIV_DATA_DIR / LOGIXIV_GROBID_URL でも同じ指定ができます。`);
+環境変数 PAPERLENS_SERVER_PORT / PAPERLENS_SERVER_HOST / PAPERLENS_SERVER_DATA_DIR / PAPERLENS_GROBID_URL でも同じ指定ができます
+（改名前の LOGIXIV_PORT / LOGIXIV_HOST / LOGIXIV_DATA_DIR / LOGIXIV_GROBID_URL も読みます）。`);
   process.exit(0);
 }
 
@@ -62,12 +63,12 @@ let started: Awaited<ReturnType<typeof start>>;
 try {
   started = await start(overrides);
 } catch (error) {
-  console.error(`LogiXiv を起動できませんでした: ${explainStartupFailure(error)}`);
+  console.error(`PaperLens を起動できませんでした: ${explainStartupFailure(error)}`);
   process.exit(1);
 }
 const { url, config, close } = started;
 
-console.log(`LogiXiv を起動しました: ${url}`);
+console.log(`PaperLens を起動しました: ${url}`);
 console.log(`  データ: ${config.dataDir}`);
 console.log(`  UI:     ${config.webDir ?? '(未ビルド — npm run build を実行してください)'}`);
 

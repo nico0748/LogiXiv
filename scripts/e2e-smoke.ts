@@ -6,7 +6,7 @@
  *   → 自己完結 HTML の書き出し → 取り込み → MCP の stdio 起動とツール列挙
  *
  * GROBID は起動していない前提で、到達しない URL を渡してフォールバック経路を通す。
- * 本番の経路（GROBID あり）は docker compose を上げたうえで LOGIXIV_GROBID_URL を
+ * 本番の経路（GROBID あり）は docker compose を上げたうえで PAPERLENS_GROBID_URL を
  * 指定すれば同じスクリプトで確認できる。
  */
 
@@ -26,7 +26,7 @@ function step(label: string): void {
   console.log(`  ✓ ${label}`);
 }
 
-const dataDir = await mkdtemp(join(tmpdir(), 'logixiv-e2e-'));
+const dataDir = await mkdtemp(join(tmpdir(), 'paperlens-e2e-'));
 
 const { url, close, config } = await start({
   port: 0,
@@ -174,7 +174,7 @@ try {
 
   // --- MCP を stdio で起動 -------------------------------------------------
   const mcp = spawn(process.execPath, ['--experimental-strip-types', 'packages/mcp/src/index.ts'], {
-    env: { ...process.env, LOGIXIV_URL: url, NODE_NO_WARNINGS: '1' },
+    env: { ...process.env, PAPERLENS_SERVER_URL: url, NODE_NO_WARNINGS: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -209,7 +209,7 @@ try {
     params: {
       protocolVersion: '2025-06-18',
       capabilities: {},
-      clientInfo: { name: 'logixiv-e2e', version: '0.1.0' },
+      clientInfo: { name: 'paperlens-e2e', version: '0.1.0' },
     },
   });
   await waitFor(1);

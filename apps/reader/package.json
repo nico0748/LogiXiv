@@ -1,5 +1,5 @@
 {
-  "name": "@logixiv/reader",
+  "name": "@paperlens/app",
   "version": "0.1.0",
   "private": true,
   "description": "PaperLens: 論文を読みながら、訳・用語・数式・読解メモを Markdown に残すアプリ",
@@ -20,8 +20,11 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.133.0",
+    "@paperlens/core": "0.1.0",
+    "@paperlens/server": "0.1.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "katex": "0.16.47",
+    "lucide-react": "0.544.0",
     "pdfjs-dist": "5.4.394",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -42,7 +45,7 @@
   },
   "main": "electron/main.js",
   "build": {
-    "appId": "dev.logixiv.paperlens",
+    "appId": "dev.paperlens.app",
     "productName": "PaperLens",
     "directories": {
       "output": "release"

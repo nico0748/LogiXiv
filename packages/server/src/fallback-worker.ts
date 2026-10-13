@@ -7,7 +7,7 @@ import {
   type FallbackResult,
   type PageSize,
   type TextChunk,
-} from '@logixiv/core';
+} from '@paperlens/core';
 
 /**
  * pdf.js を回し、**文の組み立てまで済ませて**返すワーカー。

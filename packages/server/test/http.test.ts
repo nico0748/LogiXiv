@@ -20,7 +20,7 @@ let dataDir = '';
 let close: () => Promise<void> = async () => {};
 
 before(async () => {
-  dataDir = await mkdtemp(join(tmpdir(), 'logixiv-http-test-'));
+  dataDir = await mkdtemp(join(tmpdir(), 'paperlens-http-test-'));
   // 到達しないポートを指定して、フォールバック解析（ワーカー経路）を必ず通す。
   const started = await start({ port: 0, dataDir, grobidUrl: 'http://127.0.0.1:9', webDir: null });
   baseUrl = started.url;
@@ -78,7 +78,7 @@ test('解析中もサーバーが応答し続ける（イベントループを�
 
 test('壊れた document を新規取り込みしても、一覧 API が落ちない', async () => {
   const poisoned = JSON.stringify({
-    format: 'logixiv-export',
+    format: 'paperlens-export',
     formatVersion: 1,
     pdfBase64: Buffer.from(makeSamplePdf()).toString('base64'),
     document: {
@@ -87,7 +87,7 @@ test('壊れた document を新規取り込みしても、一覧 API が落ち�
       annotations: null,
     },
   });
-  const html = `<script type="application/json" id="logixiv-data">${poisoned}</script>`;
+  const html = `<script type="application/json" id="paperlens-data">${poisoned}</script>`;
 
   const seed = await ingest();
   const imported = await fetch(`${baseUrl}/api/documents/${seed}/import?merge=false`, {
@@ -877,7 +877,7 @@ test('health は MCP の貼り先と、つながったかどうかを返す', as
   assert.match(before.mcp.configPath, /claude_desktop_config\.json$/);
   assert.equal(before.mcp.lastContactAt, null);
 
-  await fetch(`${baseUrl}/api/health`, { headers: { 'X-LogiXiv-Client': 'mcp' } });
+  await fetch(`${baseUrl}/api/health`, { headers: { 'X-PaperLens-Client': 'mcp' } });
   const after = (await (await fetch(`${baseUrl}/api/health`)).json()) as {
     mcp: { lastContactAt: number | null };
   };

@@ -1,4 +1,4 @@
-import { parseTei, type DocumentStructure } from '@logixiv/core';
+import { parseTei, type DocumentStructure } from '@paperlens/core';
 
 /**
  * GROBID 呼び出し。
@@ -37,7 +37,7 @@ export async function isGrobidAlive(baseUrl: string, timeoutMs = 2000): Promise<
 
 /** multipart/form-data を自前で組む（依存を足さないため）。 */
 function buildForm(pdf: Uint8Array, fileName: string): { body: Buffer; contentType: string } {
-  const boundary = `----logixiv${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+  const boundary = `----paperlens${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
   const safeName = fileName.replace(/["\r\n]/g, '_');
   const fields: [string, string][] = [
     ['segmentSentences', '1'],

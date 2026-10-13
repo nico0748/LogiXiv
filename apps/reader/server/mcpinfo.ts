@@ -4,7 +4,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { TOOLS } from "../mcp/tools.ts";
+import { TRANSLATION_WORKFLOW } from "../mcp/sentenceTools.ts";
+import { SENTENCE_TOOL_NAMES, TOOLS } from "../mcp/tools.ts";
 import { APP_ROOT, configPath, readConfig } from "./config.ts";
 
 /** Electron の中から呼ばれたときは execPath が Electron 本体になるため、node を探させる。 */
@@ -67,6 +68,16 @@ export function mcpInfo() {
     claudeCode: code(false),
     claudeCodeReadOnly: code(true),
     desktopConfigPath: desktopConfigPath(),
-    tools: TOOLS.map((t) => ({ name: t.name, title: t.config.title, write: !t.config.annotations.readOnlyHint })),
+    // group: notes = 読解ノート・マーカー・用語・数式、sentences = 1 文ずつの対訳（sentences.json）
+    tools: TOOLS.map((t) => ({
+      name: t.name,
+      title: t.config.title,
+      write: !t.config.annotations.readOnlyHint,
+      group: SENTENCE_TOOL_NAMES.has(t.name) ? ("sentences" as const) : ("notes" as const),
+    })),
+    /** 全文翻訳の手順（設定画面で「Claude に全文を訳させるには」として見せる）。 */
+    translationWorkflow: [...TRANSLATION_WORKFLOW],
+    /** 全文翻訳を頼むときのプロンプト名（MCP のプロンプト）。 */
+    translationPrompt: "translate_paper",
   };
 }
