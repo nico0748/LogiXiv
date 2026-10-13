@@ -18,7 +18,8 @@ import { ApiError, type Backend, type Link, VaultBackend, connectServer } from "
 import { type FmValue, FrontmatterError } from "./lib/frontmatter.ts";
 import { type Snack, Snackbar } from "./components/Snackbar.tsx";
 import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId } from "./lib/model.ts";
-import type { PaperSummary } from "./lib/papers.ts";
+import type { PaperSummary, SearchHit } from "./lib/papers.ts";
+import { PaperListPane } from "./components/PaperListPane.tsx";
 import { openPdf } from "./lib/pdf.ts";
 import { getFrontmatter } from "./lib/template.ts";
 
@@ -55,6 +56,12 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [links, setLinks] = useState<Link[]>([]);
   const [metaError, setMetaError] = useState<Record<string, string>>({});
   const [snack, setSnack] = useState<Snack | null>(null);
+  /** 検索の当たりから開いた記録欄。記録タブを開いたあとにフォーカスを移す */
+  const [focusField, setFocusField] = useState<{ id: string; paper: string; n: number } | null>(null);
+  /** 検索の当たり（マーカーと訳）。論文を読み終えてから、当たった行のマーカーを選ぶ */
+  const [pendingHit, setPendingHit] = useState<SearchHit | null>(null);
+  /** 読み込みを終えた論文の ID */
+  const [loaded, setLoaded] = useState<string | null>(null);
   const notify = useCallback((message: string, extra: Partial<Snack> = {}) => setSnack({ message, n: Date.now(), ...extra }), []);
   const wide = typeof window === "undefined" || window.innerWidth > 900;
   const [leftOpen, setLeftOpen] = useState(wide);
@@ -106,6 +113,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
         setNote(n);
         lastNote.current = n;
         setNoteKey(`${current}-${Date.now()}`);
+        setLoaded(current);
       },
     );
     return () => {
@@ -360,6 +368,31 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
 
   const jump = (page: number, y: number) => setJumpTo({ page, y, n: Date.now() });
 
+  /** 検索の当たりを押したとき。論文を開き、当たった場所のタブへ移る */
+  const onHit = (h: SearchHit) => {
+    setView("paper");
+    setCurrent(h.paper);
+    setRightOpen(true);
+    if (h.region === "field" && h.field) {
+      setTab("record");
+      setFocusField({ id: h.field, paper: h.paper, n: Date.now() });
+    } else if (h.region === "list:highlights") {
+      setTab("translate");
+      setPendingHit(h);
+    } else if (h.region === "list:terms") setTab("terms");
+    else if (h.region === "list:equations") setTab("math");
+    else setTab("record");
+  };
+
+  // 当たった行の文を含むマーカーを探して選ぶ。見つからなければタブを開くだけ
+  useEffect(() => {
+    if (!pendingHit || loaded !== pendingHit.paper) return;
+    const needle = pendingHit.text.replace(/^>\s*/, "").replace(/^(訳|メモ):\s*/, "").trim().toLowerCase();
+    const h = needle && ann.highlights.find((x) => [x.text, x.translation, x.memo].some((s) => s && (s.toLowerCase().includes(needle) || needle.includes(s.toLowerCase()))));
+    if (h) setActiveId(h.id);
+    setPendingHit(null);
+  }, [pendingHit, loaded, ann]);
+
   const saveLabel =
     save.kind === "saving" ? "保存しています" : save.kind === "saved" ? (backend.persistent ? "フォルダに保存しました" : "保存しました（メモリ）") : save.kind === "error" ? `保存できませんでした: ${save.msg}` : "";
 
@@ -397,20 +430,14 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
           <button className="btn sm primary" onClick={() => fileRef.current?.click()}>PDF を追加</button>
           <input ref={fileRef} type="file" accept="application/pdf,.pdf" hidden onChange={(e) => void onImport(e.target.files)} />
         </div>
-        {papers.length === 0 ? (
-          <p className="empty">論文はまだありません。「PDF を追加」から取り込んでください。取り込むと、テンプレートから読解ノートを作ります。</p>
-        ) : (
-          <ul className="paper-list">
-            {papers.map((p) => (
-              <li key={p.id}>
-                <button className="paper-item" aria-current={view === "paper" && p.id === current} onClick={() => { setView("paper"); setCurrent(p.id); }}>
-                  <span className="paper-title">{p.title}</span>
-                  <span className="paper-meta"><span className={`tag st-${p.status}`}>{p.status}</span>{p.year && <span>{p.year}</span>}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+        <PaperListPane
+          backend={backend}
+          papers={papers}
+          current={current}
+          showing={view === "paper"}
+          onOpen={(id) => { setView("paper"); setCurrent(id); }}
+          onHit={onHit}
+        />
         <div className="left-foot">
           <button className="btn text sm" aria-pressed={view === "graph"} onClick={() => setView((v) => (v === "graph" ? "paper" : "graph"))}>
             {view === "graph" ? "論文の表示に戻る" : "グラフで見る"}
@@ -460,6 +487,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
             onMeta={onMeta}
             metaError={metaError}
             notify={notify}
+            focusField={focusField && focusField.paper === loaded ? focusField : null}
+            onFocused={() => setFocusField(null)}
           />
         ) : (
           <p className="empty">論文を開くと、訳・用語・数式・記録が表示されます。</p>

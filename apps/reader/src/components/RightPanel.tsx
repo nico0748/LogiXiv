@@ -39,6 +39,9 @@ interface Props {
   metaError: Record<string, string>;
   /** 画面の下に短い知らせを出す */
   notify: (message: string) => void;
+  /** 記録タブを開いたあとにフォーカスを移す記録欄（検索の当たりから開いたとき） */
+  focusField?: { id: string; n: number } | null;
+  onFocused?: () => void;
 }
 
 export function RightPanel(p: Props) {
@@ -79,7 +82,7 @@ export function RightPanel(p: Props) {
         {p.tab === "record" && (
           <>
             <BiblioSection key={`b-${p.noteKey}`} note={p.note} paperId={p.paperId} onMeta={p.onMeta} metaError={p.metaError} notify={p.notify} />
-            <RecordForm key={p.noteKey} note={p.note} status={p.status} onField={p.onField} onStatus={p.onStatus} />
+            <RecordForm key={p.noteKey} note={p.note} status={p.status} onField={p.onField} onStatus={p.onStatus} focusField={p.focusField} onFocused={p.onFocused} />
           </>
         )}
       </div>
@@ -426,8 +429,18 @@ function BiblioSection({ note, paperId, onMeta, metaError, notify }: Pick<Props,
 
 // --- 記録 -----------------------------------------------------------------
 
-function RecordForm({ note, status, onField, onStatus }: { note: string; status: string; onField: (id: string, v: string) => void; onStatus: (s: string) => void }) {
+function RecordForm({ note, status, onField, onStatus, focusField, onFocused }: Pick<Props, "note" | "status" | "onField" | "onStatus" | "focusField" | "onFocused">) {
   const fields = useMemo(() => parseFields(note), [note]);
+  // 検索の当たりから開いたときは、その欄までスクロールしてフォーカスを移す
+  const ready = fields.length > 0;
+  useEffect(() => {
+    if (!focusField || !ready) return;
+    const el = document.getElementById(`f-${focusField.id}`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    el.focus({ preventScroll: true });
+    onFocused?.();
+  }, [focusField, ready, onFocused]);
   // 入力中の値は手元で持ち、ノートの再読み込みで入力が巻き戻らないようにする
   const [local, setLocal] = useState<Record<string, string>>({});
   const value = (f: FieldDef) => local[f.id] ?? f.value;

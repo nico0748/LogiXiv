@@ -46,6 +46,8 @@ export function StatusChips({ value, onChange, counts, allLabel, labelledBy, lab
           data-status={s}
           aria-checked={value === s}
           tabIndex={s === current ? 0 : -1}
+          // 選択中の ✓（CSS の ::after）が名前に入らないよう、名前は明示する
+          aria-label={counts ? `${text(s)}（${count(s)} 件）` : text(s)}
           onClick={() => onChange(s)}
         >
           {text(s)}

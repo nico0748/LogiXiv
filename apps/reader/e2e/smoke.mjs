@@ -91,7 +91,7 @@ await step("数式にする（画像を送る）", async () => {
 await step("記録を入力", async () => {
   await page.getByRole("tab", { name: "記録" }).click();
   await page.getByLabel("一言でいうと").fill("窓付きの疎な注意で、長い論文を少ないメモリで読めるようにした。");
-  await page.getByRole("radio", { name: "精読" }).click();
+  await page.getByRole("radio", { name: "精読", exact: true }).click();
   await page.waitForTimeout(900);
   await page.screenshot({ path: `${shotDir}/04-record.png` });
 });
@@ -101,7 +101,7 @@ const noteMd = () => page.evaluate(async () => {
 });
 
 await step("段階のチップを矢印キーで選ぶ", async () => {
-  await page.getByRole("radio", { name: "精読" }).focus();
+  await page.getByRole("radio", { name: "精読", exact: true }).focus();
   await page.keyboard.press("ArrowRight");
   await page.waitForFunction(() => document.activeElement?.getAttribute("aria-checked") === "true" && document.activeElement.textContent === "検討");
   await page.waitForTimeout(300);
@@ -135,6 +135,24 @@ await step("note.md に反映されている", async () => {
   for (const want of ["status: 精読", "窓付きの疎な注意で", "> [!quote] p.1（水色）", "> 訳: Transformer モデルは", "### [[自己注意（self-attention）]]", "関連: [[Transformer]]", "$$\n\\mathrm{Attention}", "読む目的"]) {
     if (!md.includes(want)) throw new Error(`note.md に「${want}」が無い`);
   }
+});
+
+await step("検索の当たりから記録欄を開く", async () => {
+  await page.getByLabel("論文とノートを検索").fill("窓付き");
+  const hit = page.locator(".hit-item", { hasText: "一言でいうと" });
+  await hit.waitFor();
+  await page.screenshot({ path: `${shotDir}/09-search.png` });
+  await page.getByRole("tab", { name: /訳/ }).click();
+  await hit.click();
+  await page.waitForFunction(() => document.activeElement?.id === "f-summary");
+  await page.getByRole("button", { name: "検索を消す" }).click();
+});
+
+await step("段階で絞り込み、すべて表示で戻す", async () => {
+  await page.getByRole("radiogroup", { name: "段階で絞り込む" }).getByRole("radio", { name: /^精読/ }).click();
+  await page.locator(".filter-band", { hasText: "精読のみ表示" }).waitFor();
+  await page.getByRole("button", { name: "すべて表示" }).click();
+  await page.locator(".filter-band").waitFor({ state: "detached" });
 });
 
 await step("訳タブとマーカー連動", async () => {
