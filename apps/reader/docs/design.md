@@ -53,7 +53,7 @@ PaperLens は目的を「論文を読みながら、読解の記録を Markdown 
 
 | 画面の操作 | ツール |
 | --- | --- |
-| PDF を追加 | `import_paper`（端末のパスか URL） |
+| 追加（PDF ファイル、URL） | `import_paper`（端末のパス、URL、arXiv の番号） |
 | 論文一覧、論文を開く | `list_papers`、`get_paper`、`get_note`、`read_paper_text`、`find_in_paper` |
 | マーカー・訳・メモ | `add_highlight`、`update_highlight`、`remove_annotation` |
 | 用語を調べる | `add_term`、`update_term`、`remove_annotation` |
@@ -73,6 +73,16 @@ PaperLens は目的を「論文を読みながら、読解の記録を Markdown 
 - `get_paper` の `frontmatter` は、一覧を配列で返す（以前は `tags` が `"[paper]"` の文字列で返っていた）。`list_papers` に `authors` と `arxiv` が増えた。
 - `search_notes` の当たりに `region`（`frontmatter`、`field`、`list:highlights`、`list:terms`、`list:equations`、`body`）と、記録欄の ID の `field` が付く。HTML コメントの行は当たりに含めない。
 - `get_bibtex` を足した（読み取り）。画面の「BibTeX をコピー」と同じ内容を返す。
+- `import_paper` は `{ id, note, existing, meta }` を返す。arXiv の論文は題名・著者・年・DOI を frontmatter に入れ、同じ arXiv の論文が既にあれば取り込まずに `existing: true` とその ID を返す。DOI のリンクは専用の文言で断る。
+
+### arXiv からの取り込み
+
+- 入力（abs／pdf の URL、`arXiv:` 付きの番号、番号だけ、旧形式の `hep-th/9901001`）を `server/arxiv.ts` の `normalizeSource` で見分け、版の番号を除いた ID で重複を調べる。arXiv 以外の URL は、リダイレクト後の URL が frontmatter の `url` と同じなら既存とみなす。
+- 書誌情報は `export.arxiv.org/api/query` の Atom から取る。取れないとき（429・503 を含む）は書誌情報なしで続ける。PDF の取得が 429・503 のときは、やり直さずに止め、`Retry-After` の秒数を文言に添える。
+- arXiv の利用条件（3 秒に 1 回、同時に 1 接続）を守るため、arxiv.org への接続はすべて `arxivQueue` を通し、前の接続が終わってから 3 秒空ける。
+  キューはプロセスごとに持つ。ローカルサーバー（画面）と MCP サーバーは別のプロセスなので、同時に取り込むと合わせて 3 秒以内に 2 回接続しうる。
+  プロセスをまたぐ排他（保存先のロックファイルなど）は、取り込みが手作業で 1 件ずつ行われる使い方では釣り合わないため、入れていない。
+- フォルダ名と `# 見出し` は、URL からの取り込みでは題名（arXiv の題名、PDF の題名、ファイル名の順）から作る。ファイルからの取り込みのフォルダ名は変えていない。
 
 ### URL からの取り込みの安全策
 
@@ -244,10 +254,10 @@ yomiyasu（AI が書いた日本語の不自然さを直す指針）を参考に
 
 2026-10-13（M3 の配色、書誌情報、検索、ページ番号と前回の位置、URL 取得の安全策）
 
-- 単体テスト 75 本。frontmatter（一覧の形を保つ、複数行の値を書かない、日本語の項目名、`\r\n`）、BibTeX、検索の当たりの場所、前回の位置の保存、URL 取得の安全策（127.0.0.1 に立てたサーバーで、内部アドレス、リダイレクト、大きさ、時間、PDF でない応答）。
+- 単体テスト 84 本。frontmatter（一覧の形を保つ、複数行の値を書かない、日本語の項目名、`\r\n`）、BibTeX、検索の当たりの場所、前回の位置の保存、URL 取得の安全策（127.0.0.1 に立てたサーバーで、内部アドレス、リダイレクト、大きさ、時間、PDF でない応答）、arXiv の入力の見分け・Atom・接続の間隔（時計を差し替える）・429 と 503、`/api/papers/from-url`（arXiv の取得は差し替える）。
 - `npm run build` と `npm run build:single` の CSS に `light-dark(` が 40 個残り、`--lightningcss-` が 0 個であること。
 - `e2e/smoke.mjs`: マーカーの画素（明暗の両方で 4 色）、暗い表示での色の解決、フォーカスの輪、段階のチップの矢印キー、書誌情報と BibTeX のコピー、検索の当たりから記録欄へ移ること、段階の絞り込み、ページ番号の入力。
-- `e2e/server.mjs`: 読み直したあと、前回の位置（p.2）から表示し、「先頭に戻る」で先頭に戻ること。
+- `e2e/server.mjs`: 読み直したあと、前回の位置（p.2）から表示し、「先頭に戻る」で先頭に戻ること。「URL から追加」で取り込むと書誌情報の欄が開き、同じ URL では論文が増えずにスナックバーが出ること（取得先はテスト用のサーバー自身。`PAPERLENS_ALLOW_PRIVATE_URLS=1`）。`e2e/smoke.mjs` では、1 ファイル版に「追加」のメニューが出ないこと。
 
 2026-10-12（SecOwl 型に移したとき）
 
@@ -264,6 +274,7 @@ yomiyasu（AI が書いた日本語の不自然さを直す指針）を参考に
 
 - 実際のフォルダ（File System Access API）での読み書きは、自動テストでは確認していない。ヘッドレス環境ではフォルダ選択ダイアログを操作できないため。
 - 実際の Claude API への接続は確認していない。
+- 実際の arXiv からの取り込み（例 `1706.03762`）は、作業環境から外へ通信できないため確かめていない。テストは偽のサーバーと差し替えた取得で行った。
 - 回転したページ、スキャン PDF（文字情報が無いもの）は扱えない。
 - 用語ごとのノート（`terms/自己注意.md`）は作っていない。今は論文のノートの中に用語を書く。
 - 配布用アプリ（`npm run dist`）の作成は試していない。モノレポのため、electron-builder が依存パッケージを正しく同梱するかを mac で確かめる必要がある。

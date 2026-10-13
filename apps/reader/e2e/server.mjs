@@ -16,7 +16,8 @@ import { chromium } from "playwright";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const data = mkdtempSync(path.join(tmpdir(), "paperlens-e2e-"));
 const shotDir = process.argv[2] ?? tmpdir();
-const env = { ...process.env, PAPERLENS_DATA: data, PAPERLENS_PORT: "5297" };
+const env = { ...process.env, PAPERLENS_DATA: data, PAPERLENS_PORT: "5297", PAPERLENS_ALLOW_PRIVATE_URLS: "1" };
+// URL からの取り込みは、このサーバー自身が返す PDF で確かめる（外へは通信しない）
 
 const server = spawn(process.execPath, [path.join(root, "dist-server/server.js")], { env, stdio: ["ignore", "pipe", "inherit"] });
 await new Promise((resolve, reject) => {
@@ -157,6 +158,27 @@ await step("読み直すと、前回の位置から表示する", async () => {
   await page.screenshot({ path: `${shotDir}/13-restore.png` });
   await page.getByRole("button", { name: "先頭に戻る" }).click();
   await page.waitForFunction(() => document.querySelector(".pdf-scroll").scrollTop <= 50);
+});
+
+await step("URL から取り込む（新しい論文は書誌情報の欄を開き、同じ URL は既存を開く）", async () => {
+  const url = `http://127.0.0.1:5297/api/papers/${encodeURIComponent(id)}/pdf`;
+  const count = () => readdirSync(path.join(data, "papers")).length;
+  const before = count();
+  const add = async () => {
+    await page.getByRole("button", { name: "追加" }).click();
+    await page.getByRole("menuitem", { name: "URL から追加" }).click();
+    await page.getByLabel("PDF の URL か arXiv の番号").fill(url);
+  };
+  await add();
+  await page.screenshot({ path: `${shotDir}/14-url-dialog.png` });
+  await page.getByRole("button", { name: "取り込む" }).click();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  await page.locator(".biblio[open]").waitFor();
+  if (count() !== before + 1) throw new Error(`論文が増えていない: ${count()}`);
+  await add();
+  await page.getByRole("button", { name: "取り込む" }).click();
+  await page.locator(".snackbar", { hasText: "この論文は既に取り込んでいます。開きました。" }).waitFor();
+  if (count() !== before + 1) throw new Error("同じ URL で論文が増えた");
 });
 
 const md = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");

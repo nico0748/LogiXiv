@@ -90,15 +90,24 @@ export function slugify(name: string) {
   return `${ymd}-${base || "paper"}`;
 }
 
+export interface ImportOptions {
+  /** フォルダ名をファイル名ではなく、この文字列（題名）から作る。URL からの取り込みだけで使う */
+  slugFrom?: string;
+  /** ノートを最初に書く前に frontmatter に入れる項目（arXiv の書誌情報など） */
+  meta?: Record<string, FmValue>;
+}
+
 export async function importPaper(
   vault: Vault,
   fileName: string,
   data: ArrayBuffer,
   title: string,
+  opts: ImportOptions = {},
 ): Promise<string> {
-  let id = slugify(fileName);
+  const base = slugify(opts.slugFrom?.trim() || fileName);
+  let id = base;
   for (let i = 2; await vault.exists(`${PAPERS_DIR}/${id}`); i++) {
-    id = `${slugify(fileName)}-${i}`;
+    id = `${base}-${i}`;
   }
   await ensureLayout(vault);
   const template = await vault.readText(TEMPLATE_PATH);
@@ -109,7 +118,15 @@ export async function importPaper(
     id,
   });
   // コロンなどを含む題名でも YAML として読めるように、frontmatter は引用符付きで入れ直す
-  const note = "title" in readFrontmatter(filled) ? setFrontmatterValue(filled, "title", title.replace(/\n/g, " ")) : filled;
+  let note = "title" in readFrontmatter(filled) ? setFrontmatterValue(filled, "title", title.replace(/\n/g, " ")) : filled;
+  // 書誌情報は、ノートを書く前に入れる（書き込みは 1 回で済み、本文の見出しも正しい題名で埋まる）。テンプレートに無い項目は末尾に足す
+  for (const [k, v] of Object.entries(opts.meta ?? {})) {
+    try {
+      note = setFrontmatterValue(note, k, v);
+    } catch {
+      // テンプレートで複数行の値にしてある項目は、入れずに残す
+    }
+  }
   await vault.writeBinary(pdfPath(id), data);
   await vault.writeText(notePath(id), note);
   await vault.writeText(dataPath(id), JSON.stringify(emptyAnnotations(), null, 2));

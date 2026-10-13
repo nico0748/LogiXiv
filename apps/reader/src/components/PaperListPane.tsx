@@ -142,7 +142,7 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
       )}
       <div className="left-scroll">
         {papers.length === 0 ? (
-          <p className="empty">論文はまだありません。「PDF を追加」から取り込んでください。取り込むと、テンプレートから読解ノートを作ります。</p>
+          <p className="empty">論文はまだありません。「{backend.importUrl ? "追加" : "PDF を追加"}」から取り込んでください。取り込むと、テンプレートから読解ノートを作ります。</p>
         ) : (
           <ul className="paper-list">
             {shown.map((p) => (

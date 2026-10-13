@@ -237,16 +237,16 @@ const WRITE: Tool[] = [
     config: {
       title: "論文を取り込む",
       description:
-        "PDF を取り込み、テンプレートから読解ノートを作ります。source には端末上の PDF の絶対パスか、PDF の URL（arXiv の PDF など）を指定します。作った論文 ID を返します。",
+        "PDF を取り込み、テンプレートから読解ノートを作ります。source には、次のどれかを指定します。\n- 端末上の PDF の絶対パス\n- PDF の URL\n- arXiv の abs／pdf の URL、または番号（例 2410.12345）\n\narXiv の論文は、題名・著者・年・DOI を frontmatter に入れます。同じ arXiv の論文が既にあれば取り込まず、existing: true とその論文の ID を返します。DOI のリンクは使えません。端末内やローカルネットワークの URL は使えません。",
       inputSchema: {
-        source: z.string().min(1).describe("PDF の絶対パス、または https:// で始まる URL"),
+        source: z.string().min(1).describe("PDF の絶対パス、PDF の URL、arXiv の URL か番号"),
         title: z.string().optional().describe("題名。省略すると PDF の文書情報かファイル名を使います"),
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     handler: async ({ source, title }) => {
-      const id = await importFrom(await vault(), source, title);
-      return json({ id, note: notePath(id) });
+      const r = await importFrom(await vault(), source, title);
+      return json({ id: r.id, note: notePath(r.id), existing: r.existing, meta: r.meta });
     },
   },
   {

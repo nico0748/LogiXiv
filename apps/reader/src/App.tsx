@@ -3,7 +3,7 @@ import { SettingsPage } from "./components/SettingsPage.tsx";
 import { GraphView } from "./components/GraphView.tsx";
 import { PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView.tsx";
 import { type Busy, RightPanel, type Tab } from "./components/RightPanel.tsx";
-import { SettingsDialog, TemplateDialog } from "./components/Dialogs.tsx";
+import { SettingsDialog, TemplateDialog, UrlImportDialog } from "./components/Dialogs.tsx";
 import { Welcome } from "./components/Welcome.tsx";
 import {
   type AiSettings,
@@ -52,7 +52,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [busy, setBusy] = useState<Busy>({});
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
   const [ai, setAi] = useState<AiSettings>(loadAiSettings);
-  const [dialog, setDialog] = useState<"settings" | "template" | null>(null);
+  const [dialog, setDialog] = useState<"settings" | "template" | "url" | null>(null);
   const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number; instant?: boolean } | null>(null);
   /** 開いた論文の前回の位置（2 ページ目以降のときだけ） */
   const [initialPos, setInitialPos] = useState<Pos | null>(null);
@@ -386,6 +386,28 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  /** URL か arXiv の番号から取り込む。新しい論文なら記録タブと書誌情報の欄を開く */
+  const onImportUrl = async (url: string) => {
+    if (!backend.importUrl) return;
+    const r = await backend.importUrl(url);
+    await refresh();
+    setDialog(null);
+    setView("paper");
+    if (r.existing) {
+      notify("この論文は既に取り込んでいます。開きました。");
+    } else {
+      skipRestore.current = r.id;
+      setTab("record");
+      setRightOpen(true);
+      try {
+        localStorage.setItem("paperlens.ui.biblioOpen", "1");
+      } catch {
+        // 覚えられなくても、書誌情報の欄は開閉できる
+      }
+    }
+    setCurrent(r.id);
+  };
+
   const jump = (page: number, y: number) => setJumpTo({ page, y, n: Date.now() });
 
   /** 検索の当たりを押したとき。論文を開き、当たった場所のタブへ移る */
@@ -447,7 +469,11 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       <nav className="left" aria-label="論文一覧">
         <div className="pane-head">
           <span style={{ flex: 1 }}>論文</span>
-          <button className="btn sm primary" onClick={() => fileRef.current?.click()}>PDF を追加</button>
+          {backend.importUrl ? (
+            <AddMenu onFile={() => fileRef.current?.click()} onUrl={() => setDialog("url")} />
+          ) : (
+            <button className="btn sm primary" onClick={() => fileRef.current?.click()}>PDF を追加</button>
+          )}
           <input ref={fileRef} type="file" accept="application/pdf,.pdf" hidden onChange={(e) => void onImport(e.target.files)} />
         </div>
         <PaperListPane
@@ -494,7 +520,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
         ) : (
           <div className="drop-hint">
             <h2>{current ? "読み込んでいます" : "論文を開いてください"}</h2>
-            {!current && <p>左の一覧から論文を選ぶか、「PDF を追加」から取り込んでください。</p>}
+            {!current && <p>左の一覧から論文を選ぶか、「{backend.importUrl ? "追加" : "PDF を追加"}」から取り込んでください。</p>}
           </div>
         )}
       </main>
@@ -538,7 +564,59 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
         />
       )}
       {dialog === "template" && <TemplateDialog backend={backend} onClose={() => setDialog(null)} />}
+      {dialog === "url" && <UrlImportDialog onClose={() => setDialog(null)} onImport={onImportUrl} />}
       <Snackbar snack={snack} onClose={() => setSnack(null)} />
+    </div>
+  );
+}
+
+/** 「追加」のボタンとメニュー（PDF ファイル、URL）。サーバー版だけで使う */
+function AddMenu({ onFile, onUrl }: { onFile: () => void; onUrl: () => void }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    (box.current?.querySelector('[role="menuitem"]') as HTMLElement | null)?.focus();
+    const onDown = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      button.current?.focus();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const pick = (fn: () => void) => () => {
+    setOpen(false);
+    fn();
+  };
+  return (
+    <div className="add-menu" ref={box}>
+      <button ref={button} className="btn sm primary" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        追加<span aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div
+          className="menu-surface add-menu-list"
+          role="menu"
+          aria-label="論文を追加"
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            e.preventDefault();
+            const items = [...e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+            const i = items.indexOf(document.activeElement as HTMLElement);
+            items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+          }}
+        >
+          <button role="menuitem" className="menu-item" onClick={pick(onFile)}>PDF ファイルを選ぶ</button>
+          <button role="menuitem" className="menu-item" onClick={pick(onUrl)}>URL から追加</button>
+        </div>
+      )}
     </div>
   );
 }

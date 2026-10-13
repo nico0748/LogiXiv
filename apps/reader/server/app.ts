@@ -27,8 +27,9 @@ import {
 import { APP_ROOT, dataRoot, readConfig, writeConfig } from "./config.ts";
 import { mcpInfo } from "./mcpinfo.ts";
 import { NodeVault } from "./nodeVault.ts";
-import { MAX_BODY } from "./fetchpdf.ts";
-import { importBytes, paperText, requirePaper } from "./service.ts";
+import { normalizeSource } from "./arxiv.ts";
+import { FetchFailed, FetchRefused, MAX_BODY } from "./fetchpdf.ts";
+import { importBytes, importFrom, paperText, requirePaper } from "./service.ts";
 import { VERSION } from "./version.ts";
 
 export { VERSION };
@@ -229,6 +230,20 @@ route("POST", "/api/papers", async (r) => {
   const data = await r.body();
   const id = await importBytes(vaultFor(r.origin), r.query.get("name") || "paper.pdf", data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer, r.query.get("title") ?? undefined);
   return { id };
+});
+// URL か arXiv の番号から取り込む。端末のパスは受け付けない（MCP だけが使う）
+route("POST", "/api/papers/from-url", async (r) => {
+  const { url, title } = await jsonBody<{ url?: string; title?: string }>(r);
+  const s = str(url, "url").trim();
+  const n = normalizeSource(s);
+  if (n.kind === "url" && !/^https?:\/\//i.test(s)) throw new HttpError(400, "http または https で始まる URL か、arXiv の番号を指定してください。");
+  try {
+    return await importFrom(vaultFor(r.origin), s, typeof title === "string" ? title : undefined);
+  } catch (e) {
+    if (e instanceof FetchRefused) throw new HttpError(400, e.message);
+    if (e instanceof FetchFailed) throw new HttpError(502, e.message);
+    throw e;
+  }
 });
 route("GET", "/api/papers/:id", async (r) => paperDetail(vaultFor(r.origin), r.params[0]));
 route("GET", "/api/papers/:id/pdf", async (r) => {

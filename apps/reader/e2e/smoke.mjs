@@ -37,6 +37,11 @@ await step("サンプルで開く", async () => {
   await page.waitForTimeout(600);
 });
 
+await step("1 ファイル版は「PDF を追加」だけで、URL からの取り込みは出さない", async () => {
+  await page.getByRole("button", { name: "PDF を追加" }).waitFor();
+  if (await page.locator('button[aria-haspopup="menu"]', { hasText: "追加" }).count()) throw new Error("1 ファイル版に「追加」のメニューがある");
+});
+
 const select = async (needle, endNeedle) => page.evaluate(([needle, endNeedle]) => {
   const spans = [...document.querySelectorAll(".textLayer span")];
   const a = spans.find((s) => s.textContent.includes(needle));

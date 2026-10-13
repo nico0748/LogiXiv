@@ -48,6 +48,8 @@ export interface Backend {
   persistent: boolean;
   listPapers(): Promise<PaperSummary[]>;
   importPaper(fileName: string, data: ArrayBuffer, title: string): Promise<string>;
+  /** URL か arXiv の番号から取り込む。サーバー版だけが持つ（単体 HTML 版では、他のサイトの PDF を取得できないため） */
+  importUrl?(url: string): Promise<{ id: string; existing: boolean }>;
   loadPdf(id: string): Promise<ArrayBuffer>;
   loadNote(id: string): Promise<string>;
   loadAnnotations(id: string): Promise<Annotations>;
@@ -198,6 +200,9 @@ export class ServerBackend implements Backend {
       headers: { "content-type": "application/pdf" },
     });
     return r.id;
+  }
+  importUrl(url: string) {
+    return call<{ id: string; existing: boolean }>("/api/papers/from-url", { method: "POST", body: json({ url }) });
   }
   loadPdf(id: string) {
     return call<ArrayBuffer>(`/api/papers/${enc(id)}/pdf`);
