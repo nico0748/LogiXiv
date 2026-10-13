@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SettingsPage } from "./components/SettingsPage.tsx";
 import { GraphView } from "./components/GraphView.tsx";
 import { PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView.tsx";
@@ -14,7 +14,8 @@ import {
   toTex,
   translate,
 } from "./lib/claude.ts";
-import { ApiError, type Backend, type Link, VaultBackend, connectServer } from "./lib/backend.ts";
+import { ApiError, type Backend, type Link, ServerBackend, VaultBackend, connectServer } from "./lib/backend.ts";
+import { type Pos, loadPos, posKey, savePos, throttleTrailing } from "./lib/position.ts";
 import { type FmValue, FrontmatterError } from "./lib/frontmatter.ts";
 import { type Snack, Snackbar } from "./components/Snackbar.tsx";
 import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId } from "./lib/model.ts";
@@ -52,7 +53,11 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
   const [ai, setAi] = useState<AiSettings>(loadAiSettings);
   const [dialog, setDialog] = useState<"settings" | "template" | null>(null);
-  const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number } | null>(null);
+  const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number; instant?: boolean } | null>(null);
+  /** 開いた論文の前回の位置（2 ページ目以降のときだけ） */
+  const [initialPos, setInitialPos] = useState<Pos | null>(null);
+  /** 取り込んだ直後の論文。前回の位置へは移らない */
+  const skipRestore = useRef<string | null>(null);
   const [links, setLinks] = useState<Link[]>([]);
   const [metaError, setMetaError] = useState<Record<string, string>>({});
   const [snack, setSnack] = useState<Snack | null>(null);
@@ -85,6 +90,15 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const title = getFrontmatter(note).title || papers.find((p) => p.id === current)?.title || "";
   const status = getFrontmatter(note).status || "未読";
 
+  // 前回の位置のキー。サーバー版は保存先のフルパスを使い、名前が同じ別の保管庫と混ざらないようにする
+  const keyFor = useCallback(
+    (id: string) => posKey(backend instanceof ServerBackend ? backend.meta.dataRoot : backend.name, id),
+    [backend],
+  );
+  // 保存は 1 秒に 1 回まで。論文を切り替えるときは、待っている値をすぐに保存する
+  const posSaver = useMemo(() => throttleTrailing((key: string, pos: Pos) => savePos(key, pos), 1000), []);
+  useEffect(() => () => posSaver.flush(), [current, posSaver]);
+
   const refresh = useCallback(async () => {
     const list = await backend.listPapers();
     setPapers(list);
@@ -100,12 +114,17 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     if (!current) return;
     let cancelled = false;
     setPdf(null);
+    // 前の論文への移動の指示は捨てる（新しい論文では、前回の位置か先頭から表示する）
+    setJumpTo(null);
     setActiveId(null);
     setBusy({});
     setMetaError({});
     void Promise.all([backend.loadPdf(current), backend.loadAnnotations(current), backend.loadNote(current)]).then(
       ([p, a, n]) => {
         if (cancelled) return;
+        const pos = skipRestore.current === current ? null : loadPos(keyFor(current));
+        skipRestore.current = null;
+        setInitialPos(pos && pos.page >= 2 ? pos : null);
         setPdf(p);
         setAnn(a);
         annRef.current = a;
@@ -359,6 +378,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       // 題名が取れなくてもファイル名で取り込む
     }
     const id = await backend.importPaper(f.name, data, t);
+    skipRestore.current = id;
     await refresh();
     setView("paper");
     setCurrent(id);
@@ -455,7 +475,22 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
         ) : view === "graph" ? (
           <GraphView papers={papers} links={links} onOpen={(id) => { setCurrent(id); setView("paper"); }} />
         ) : pdf ? (
-          <PdfView data={pdf} highlights={ann.highlights} activeId={activeId} onAction={onAction} onHighlightClick={(id) => { setActiveId(id); setTab("translate"); setRightOpen(true); }} jumpTo={jumpTo} />
+          <PdfView
+            data={pdf}
+            highlights={ann.highlights}
+            activeId={activeId}
+            onAction={onAction}
+            onHighlightClick={(id) => { setActiveId(id); setTab("translate"); setRightOpen(true); }}
+            jumpTo={jumpTo}
+            initialPos={initialPos}
+            onRestored={(page) =>
+              notify(`前回の位置（p.${page}）から表示しています`, {
+                ms: 6000,
+                action: { label: "先頭に戻る", onClick: () => setJumpTo({ page: 1, y: 0, n: Date.now(), instant: true }) },
+              })
+            }
+            onPosition={(pos) => current && posSaver.call(keyFor(current), pos)}
+          />
         ) : (
           <div className="drop-hint">
             <h2>{current ? "読み込んでいます" : "論文を開いてください"}</h2>

@@ -33,6 +33,8 @@ page.on("pageerror", (e) => errors.push(String(e)));
 const step = async (name, fn) => { await fn(); console.log("✓", name); };
 const done = async (code) => { await browser.close(); server.kill(); process.exit(code); };
 process.on("unhandledRejection", async (e) => { console.error(e); await done(1); });
+// 途中で失敗して終わったときも、サーバーを残さない
+process.on("exit", () => server.kill());
 
 await page.goto("http://127.0.0.1:5297/");
 
@@ -136,6 +138,25 @@ await step("設定画面に MCP の登録方法が出る", async () => {
   await page.locator("section", { has: page.getByRole("heading", { name: "AI エージェント（MCP）" }) }).screenshot({ path: `${shotDir}/12-settings-mcp.png` });
   await page.getByLabel("読み取りだけを許可する").check();
   if (!(await page.getByLabel("Claude Code のコマンド").textContent()).includes("PAPERLENS_MCP_READONLY=1")) throw new Error("読み取り専用の設定にならない");
+});
+
+await step("読み直すと、前回の位置から表示する", async () => {
+  await page.getByRole("button", { name: "論文", exact: true }).click();
+  const input = page.getByLabel("ページ番号");
+  await input.fill("2");
+  await input.press("Enter");
+  await page.waitForTimeout(1500); // 位置の保存は 1 秒に 1 回
+  await page.reload();
+  await page.locator(".snackbar", { hasText: "前回の位置（p.2）から表示しています" }).waitFor();
+  const visible = await page.evaluate(() => {
+    const box = document.querySelector(".pdf-scroll").getBoundingClientRect();
+    const r = document.querySelector('[data-page="2"]').getBoundingClientRect();
+    return r.top < box.bottom && r.bottom > box.top + box.height / 3;
+  });
+  if (!visible) throw new Error("2 ページ目が表示されていない");
+  await page.screenshot({ path: `${shotDir}/13-restore.png` });
+  await page.getByRole("button", { name: "先頭に戻る" }).click();
+  await page.waitForFunction(() => document.querySelector(".pdf-scroll").scrollTop <= 50);
 });
 
 const md = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");

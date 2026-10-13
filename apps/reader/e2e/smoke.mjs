@@ -155,6 +155,20 @@ await step("段階で絞り込み、すべて表示で戻す", async () => {
   await page.locator(".filter-band").waitFor({ state: "detached" });
 });
 
+await step("ページ番号を入れて移る", async () => {
+  const input = page.getByLabel("ページ番号");
+  await input.fill("2");
+  await input.press("Enter");
+  await page.waitForFunction(() => {
+    const box = document.querySelector(".pdf-scroll").getBoundingClientRect();
+    const top = document.querySelector('[data-page="2"]').getBoundingClientRect().top;
+    return top >= box.top && top < box.bottom;
+  });
+  if ((await page.locator(".pdf-toolbar").textContent()).indexOf("/ 2 ページ") < 0) throw new Error("総ページ数が出ていない");
+  await input.fill("1");
+  await input.press("Enter");
+});
+
 await step("訳タブとマーカー連動", async () => {
   await page.getByRole("tab", { name: /訳/ }).click();
   await page.locator(".pdf-page button[aria-label^='p.1 のマーカー']").first().click();

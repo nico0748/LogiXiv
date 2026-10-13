@@ -289,6 +289,7 @@ button, input, textarea, select { font: inherit; color: inherit; letter-spacing:
 .search-box svg { position: absolute; left: 10px; color: var(--md-sys-color-on-surface-variant); pointer-events: none; }
 .search-box .input { height: 40px; padding: 0 36px 0 38px; font-size: 14px; }
 .search-box .input::-webkit-search-cancel-button { display: none; }
+.search-box .input:placeholder-shown { padding-right: 8px; }
 .search-box .icon-btn { position: absolute; right: 4px; }
 .status-filter { margin: 8px 0 4px; }
 .status-filter button { font-size: 13px; min-height: 30px; }
@@ -333,6 +334,8 @@ button, input, textarea, select { font: inherit; color: inherit; letter-spacing:
   display: flex; align-items: center; gap: 6px; padding: 4px 10px;
   background: var(--md-sys-color-surface); border-bottom: 1px solid var(--md-sys-color-outline-variant); font-size: 13px; color: var(--md-sys-color-on-surface-variant);
 }
+.page-input { width: 4em; height: 32px; min-height: 0; padding: 0 4px; text-align: center; font-size: 13px; -moz-appearance: textfield; }
+.page-input::-webkit-inner-spin-button, .page-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .pdf-scroll { flex: 1; overflow: auto; padding: 20px 16px 80px; }
 /* isolation: canvas とマーカーの層を1つのグループにし、マーカーの層の multiply を canvas に効かせる */
 .pdf-page {
