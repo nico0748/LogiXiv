@@ -4,6 +4,7 @@
 //   MCP サーバーや Obsidian がファイルを書き換えたときは、サーバーから通知が届く。
 // - VaultBackend: サーバーなしで動かすとき。ブラウザで選んだフォルダか、メモリ上の保管庫を直接読み書きする。
 
+import type { FmValue } from "./frontmatter.ts";
 import type { AnnotationOp, Annotations } from "./model.ts";
 import {
   type PaperSummary,
@@ -49,7 +50,8 @@ export interface Backend {
   loadNote(id: string): Promise<string>;
   loadAnnotations(id: string): Promise<Annotations>;
   writeField(id: string, field: string, value: string): Promise<string>;
-  writeMeta(id: string, key: string, value: string): Promise<string>;
+  /** frontmatter の1項目を書く。一覧の項目は配列で渡す */
+  writeMeta(id: string, key: string, value: FmValue): Promise<string>;
   changeAnnotations(id: string, ops: AnnotationOp[]): Promise<{ annotations: Annotations; note: string }>;
   readTemplate(): Promise<string>;
   writeTemplate(text: string): Promise<void>;
@@ -91,7 +93,7 @@ export class VaultBackend implements Backend {
   writeField(id: string, field: string, value: string) {
     return writeField(this.vault, id, field, value);
   }
-  writeMeta(id: string, key: string, value: string) {
+  writeMeta(id: string, key: string, value: FmValue) {
     return writeMeta(this.vault, id, key, value);
   }
   changeAnnotations(id: string, ops: AnnotationOp[]) {
@@ -193,7 +195,7 @@ export class ServerBackend implements Backend {
   async writeField(id: string, field: string, value: string) {
     return (await call<{ note: string }>(`/api/papers/${enc(id)}/fields/${enc(field)}`, { method: "PUT", body: json({ value }) })).note;
   }
-  async writeMeta(id: string, key: string, value: string) {
+  async writeMeta(id: string, key: string, value: FmValue) {
     return (await call<{ note: string }>(`/api/papers/${enc(id)}/meta`, { method: "PUT", body: json({ key, value }) })).note;
   }
   changeAnnotations(id: string, ops: AnnotationOp[]) {

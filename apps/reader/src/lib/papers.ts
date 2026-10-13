@@ -17,15 +17,8 @@ import {
   renderHighlights,
   renderTerms,
 } from "./model.ts";
-import {
-  type FieldDef,
-  fillPlaceholders,
-  getFrontmatter,
-  parseFields,
-  setField,
-  setFrontmatter,
-  setList,
-} from "./template.ts";
+import { type FmValue, fmText, readFrontmatter, setFrontmatterValue } from "./frontmatter.ts";
+import { type FieldDef, fillPlaceholders, getFrontmatter, parseFields, setField, setList } from "./template.ts";
 import type { Vault } from "./vault.ts";
 
 export const TEMPLATE_PATH = "_templates/reading-note.md";
@@ -105,9 +98,7 @@ export async function importPaper(
     id,
   });
   // コロンなどを含む題名でも YAML として読めるように、frontmatter は引用符付きで入れ直す
-  const note = /^---\n[\s\S]*?^title:/m.test(filled)
-    ? setFrontmatter(filled, "title", title.replace(/\n/g, " "))
-    : filled;
+  const note = "title" in readFrontmatter(filled) ? setFrontmatterValue(filled, "title", title.replace(/\n/g, " ")) : filled;
   await vault.writeBinary(pdfPath(id), data);
   await vault.writeText(notePath(id), note);
   await vault.writeText(dataPath(id), JSON.stringify(emptyAnnotations(), null, 2));
@@ -164,10 +155,11 @@ export const writeField = (vault: Vault, id: string, field: string, value: strin
   updateNote(vault, id, (md) => setField(md, field, value));
 
 export const writeStatus = (vault: Vault, id: string, status: string) =>
-  updateNote(vault, id, (md) => setFrontmatter(md, "status", status));
+  updateNote(vault, id, (md) => setFrontmatterValue(md, "status", status));
 
-export const writeMeta = (vault: Vault, id: string, key: string, value: string) =>
-  updateNote(vault, id, (md) => setFrontmatter(md, key, value));
+/** frontmatter の1項目を書く。一覧の項目は配列で渡す。複数行の値の項目は FrontmatterError になる。 */
+export const writeMeta = (vault: Vault, id: string, key: string, value: FmValue) =>
+  updateNote(vault, id, (md) => setFrontmatterValue(md, key, value));
 
 const renderLists = (md: string, a: Annotations) => {
   let out = setList(md, "highlights", renderHighlights(a.highlights), "マーカーと訳");
@@ -206,7 +198,8 @@ export async function writeTemplate(vault: Vault, text: string) {
 }
 
 export interface PaperDetail extends PaperSummary {
-  frontmatter: Record<string, string>;
+  /** 一覧の項目（authors・tags など）は配列のまま返す */
+  frontmatter: Record<string, FmValue>;
   fields: FieldDef[];
   annotations: Annotations;
 }
@@ -214,12 +207,12 @@ export interface PaperDetail extends PaperSummary {
 /** 論文1本の記録をまとめて返す。AI エージェント向け。 */
 export async function paperDetail(vault: Vault, id: string): Promise<PaperDetail> {
   const note = await loadNote(vault, checkId(id));
-  const fm = getFrontmatter(note);
+  const fm = readFrontmatter(note);
   return {
     id,
-    title: fm.title || id,
-    status: fm.status || "未読",
-    year: fm.year || "",
+    title: fmText(fm.title) || id,
+    status: fmText(fm.status) || "未読",
+    year: fmText(fm.year),
     frontmatter: fm,
     fields: parseFields(note),
     annotations: await loadAnnotations(vault, id),

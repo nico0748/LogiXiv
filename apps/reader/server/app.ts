@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { type FmValue, FrontmatterError } from "../src/lib/frontmatter.ts";
 import type { AnnotationOp } from "../src/lib/model.ts";
 import {
   PAPERS_DIR,
@@ -190,6 +191,12 @@ const str = (v: unknown, name: string) => {
   return v;
 };
 
+/** frontmatter の値。文字列か、文字列の配列（一覧） */
+const fmValue = (v: unknown, name: string): FmValue => {
+  if (typeof v === "string" || (Array.isArray(v) && v.every((x) => typeof x === "string"))) return v as FmValue;
+  throw new HttpError(400, `${name} を文字列か文字列の配列で指定してください。`);
+};
+
 class Raw {
   type: string;
   data: Buffer | string;
@@ -237,11 +244,17 @@ route("PUT", "/api/papers/:id/fields/:field", async (r) => {
   return { note: await writeField(v, r.params[0], r.params[1], str(value, "value")) };
 });
 route("PUT", "/api/papers/:id/meta", async (r) => {
-  const { key, value } = await jsonBody<{ key?: string; value?: string }>(r);
+  const { key, value } = await jsonBody<{ key?: string; value?: unknown }>(r);
   if (!/^[\w-]+$/.test(str(key, "key"))) throw new HttpError(400, "key には英数字・ハイフン・下線だけを使えます。");
   const v = vaultFor(r.origin);
   await requirePaper(v, r.params[0]);
-  return { note: await writeMeta(v, r.params[0], key as string, str(value, "value")) };
+  try {
+    return { note: await writeMeta(v, r.params[0], key as string, fmValue(value, "value")) };
+  } catch (e) {
+    // 複数行の値の項目は書き換えない。画面ではその欄を読み取り専用にする
+    if (e instanceof FrontmatterError) throw new HttpError(409, e.message);
+    throw e;
+  }
 });
 route("GET", "/api/papers/:id/annotations", async (r) => loadAnnotations(vaultFor(r.origin), r.params[0]));
 route("PATCH", "/api/papers/:id/annotations", async (r) => {

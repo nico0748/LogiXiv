@@ -273,11 +273,11 @@ const WRITE: Tool[] = [
     config: {
       title: "書誌情報を変える",
       description:
-        "読解ノートの frontmatter の1項目を書き換えます。title・authors・year・venue・doi などに使います。項目が無ければ追加します。",
+        "読解ノートの frontmatter の1項目を書き換えます。title・authors・year・venue・doi などに使います。項目が無ければ追加します。著者など一覧の項目は配列で渡します（例: [\"A. Example\", \"B. Sample\"]）。一覧の書き方（ブロック形式・フロー形式）は元の形を保ちます。複数行の値の項目は書き換えられません。",
       inputSchema: {
         paper: PAPER,
         key: z.string().regex(/^[\w-]+$/).describe("項目名（英数字・ハイフン・下線）"),
-        value: z.string().describe("値"),
+        value: z.union([z.string(), z.array(z.string())]).describe("値。一覧の項目は文字列の配列"),
       },
       annotations: { readOnlyHint: false, idempotentHint: true },
     },

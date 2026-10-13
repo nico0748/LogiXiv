@@ -13,6 +13,8 @@
 //
 // 範囲の外側はアプリから変更しない。利用者が自由に書き足せる。
 
+import { fmText, readFrontmatter, setFrontmatterValue } from "./frontmatter.ts";
+
 export interface FieldDef {
   id: string;
   label: string;
@@ -98,46 +100,16 @@ export function setList(
 }
 
 // --- frontmatter -----------------------------------------------------------
+// 読み書きの本体は frontmatter.ts にある。ここでは 1 行の文字列として扱う古い形の関数を残す。
 
+/** frontmatter の値を 1 行の文字列で返す。一覧は "A, B" にまとめる。 */
 export function getFrontmatter(md: string): Record<string, string> {
-  const m = md.match(/^---\n([\s\S]*?)\n---/);
-  if (!m) return {};
-  const out: Record<string, string> = {};
-  for (const line of m[1].split("\n")) {
-    const kv = line.match(/^([\w-]+):\s*(.*)$/);
-    if (kv) out[kv[1]] = unquote(kv[2].trim());
-  }
-  return out;
+  return Object.fromEntries(Object.entries(readFrontmatter(md)).map(([k, v]) => [k, fmText(v)]));
 }
 
 /** frontmatter の1項目だけを書き換える。項目が無ければ追加する。 */
 export function setFrontmatter(md: string, key: string, value: string): string {
-  const line = `${key}: ${yamlScalar(value)}`;
-  const m = md.match(/^---\n([\s\S]*?)\n---/);
-  if (!m) return `---\n${line}\n---\n\n${md}`;
-  const lines = m[1].split("\n");
-  const idx = lines.findIndex((l) => l.startsWith(`${key}:`));
-  if (idx >= 0) lines[idx] = line;
-  else lines.push(line);
-  return `---\n${lines.join("\n")}\n---${md.slice(m[0].length)}`;
-}
-
-function unquote(s: string) {
-  if (/^".*"$/.test(s)) {
-    try {
-      return JSON.parse(s) as string;
-    } catch {
-      return s.slice(1, -1);
-    }
-  }
-  if (/^'.*'$/.test(s)) return s.slice(1, -1).replace(/''/g, "'");
-  return s;
-}
-
-function yamlScalar(v: string) {
-  if (v === "") return '""';
-  if (/^[\w　-鿿＀-￯-]+$/.test(v)) return v;
-  return JSON.stringify(v);
+  return setFrontmatterValue(md, key, value);
 }
 
 function trimBlock(s: string) {
