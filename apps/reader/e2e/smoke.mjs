@@ -120,10 +120,75 @@ await step("グラフ", async () => {
   await page.screenshot({ path: `${shotDir}/06-graph.png` });
 });
 
+// マーカーの矩形の中の画素を調べる。最も暗い画素（文字）と、最も多い画素（紙に重ねたマーカーの色）を返す。
+// 画像の読み取りはブラウザの canvas で行う（依存を増やさないため）
+const MARKS = [["Transformer models struggle", "水色", "cyan", [193, 232, 255]], ["We propose sparse", "黄色", "yellow", [255, 224, 131]], ["Researchers spend", "桃色", "magenta", [255, 165, 220]], ["Prior work addresses", "緑色", "green", [103, 214, 143]]];
+const measure = async (label) => {
+  const boxes = [];
+  for (const [, , cls] of MARKS) boxes.push(await page.locator(`.mk.${cls}`).first().boundingBox());
+  const png = (await page.screenshot()).toString("base64");
+  const res = await page.evaluate(async ([png, boxes]) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${png}`;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = img.width; c.height = img.height;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    return boxes.map((b) => {
+      const d = ctx.getImageData(Math.round(b.x) + 2, Math.round(b.y) + 2, Math.round(b.width) - 4, Math.round(b.height) - 5).data;
+      let min = 999, dark = null; const counts = {};
+      for (let i = 0; i < d.length; i += 4) {
+        const L = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        if (L < min) { min = L; dark = [d[i], d[i + 1], d[i + 2]]; }
+        const k = `${d[i]},${d[i + 1]},${d[i + 2]}`; counts[k] = (counts[k] || 0) + 1;
+      }
+      return { dark, mode: Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0].split(",").map(Number) };
+    });
+  }, [png, boxes]);
+  MARKS.forEach(([, , cls, want], i) => {
+    const { dark, mode } = res[i];
+    if (dark.some((v) => v > 40)) throw new Error(`${label}: ${cls} のマーカーの中の文字が暗くない: ${dark}`);
+    if (mode.some((v, j) => Math.abs(v - want[j]) > 3)) throw new Error(`${label}: ${cls} のマーカーの色が違う: ${mode}（期待 ${want}）`);
+  });
+};
+
 await step("暗い表示", async () => {
   await page.getByRole("button", { name: "論文の表示に戻る" }).click();
+  await page.locator(".pdf-page[data-page='1'] .textLayer span").first().waitFor();
+  await page.waitForTimeout(400);
+  // 残りの 3 色のマーカーを引き、明暗の両方で文字が隠れないことを確かめる
+  for (const [needle, name, cls] of MARKS.slice(1)) {
+    await page.evaluate((needle) => {
+      const a = [...document.querySelectorAll(".textLayer span")].find((s) => s.textContent.includes(needle));
+      const r = document.createRange(); const i = a.textContent.indexOf(needle);
+      r.setStart(a.firstChild, i); r.setEnd(a.firstChild, Math.min(a.textContent.length, i + 40));
+      getSelection().removeAllRanges(); getSelection().addRange(r);
+      document.querySelector(".pdf-scroll").dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    }, needle);
+    await page.locator(".sel-menu").waitFor();
+    await page.getByRole("button", { name: `${name}のマーカーを引く` }).click();
+    await page.locator(`.mk.${cls}`).first().waitFor();
+  }
+  await page.evaluate(() => getSelection().removeAllRanges());
+  await page.locator(".pdf-scroll").evaluate((el) => el.scrollTo(0, 0));
+  await page.waitForTimeout(300);
+  await measure("明るい表示");
   await page.emulateMedia({ colorScheme: "dark" });
   await page.waitForTimeout(500);
+  await measure("暗い表示");
+  // ページの中は明るい表示の値、ページの外に出る番号は暗い表示の値になる
+  const resolved = await page.evaluate(() => {
+    const tl = document.querySelector(".pdf-page .textLayer");
+    const s = document.createElement("span");
+    s.style.color = "var(--md-sys-color-primary)";
+    tl.appendChild(s);
+    const primary = getComputedStyle(s).color;
+    s.remove();
+    return { primary, pageNo: getComputedStyle(document.querySelector(".page-no")).color };
+  });
+  if (resolved.primary !== "rgb(84, 90, 146)") throw new Error(`ページの中の primary が明るい表示の値でない: ${resolved.primary}`);
+  if (resolved.pageNo !== "rgb(199, 197, 208)") throw new Error(`ページ番号の色が暗い表示の値でない: ${resolved.pageNo}`);
   await page.screenshot({ path: `${shotDir}/07-dark.png` });
 });
 
