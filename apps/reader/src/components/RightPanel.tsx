@@ -7,8 +7,9 @@ import { type FmValue, fmText, parseFrontmatter, readFrontmatter } from "../lib/
 import { type FieldDef, parseFields } from "../lib/template.ts";
 import { EmptyState } from "./EmptyState.tsx";
 import { StatusChips } from "./StatusChips.tsx";
+import { SentencePanel } from "./sentences/SentencePanel.tsx";
 
-export type Tab = "translate" | "terms" | "math" | "record";
+export type Tab = "sentences" | "translate" | "terms" | "math" | "record";
 
 export interface Busy {
   [id: string]: "working" | { error: string } | undefined;
@@ -32,6 +33,7 @@ interface Props {
   onField: (id: string, value: string) => void;
   onStatus: (s: string) => void;
   onOpenSettings: () => void;
+  /** 開いている論文の id。対訳タブも使う。 */
   paperId: string;
   /** frontmatter の1項目を書く（書誌情報の欄） */
   onMeta: (key: string, value: FmValue) => void;
@@ -46,6 +48,7 @@ interface Props {
 
 export function RightPanel(p: Props) {
   const tabs: { id: Tab; label: string; count?: number }[] = [
+    { id: "sentences", label: "対訳" },
     { id: "translate", label: "訳", count: p.ann.highlights.length },
     { id: "terms", label: "用語", count: p.ann.terms.length },
     { id: "math", label: "数式", count: p.ann.equations.length },
@@ -70,12 +73,13 @@ export function RightPanel(p: Props) {
         ))}
       </div>
       <div className="panel" role="tabpanel" id={`panel-${p.tab}`} aria-labelledby={`tab-${p.tab}`}>
-        {!p.aiReady && p.tab !== "record" && (
+        {!p.aiReady && p.tab !== "record" && p.tab !== "sentences" && (
           <div className="notice" style={{ marginTop: 0, marginBottom: 12 }}>
             <p style={{ margin: "0 0 8px" }}>訳や用語の説明を自動で入れるには、Claude の API キーが必要です。キーが無くても手で入力できます。</p>
             <button className="btn tonal sm" onClick={p.onOpenSettings}>API キーを設定する</button>
           </div>
         )}
+        {p.tab === "sentences" && <SentencePanel paperId={p.paperId ?? null} />}
         {p.tab === "translate" && <TranslateList {...p} />}
         {p.tab === "terms" && <TermList {...p} />}
         {p.tab === "math" && <MathList {...p} />}

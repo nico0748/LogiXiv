@@ -1,5 +1,5 @@
 /**
- * LogiXiv のデータモデル。
+ * PaperLens のデータモデル。
  *
  * 設計上いちばん重要な点は「構造データ（PDF から機械的に得られるもの）」と
  * 「注釈データ（人と Claude が積み上げるもの）」を分離していること。
@@ -368,7 +368,7 @@ export interface PaperDocument {
 
 /** 書き出し HTML に埋め込む JSON のかたち。 */
 export interface ExportPayload {
-  format: 'logixiv-export';
+  format: 'paperlens-export';
   formatVersion: 1;
   exportedAt: string;
   document: PaperDocument;

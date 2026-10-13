@@ -274,6 +274,41 @@ test('書き出し HTML は自己完結し、往復で訳とメモが復元さ�
   assert.equal(overlapRatio(parsed, document), 1);
 });
 
+test('新しい書き出しは PaperLens の id と format で書かれる', () => {
+  const document = createDocument({ structure: parseTei(SAMPLE_TEI), sourceFileName: 'paper.pdf' });
+  const html = buildExportHtml({ document, pdfBase64: '', viewerScript: '', viewerStyle: '' });
+  assert.ok(html.includes('id="paperlens-data"'));
+  assert.ok(html.includes('"format":"paperlens-export"'));
+  assert.equal(/logixiv/i.test(html), false);
+});
+
+test('改名前（LogiXiv）の書き出し HTML もそのまま取り込める', () => {
+  const structure = parseTei(SAMPLE_TEI);
+  let document = createDocument({ structure, sourceFileName: 'paper.pdf' });
+  document = setTranslation(document, structure.sentences[0]!.hash, '古い書き出しの訳。', { source: 'human' }).document;
+  document = addNote(document, structure.sentences[0]!.hash, '古いメモ').document;
+  // 改名前の版が書いていたとおりの id と format に戻す。
+  const legacyHtml = buildExportHtml({ document, pdfBase64: 'JVBERi0xLjQK', viewerScript: '', viewerStyle: '' })
+    .replace('id="paperlens-data"', 'id="logixiv-data"')
+    .replace('"format":"paperlens-export"', '"format":"logixiv-export"');
+  assert.ok(legacyHtml.includes('id="logixiv-data"'));
+  assert.ok(legacyHtml.includes('"format":"logixiv-export"'));
+
+  const parsed = parseExportHtml(legacyHtml);
+  assert.equal(parsed.documentTitle, document.title);
+  assert.equal(parsed.pdfBase64, 'JVBERi0xLjQK');
+  assert.equal(parsed.annotations.notes[0]!.body, '古いメモ');
+  assert.equal(parsed.annotations.translations[structure.sentences[0]!.hash]!.text, '古い書き出しの訳。');
+});
+
+test('新旧の id が両方あるときは、どれが本物か判断できないので断る', () => {
+  const payload = '{"format":"paperlens-export","formatVersion":1}';
+  const html =
+    `<script type="application/json" id="paperlens-data">${payload}</script>` +
+    `<script type="application/json" id="logixiv-data">${payload}</script>`;
+  assert.throws(() => parseExportHtml(html), /2 個見つかりました/);
+});
+
 test('注釈に script 要素が混ざっても要素が閉じない', () => {
   const structure = parseTei(SAMPLE_TEI);
   let document = createDocument({ structure, sourceFileName: 'paper.pdf' });
@@ -288,14 +323,14 @@ test('注釈に script 要素が混ざっても要素が閉じない', () => {
   assert.equal(parsed.annotations.notes[0]!.body, payload);
 });
 
-test('LogiXiv 製でない HTML と壊れた JSON は ImportError になる', () => {
+test('PaperLens 製でない HTML と壊れた JSON は ImportError になる', () => {
   assert.throws(() => parseExportHtml('<html><body>ただのページ</body></html>'), ImportError);
   assert.throws(
-    () => parseExportHtml('<script type="application/json" id="logixiv-data">{ broken</script>'),
+    () => parseExportHtml('<script type="application/json" id="paperlens-data">{ broken</script>'),
     ImportError,
   );
   assert.throws(
-    () => parseExportHtml('<script type="application/json" id="logixiv-data">{"format":"other"}</script>'),
+    () => parseExportHtml('<script type="application/json" id="paperlens-data">{"format":"other"}</script>'),
     ImportError,
   );
 });

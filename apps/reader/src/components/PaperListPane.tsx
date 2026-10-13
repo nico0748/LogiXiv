@@ -4,7 +4,7 @@ import type { PaperSummary, SearchHit } from "../lib/papers.ts";
 import { parseFields } from "../lib/template.ts";
 import { StatusChips } from "./StatusChips.tsx";
 
-// 左の論文一覧。検索欄と段階の絞り込み、ノートの中の当たりを出す。
+// 左サイドバーの論文一覧。検索欄と段階の絞り込み、ノートの中の当たりを出す。
 //
 // - 検索の語は 300ms 待ってから使う。題名・著者・年で一覧を絞り、2 文字以上ならノートの中も探す
 // - 段階の絞り込みは localStorage に覚える。検索の語は覚えない（開き直したときに一覧が理由なく短くならないように）
@@ -30,9 +30,11 @@ interface Props {
   showing: boolean;
   onOpen: (id: string) => void;
   onHit: (hit: SearchHit) => void;
+  /** 「PDF を追加」（論文が無いときに出す） */
+  onAdd: () => void;
 }
 
-export function PaperListPane({ backend, papers, current, showing, onOpen, onHit }: Props) {
+export function PaperListPane({ backend, papers, current, showing, onOpen, onHit, onAdd }: Props) {
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState(() => {
@@ -140,16 +142,20 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
           )}
         </div>
       )}
-      <div className="left-scroll">
+      <div className="sidebar-scroll">
+        <div className="nav-header-title">論文 <span className="nav-count">{papers.length}</span></div>
         {papers.length === 0 ? (
-          <p className="empty">論文はまだありません。「{backend.importUrl ? "追加" : "PDF を追加"}」から取り込んでください。取り込むと、テンプレートから読解ノートを作ります。</p>
+          <div className="empty">
+            <p>論文はまだありません。PDF をここにドロップするか、取り込んでください。取り込むと、テンプレートから読解ノートを作ります。</p>
+            <button className="btn sm primary" onClick={onAdd}>PDF を追加</button>
+          </div>
         ) : (
-          <ul className="paper-list">
+          <ul className="nav-files">
             {shown.map((p) => (
               <li key={p.id}>
-                <button className="paper-item" aria-current={showing && p.id === current} onClick={() => onOpen(p.id)}>
-                  <span className="paper-title">{p.title}</span>
-                  <span className="paper-meta">
+                <button className={`nav-file-title${showing && p.id === current ? " is-active" : ""}`} aria-current={showing && p.id === current} onClick={() => onOpen(p.id)}>
+                  <span className="nav-file-title-content">{p.title}</span>
+                  <span className="nav-file-meta">
                     <span className={`tag st-${p.status}`}>{p.status}</span>
                     {p.year && <span>{p.year}</span>}
                     {p === outside && <span className="tag out-of-filter">絞り込み外</span>}

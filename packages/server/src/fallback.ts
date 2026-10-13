@@ -1,5 +1,5 @@
 import { Worker } from 'node:worker_threads';
-import { sanitizeTitle, STRUCTURE_VERSION, type DocumentStructure } from '@logixiv/core';
+import { sanitizeTitle, STRUCTURE_VERSION, type DocumentStructure } from '@paperlens/core';
 import type { FallbackWorkerInput, FallbackWorkerOutput } from './fallback-worker.ts';
 import { describePdfFailure, pdfParseTimeout, type RawPdfFailure } from './pdf-failure.ts';
 

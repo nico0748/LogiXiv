@@ -7,17 +7,19 @@ import { listPapers, loadNote, notePath } from "../src/lib/papers.ts";
 import { dataRoot } from "../server/config.ts";
 import { NodeVault } from "../server/nodeVault.ts";
 import { VERSION } from "../server/version.ts";
+import { TRANSLATION_STYLE, TRANSLATION_WORKFLOW } from "./sentenceTools.ts";
 import { READ_TOOLS, WRITE_TOOLS, type Tool } from "./tools.ts";
 
 const INSTRUCTIONS = `PaperLens は、論文を読みながら訳・用語・数式・読解メモを Markdown のノートに残すアプリです。
 データは保存先フォルダの普通のファイルで、Obsidian の保管庫としても開けます。
 
-- 論文1本 = papers/<論文ID>/ のフォルダ。paper.pdf（原文）、note.md（読解ノート）、paperlens.json（マーカーの位置など）が入っています。
+- 論文1本 = papers/<論文ID>/ のフォルダ。paper.pdf（原文）、note.md（読解ノート）、paperlens.json（マーカーの位置など）、sentences.json（1 文ずつの対訳）が入っています。
 - 読解ノートはテンプレートから作られ、段階（## 見出し）ごとに記録欄があります。記録欄は set_fields で書きます。記録欄の外側は利用者が自由に書く場所なので、変更しないでください。
 - 読解の段階は status で表します: ${STATUSES.join(" → ")}。
 - まず get_settings と list_papers を呼び、論文 ID と記録欄の ID を確かめてください。本文は read_paper_text で数ページずつ読みます。
 - マーカー（add_highlight）は PDF の文字どおりに指定すると、画面の PDF 上にも色が付きます。
 - 書く日本語は、です・ます調ではなく、ノートらしい簡潔な常体（〜である、〜する）にそろえます。専門用語は初出で原語を括弧書きにします。
+- 全文を 1 文ずつ訳すときは get_sentence_outline → get_translation_batch → set_translations を、remainingUnique が 0 になるまで繰り返します（プロンプト translate_paper に手順があります）。文の指定は hash で行います。訳す対象でない文は skip_sentences、区切りの誤りは fix_sentence_boundary、訳語の統一は update_glossary を使います。sentences.json がまだ無い論文では parse_sentences を呼びます。
 - アプリを開いている場合、ここでの変更は画面にすぐ反映されます。`;
 
 export function createServer(opts: { readOnly?: boolean } = {}) {
@@ -81,12 +83,44 @@ export function createServer(opts: { readOnly?: boolean } = {}) {
               "2. read_paper_text で、アブストラクト・図・結論を先に読み、「1. 概要をつかむ」の欄を set_fields で書く。終えたら set_status で「概要把握」にする。",
               "3. 本文を数ページずつ読み、要となる文に add_highlight でマーカーと訳を付ける（1ページに1〜3か所まで）。初めて出た専門用語は add_term、主要な数式は add_equation で登録する。",
               "4. 「2. 精読する」「3. 検討する」の欄を書き、段階ごとに status を進める。",
+              "   全文の対訳が要るときは、translate_paper の手順（get_sentence_outline → get_translation_batch → set_translations を remainingUnique が 0 になるまで）で 1 文ずつ訳す。読解ノートの記録欄には要点だけを書く。",
               "5. 最後に「4. まとめる」を書き、status を「まとめ済み」にする。",
               "",
               "書く日本語は簡潔な常体にそろえ、推測は推測と分かるように書いてください。",
             ]
               .filter((l, i, a) => l || a[i - 1])
               .join("\n"),
+          },
+        },
+      ],
+    }),
+  );
+
+  server.registerPrompt(
+    "translate_paper",
+    {
+      title: "論文を 1 文ずつ全文訳す",
+      description: "対訳（sentences.json）の未訳の文を文脈ごと受け取り、用語集に従って訳し、まとめて書き戻すのを最後まで繰り返します。",
+      argsSchema: {
+        paper: z.string().describe("論文 ID"),
+        field: z.string().optional().describe("分野（例: 機械学習）。訳語の選び方に影響します"),
+      },
+    },
+    ({ paper, field }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: [
+              `PaperLens の論文「${paper}」を 1 文ずつ全文訳してください。${field ? `分野は「${field}」です。` : ""}`,
+              "",
+              "手順:",
+              ...TRANSLATION_WORKFLOW.map((l, i) => `${i + 1}. ${l}`),
+              "",
+              "訳し方の方針:",
+              ...TRANSLATION_STYLE.map((l) => `- ${l}`),
+            ].join("\n"),
           },
         },
       ],

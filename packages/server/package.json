@@ -1,5 +1,5 @@
 {
-  "name": "@logixiv/server",
+  "name": "@paperlens/server",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,14 +12,14 @@
     }
   },
   "bin": {
-    "logixiv": "./dist/cli.js"
+    "paperlens-server": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc -b && chmod +x dist/cli.js",
     "test": "node --test --experimental-strip-types test/*.test.ts"
   },
   "dependencies": {
-    "@logixiv/core": "0.1.0",
+    "@paperlens/core": "0.1.0",
     "pdfjs-dist": "6.3.289"
   },
   "devDependencies": {

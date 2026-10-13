@@ -1,12 +1,12 @@
 import { mkdir, readdir, readFile, rename, writeFile, stat, rm } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { migrateDocument, type PaperDocument } from '@logixiv/core';
+import { migrateDocument, type PaperDocument } from '@paperlens/core';
 import { type Config, documentDir, documentsDir } from './config.ts';
 
 /**
  * ストレージは「アプリを捨てても人が読める」形にしてある。
- * DB は使わず ~/.logixiv/documents/<id>/ に document.json と source.pdf を置くだけ。
+ * DB は使わず ~/.paperlens-server/documents/<id>/ に document.json と source.pdf を置くだけ。
  *
  * 書き込みは必ず一時ファイル → rename。JSON を途中まで書いた状態で電源が落ちても、
  * 前のバージョンの document.json がそのまま残る。
@@ -86,6 +86,11 @@ export class DocumentStore {
   }
 
   private lockPath(): string {
+    return join(this.config.dataDir, 'paperlens.lock');
+  }
+
+  /** 改名前（LogiXiv）の版が使うロック。古い版と同じ置き場を同時に開かないために見る。 */
+  private legacyLockPath(): string {
     return join(this.config.dataDir, 'logixiv.lock');
   }
 
@@ -100,6 +105,15 @@ export class DocumentStore {
    */
   private async acquireLock(): Promise<void> {
     if (this.holdsLock) return;
+    const legacyRaw = await readFile(this.legacyLockPath(), 'utf8').catch(() => '');
+    const legacyOwner = Number.parseInt(legacyRaw.trim(), 10);
+    if (legacyOwner !== process.pid && isAlive(legacyOwner)) {
+      throw new DataDirectoryLockedError(
+        `${this.config.dataDir} は改名前の LogiXiv（PID ${legacyOwner}）が使っています。` +
+          '同じ置き場を 2 つのプロセスで開くと、受け付けた書き込みが黙って消えます。\n' +
+          `他に動いていないのにこの表示が出る場合は ${this.legacyLockPath()} を消してください。`,
+      );
+    }
     const path = this.lockPath();
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -115,7 +129,7 @@ export class DocumentStore {
         const owner = Number.parseInt(raw.trim(), 10);
         if (owner !== process.pid && isAlive(owner)) {
           throw new DataDirectoryLockedError(
-            `${this.config.dataDir} は別の LogiXiv（PID ${owner}）が使っています。` +
+            `${this.config.dataDir} は別の PaperLens（PID ${owner}）が使っています。` +
               '同じ置き場を 2 つのプロセスで開くと、受け付けた書き込みが黙って消えます。\n' +
               `他に動いていないのにこの表示が出る場合は ${path} を消してください。`,
           );
@@ -123,7 +137,7 @@ export class DocumentStore {
         if (!Number.isInteger(owner) && (await isFresh(path))) {
           // 中身がまだ書かれていないだけの、たった今作られたロック。待たずに断る。
           throw new DataDirectoryLockedError(
-            `${this.config.dataDir} を別の LogiXiv が開こうとしています。少し待って試してください。`,
+            `${this.config.dataDir} を別の PaperLens が開こうとしています。少し待って試してください。`,
           );
         }
         // 持ち主が居ない残骸。消してもう一度だけ試す。

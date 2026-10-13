@@ -36,6 +36,8 @@ import {
   requirePaper,
   updateItem,
 } from "../server/service.ts";
+import { parseSentences } from "../server/sentences.ts";
+import { SENTENCE_READ_TOOLS, SENTENCE_WRITE_TOOLS, sentenceProgress } from "./sentenceTools.ts";
 
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 // 引数の型は inputSchema（zod）で検査済み
@@ -109,11 +111,16 @@ const READ: Tool[] = [
     name: "list_papers",
     config: {
       title: "論文の一覧",
-      description: "保存先にある論文の ID・題名・読解の段階・年を返します。ほかのツールに渡す論文 ID はここで調べます。",
+      description:
+        "保存先にある論文の ID・題名・読解の段階・年と、1 文ずつの対訳の進み具合（sentences: 解析の状態・未訳の文の数）を返します。ほかのツールに渡す論文 ID はここで調べます。",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    handler: async () => json(await listPapers(await vault())),
+    handler: async () => {
+      const v = await vault();
+      const papers = await listPapers(v);
+      return json(await Promise.all(papers.map(async (p) => ({ ...p, sentences: await sentenceProgress(v, p.id) }))));
+    },
   },
   {
     name: "get_paper",
@@ -237,7 +244,7 @@ const WRITE: Tool[] = [
     config: {
       title: "論文を取り込む",
       description:
-        "PDF を取り込み、テンプレートから読解ノートを作ります。source には、次のどれかを指定します。\n- 端末上の PDF の絶対パス\n- PDF の URL\n- arXiv の abs／pdf の URL、または番号（例 2410.12345）\n\narXiv の論文は、題名・著者・年・DOI を frontmatter に入れます。同じ arXiv の論文が既にあれば取り込まず、existing: true とその論文の ID を返します。DOI のリンクは使えません。端末内やローカルネットワークの URL は使えません。",
+        "PDF を取り込み、テンプレートから読解ノートを作ります。source には、次のどれかを指定します。\n- 端末上の PDF の絶対パス\n- PDF の URL\n- arXiv の abs／pdf の URL、または番号（例 2410.12345）\n\narXiv の論文は、題名・著者・年・DOI を frontmatter に入れます。同じ arXiv の論文が既にあれば取り込まず、existing: true とその論文の ID を返します。DOI のリンクは使えません。端末内やローカルネットワークの URL は使えません。取り込むと 1 文ずつの対訳の解析が裏で始まります（終わったかは get_sentence_outline で確かめます）。",
       inputSchema: {
         source: z.string().min(1).describe("PDF の絶対パス、PDF の URL、arXiv の URL か番号"),
         title: z.string().optional().describe("題名。省略すると PDF の文書情報かファイル名を使います"),
@@ -245,8 +252,11 @@ const WRITE: Tool[] = [
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     handler: async ({ source, title }) => {
-      const r = await importFrom(await vault(), source, title);
-      return json({ id: r.id, note: notePath(r.id), existing: r.existing, meta: r.meta });
+      const v = await vault();
+      const r = await importFrom(v, source, title);
+      // 対訳の土台（sentences.json）は裏で作る。待つと GROBID の解析で呼び出しが時間切れになる
+      if (!r.existing) void parseSentences(v, r.id, "auto").catch(() => undefined);
+      return json({ id: r.id, note: notePath(r.id), existing: r.existing, meta: r.meta, sentences: r.existing ? undefined : "parsing" });
     },
   },
   {
@@ -477,6 +487,8 @@ function clean(o: Record<string, unknown>) {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 }
 
-export const READ_TOOLS = READ;
-export const WRITE_TOOLS = WRITE;
-export const TOOLS = [...READ, ...WRITE];
+export const READ_TOOLS = [...READ, ...SENTENCE_READ_TOOLS];
+export const WRITE_TOOLS = [...WRITE, ...SENTENCE_WRITE_TOOLS];
+/** 対訳（sentences.json）を扱うツールの名前。設定画面で分けて見せる。 */
+export const SENTENCE_TOOL_NAMES = new Set([...SENTENCE_READ_TOOLS, ...SENTENCE_WRITE_TOOLS].map((t) => t.name));
+export const TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];

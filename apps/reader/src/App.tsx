@@ -1,10 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { SettingsPage } from "./components/SettingsPage.tsx";
+import { ExternalLink, FileText, PanelLeft, PanelRight, Waypoints } from "lucide-react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GraphView } from "./components/GraphView.tsx";
+import { ListModal } from "./components/ListModal";
 import { PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView.tsx";
 import { type Busy, RightPanel, type Tab } from "./components/RightPanel.tsx";
 import { SettingsDialog, TemplateDialog, UrlImportDialog } from "./components/Dialogs.tsx";
 import { Welcome } from "./components/Welcome.tsx";
+import { HelpModal } from "./components/shell/HelpModal.tsx";
+import { LeftSidebar } from "./components/shell/LeftSidebar.tsx";
+import { ResizeHandle } from "./components/shell/ResizeHandle.tsx";
+import { Ribbon, type RibbonItem } from "./components/shell/Ribbon.tsx";
+import { SentenceStatus } from "./components/shell/SentenceStatus.tsx";
+import { SettingsModal } from "./components/shell/SettingsModal.tsx";
+import { StatusBar } from "./components/shell/StatusBar.tsx";
+import { ThemeToggle } from "./components/shell/ThemeToggle.tsx";
+import { useWorkspace } from "./components/shell/useWorkspace.ts";
+import type { LeftTab } from "./components/shell/workspaceState.ts";
 import {
   type AiSettings,
   describeError,
@@ -20,7 +31,6 @@ import { type FmValue, FrontmatterError } from "./lib/frontmatter.ts";
 import { type Snack, Snackbar } from "./components/Snackbar.tsx";
 import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId } from "./lib/model.ts";
 import type { PaperSummary, SearchHit } from "./lib/papers.ts";
-import { PaperListPane } from "./components/PaperListPane.tsx";
 import { openPdf } from "./lib/pdf.ts";
 import { getFrontmatter } from "./lib/template.ts";
 
@@ -37,7 +47,9 @@ export function App() {
   return <Workspace key={backend.name} backend={backend} onClose={backend.kind === "browser" ? () => setBackend(null) : undefined} />;
 }
 
-type View = "paper" | "graph" | "settings";
+type View = "paper" | "graph";
+/** 中央の上に重ねて開く画面 */
+type Overlay = "settings" | "help" | "lists" | null;
 
 function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => void }) {
   const [papers, setPapers] = useState<PaperSummary[]>([]);
@@ -47,13 +59,19 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [ann, setAnn] = useState<Annotations>(emptyAnnotations());
   const [note, setNote] = useState("");
   const [noteKey, setNoteKey] = useState("0");
-  const [tab, setTab] = useState<Tab>("translate");
+  const [tab, setTab] = useState<Tab>(backend.kind === "server" ? "sentences" : "translate");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState<Busy>({});
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
   const [ai, setAi] = useState<AiSettings>(loadAiSettings);
   const [dialog, setDialog] = useState<"settings" | "template" | "url" | null>(null);
   const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number; instant?: boolean } | null>(null);
+  /** リストから論文のページへ飛ぶとき。nonce を変えると同じページでももう一度飛ぶ */
+  const [scrollToPage, setScrollToPage] = useState<{ page: number; nonce: number } | undefined>(undefined);
+  const [overlay, setOverlay] = useState<Overlay>(null);
+  const [resizing, setResizing] = useState(false);
+  const { ws, patch, ready } = useWorkspace(backend);
+  const setRightOpen = (v: boolean) => patch({ rightOpen: v });
   /** 開いた論文の前回の位置（2 ページ目以降のときだけ） */
   const [initialPos, setInitialPos] = useState<Pos | null>(null);
   /** 取り込んだ直後の論文。前回の位置へは移らない */
@@ -68,10 +86,6 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   /** 読み込みを終えた論文の ID */
   const [loaded, setLoaded] = useState<string | null>(null);
   const notify = useCallback((message: string, extra: Partial<Snack> = {}) => setSnack({ message, n: Date.now(), ...extra }), []);
-  const wide = typeof window === "undefined" || window.innerWidth > 900;
-  const [leftOpen, setLeftOpen] = useState(wide);
-  const [rightOpen, setRightOpen] = useState(wide);
-  const fileRef = useRef<HTMLInputElement>(null);
   const annRef = useRef(ann);
   /** 保存先にある（と分かっている）注釈。画面での変更は、これとの差分として保存する */
   const baseRef = useRef(ann);
@@ -105,9 +119,24 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     return list;
   }, [backend]);
 
+  // 前回開いていた論文があればそれを、無ければ一覧の先頭を開く
+  const restored = useRef(false);
   useEffect(() => {
-    void refresh().then((list) => list[0] && setCurrent((c) => c ?? list[0].id));
-  }, [refresh]);
+    if (!ready) return;
+    void refresh().then((list) => {
+      if (restored.current) return;
+      restored.current = true;
+      const last = ws.openPaper && list.find((p) => p.id === ws.openPaper) ? ws.openPaper : list[0]?.id;
+      if (last) setCurrent((c) => c ?? last);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh, ready]);
+
+  // 開いている論文を覚えておく
+  useEffect(() => {
+    if (current && restored.current && current !== ws.openPaper) patch({ openPaper: current });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current]);
 
   // 論文を開く
   useEffect(() => {
@@ -363,9 +392,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     }
   };
 
-  const onImport = async (files: FileList | null) => {
-    const f = files?.[0];
-    if (!f) return;
+  const importOne = async (f: File) => {
     const data = await f.arrayBuffer();
     let t = f.name.replace(/\.pdf$/i, "");
     try {
@@ -377,13 +404,25 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     } catch {
       // 題名が取れなくてもファイル名で取り込む
     }
-    const id = await backend.importPaper(f.name, data, t);
-    skipRestore.current = id;
+    return backend.importPaper(f.name, data, t);
+  };
+
+  /** 選んだ・ドロップした PDF を順に取り込み、最後のものを開く */
+  const onImport = async (files: File[]) => {
+    let last: string | null = null;
+    for (const f of files) {
+      try {
+        last = await importOne(f);
+      } catch (e) {
+        setSave({ kind: "error", msg: `${f.name} を取り込めませんでした: ${e instanceof Error ? e.message : String(e)}` });
+      }
+    }
     await refresh();
+    if (!last) return;
+    skipRestore.current = last;
     setView("paper");
-    setCurrent(id);
+    setCurrent(last);
     setTab("record");
-    if (fileRef.current) fileRef.current.value = "";
   };
 
   /** URL か arXiv の番号から取り込む。新しい論文なら記録タブと書誌情報の欄を開く */
@@ -410,10 +449,18 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
 
   const jump = (page: number, y: number) => setJumpTo({ page, y, n: Date.now() });
 
+  const openPaper = (id: string) => {
+    setView("paper");
+    setCurrent(id);
+    // リストから来たページへの移動は、別の開き方では使わない
+    setScrollToPage(undefined);
+    // 狭い画面では、選んだら一覧を閉じて論文を見せる
+    if (window.innerWidth <= 900) patch({ leftOpen: false });
+  };
+
   /** 検索の当たりを押したとき。論文を開き、当たった場所のタブへ移る */
   const onHit = (h: SearchHit) => {
-    setView("paper");
-    setCurrent(h.paper);
+    openPaper(h.paper);
     setRightOpen(true);
     if (h.region === "field" && h.field) {
       setTab("record");
@@ -435,126 +482,213 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     setPendingHit(null);
   }, [pendingHit, loaded, ann]);
 
+  /** リストの項目から、その論文の該当ページへ飛ぶ */
+  const onListJump = (paperId: string, page?: number) => {
+    setOverlay(null);
+    setView("paper");
+    setCurrent(paperId);
+    if (page) setScrollToPage({ page, nonce: Date.now() });
+  };
+
+  /** 読解ノートの検索。サーバー版はサーバーで、それ以外は保管庫を直接探す */
+  const search = useCallback((q: string) => backend.search(q), [backend]);
+
+  const toggleLeft = (tab?: LeftTab) =>
+    patch((w) => (tab && (!w.leftOpen || w.leftTab !== tab) ? { leftOpen: true, leftTab: tab } : { leftOpen: !w.leftOpen }));
+
+  const onRibbon = (id: RibbonItem) => {
+    if (id === "files" || id === "search") toggleLeft(id);
+    else if (id === "graph") setView((v) => (v === "graph" ? "paper" : "graph"));
+    else setOverlay((o) => (o === id ? null : id));
+  };
+
+  // キーボード操作。Cmd/Ctrl+\ で左サイドバー、Cmd/Ctrl+Shift+L でリスト、Esc で重ねた画面を閉じる
+  const keyRef = useRef<(e: KeyboardEvent) => void>(() => undefined);
+  keyRef.current = (e: KeyboardEvent) => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && !e.shiftKey && !e.altKey && (e.key === "\\" || e.code === "Backslash")) {
+      e.preventDefault();
+      toggleLeft();
+    } else if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "l") {
+      e.preventDefault();
+      setOverlay("lists");
+    } else if (e.key === "Escape" && overlay && !document.querySelector("dialog[open]")) {
+      setOverlay(null);
+    }
+  };
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => keyRef.current(e);
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, []);
+
   const saveLabel =
     save.kind === "saving" ? "保存しています" : save.kind === "saved" ? (backend.persistent ? "フォルダに保存しました" : "保存しました（メモリ）") : save.kind === "error" ? `保存できませんでした: ${save.msg}` : "";
 
-  const page = view === "settings";
-  const cls = ["app", page ? "page-mode" : "", leftOpen ? "show-left" : "left-closed", rightOpen ? "show-right" : "right-closed"].join(" ");
-  const crumb = view === "settings" ? " / 設定" : view === "graph" ? " / グラフ" : title ? ` / ${title}` : "";
+  const leftOpen = ws.leftOpen;
+  const rightOpen = ws.rightOpen;
+  const cls = ["app", leftOpen ? "show-left" : "left-closed", rightOpen ? "show-right" : "right-closed", resizing ? "is-resizing" : ""].join(" ");
+  const style = { "--left-w": `${ws.leftWidth}px`, "--right-w": `${ws.rightWidth}px` } as CSSProperties;
+  const tabTitle = view === "graph" ? "グラフ" : title || (current ? "読み込んでいます" : "新しいタブ");
+  const highlightCount = ann.highlights.length;
 
   return (
-    <div className={cls}>
-      <header className="topbar">
-        <button className="icon-btn" aria-label={leftOpen ? "論文一覧を閉じる" : "論文一覧を開く"} aria-expanded={leftOpen} onClick={() => setLeftOpen((v) => !v)}>☰</button>
-        <div className="brand"><span className="brand-mark" aria-hidden="true">PL</span>PaperLens</div>
-        <span className="crumb">{backend.name}{crumb}</span>
-        <span className="spacer" />
-        <span className={`save-state${save.kind === "error" ? " err" : ""}`} role="status">{saveLabel}</span>
-        {backend.persistent && current && view === "paper" && (
-          <a className="btn text sm" href={`obsidian://open?vault=${encodeURIComponent(backend.name)}&file=${encodeURIComponent(`papers/${current}/note.md`)}`}>Obsidian で開く</a>
-        )}
-        <ThemeToggle />
-        <button className="icon-btn" aria-label={rightOpen ? "補足情報を閉じる" : "補足情報を開く"} aria-expanded={rightOpen} onClick={() => setRightOpen((v) => !v)}>▤</button>
-      </header>
+    <div className={cls} style={style}>
+      <Ribbon
+        active={{ files: leftOpen && ws.leftTab === "files", search: leftOpen && ws.leftTab === "search", graph: view === "graph", lists: overlay === "lists", settings: overlay === "settings", help: overlay === "help" }}
+        onItem={onRibbon}
+      />
 
-      <nav className="rail" aria-label="主要メニュー">
-        {RAIL.map((r) => (
-          <button key={r.id} className="rail-item" aria-current={view === r.id ? "page" : undefined} onClick={() => setView(r.id)}>
-            <RailIcon name={r.id} />
-            <span>{r.label}</span>
-          </button>
-        ))}
-      </nav>
-
-      <nav className="left" aria-label="論文一覧">
-        <div className="pane-head">
-          <span style={{ flex: 1 }}>論文</span>
-          {backend.importUrl ? (
-            <AddMenu onFile={() => fileRef.current?.click()} onUrl={() => setDialog("url")} />
-          ) : (
-            <button className="btn sm primary" onClick={() => fileRef.current?.click()}>PDF を追加</button>
-          )}
-          <input ref={fileRef} type="file" accept="application/pdf,.pdf" hidden onChange={(e) => void onImport(e.target.files)} />
-        </div>
-        <PaperListPane
-          backend={backend}
-          papers={papers}
-          current={current}
-          showing={view === "paper"}
-          onOpen={(id) => { setView("paper"); setCurrent(id); }}
-          onHit={onHit}
-        />
-        <div className="left-foot">
-          <button className="btn text sm" aria-pressed={view === "graph"} onClick={() => setView((v) => (v === "graph" ? "paper" : "graph"))}>
-            {view === "graph" ? "論文の表示に戻る" : "グラフで見る"}
-          </button>
-          <button className="btn text sm" onClick={() => setDialog("template")}>テンプレートを編集</button>
-          <button className="btn text sm" onClick={() => setDialog("settings")}>Claude の設定</button>
-          <button className="btn text sm mobile-only" onClick={() => setView("settings")}>設定（保存先・AI エージェント）</button>
-          {onClose && <button className="btn text sm" onClick={onClose}>別の保管庫を開く</button>}
-        </div>
-      </nav>
-
-      <main className="center" aria-label="論文">
-        {view === "settings" ? (
-          <SettingsPage backend={backend} onOpenClaude={() => setDialog("settings")} onOpenTemplate={() => setDialog("template")} onClose={onClose} aiReady={aiReady} />
-        ) : view === "graph" ? (
-          <GraphView papers={papers} links={links} onOpen={(id) => { setCurrent(id); setView("paper"); }} />
-        ) : pdf ? (
-          <PdfView
-            data={pdf}
-            highlights={ann.highlights}
-            activeId={activeId}
-            onAction={onAction}
-            onHighlightClick={(id) => { setActiveId(id); setTab("translate"); setRightOpen(true); }}
-            jumpTo={jumpTo}
-            initialPos={initialPos}
-            onRestored={(page) =>
-              notify(`前回の位置（p.${page}）から表示しています`, {
-                ms: 6000,
-                action: { label: "先頭に戻る", onClick: () => setJumpTo({ page: 1, y: 0, n: Date.now(), instant: true }) },
-              })
-            }
-            onPosition={(pos) => current && posSaver.call(keyFor(current), pos)}
+      <aside className="sidebar left" aria-label="左サイドバー" aria-hidden={!leftOpen} inert={!leftOpen}>
+        <div className="sidebar-inner">
+          <LeftSidebar
+            backend={backend}
+            tab={ws.leftTab}
+            setTab={(t) => patch({ leftTab: t })}
+            papers={papers}
+            current={view === "paper" ? current : null}
+            onOpenPaper={openPaper}
+            onImport={(fs) => void onImport(fs)}
+            onImportUrl={backend.importUrl ? () => setDialog("url") : undefined}
+            onHit={onHit}
+            search={search}
+            vaultName={backend.name}
+            onOpenSettings={() => setOverlay("settings")}
+            onSwitchVault={onClose}
           />
-        ) : (
-          <div className="drop-hint">
-            <h2>{current ? "読み込んでいます" : "論文を開いてください"}</h2>
-            {!current && <p>左の一覧から論文を選ぶか、「{backend.importUrl ? "追加" : "PDF を追加"}」から取り込んでください。</p>}
+        </div>
+        {leftOpen && <ResizeHandle side="left" width={ws.leftWidth} onResize={(w) => patch({ leftWidth: w })} onDragging={setResizing} label="左サイドバーの幅" />}
+      </aside>
+
+      <main className="workspace" aria-label="論文">
+        <div className="view-header">
+          <button className={`clickable-icon${leftOpen ? " is-active" : ""}`} aria-label={leftOpen ? "左サイドバーを閉じる" : "左サイドバーを開く"} title="左サイドバー（⌘\\）" aria-expanded={leftOpen} onClick={() => toggleLeft()}>
+            <PanelLeft size={16} aria-hidden="true" />
+          </button>
+          <div className="workspace-tab is-active" title={tabTitle}>
+            {view === "graph" ? <Waypoints size={14} aria-hidden="true" /> : <FileText size={14} aria-hidden="true" />}
+            <span className="workspace-tab-title">{tabTitle}</span>
           </div>
-        )}
+          <span className="spacer" />
+          {backend.persistent && current && view === "paper" && (
+            <a
+              className="clickable-icon"
+              aria-label="Obsidian で開く"
+              title="読解ノートを Obsidian で開く"
+              href={`obsidian://open?vault=${encodeURIComponent(backend.name)}&file=${encodeURIComponent(`papers/${current}/note.md`)}`}
+            >
+              <ExternalLink size={16} aria-hidden="true" />
+            </a>
+          )}
+          <ThemeToggle />
+          <button className={`clickable-icon${rightOpen ? " is-active" : ""}`} aria-label={rightOpen ? "右サイドバーを閉じる" : "右サイドバーを開く"} title="右サイドバー" aria-expanded={rightOpen} onClick={() => patch((w) => ({ rightOpen: !w.rightOpen }))}>
+            <PanelRight size={16} aria-hidden="true" />
+          </button>
+        </div>
+        <div
+          className="view-content"
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            const fs = [...e.dataTransfer.files].filter((f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name));
+            if (!fs.length) return;
+            e.preventDefault();
+            void onImport(fs);
+          }}
+        >
+          {view === "graph" ? (
+            <GraphView papers={papers} links={links} onOpen={openPaper} />
+          ) : pdf ? (
+            <PdfView
+              data={pdf}
+              highlights={ann.highlights}
+              activeId={activeId}
+              onAction={onAction}
+              onHighlightClick={(id) => { setActiveId(id); setTab("translate"); setRightOpen(true); }}
+              jumpTo={jumpTo}
+              paperId={current}
+              scrollToPage={scrollToPage}
+              initialPos={initialPos}
+              onRestored={(page) =>
+                notify(`前回の位置（p.${page}）から表示しています`, {
+                  ms: 6000,
+                  action: { label: "先頭に戻る", onClick: () => setJumpTo({ page: 1, y: 0, n: Date.now(), instant: true }) },
+                })
+              }
+              onPosition={(pos) => current && posSaver.call(keyFor(current), pos)}
+            />
+          ) : (
+            <div className="drop-hint">
+              <h2>{current ? "読み込んでいます" : "論文を開いてください"}</h2>
+              {!current && (
+                <>
+                  <p>PDF をここにドロップするか、左の「論文一覧」から取り込んでください。</p>
+                  <button className="btn primary" onClick={() => patch({ leftOpen: true, leftTab: "files" })}>論文一覧を開く</button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </main>
 
-      <aside className="right" aria-label="補足情報">
-        {current ? (
-          <RightPanel
-            tab={tab}
-            setTab={setTab}
-            ann={ann}
-            update={update}
-            activeId={activeId}
-            setActive={setActiveId}
-            jump={jump}
-            busy={busy}
-            aiReady={aiReady}
-            retry={retry}
-            note={note}
-            noteKey={noteKey}
-            status={status}
-            onField={onField}
-            onStatus={(s) => void onStatus(s)}
-            onOpenSettings={() => setDialog("settings")}
-            paperId={current}
-            onMeta={onMeta}
-            metaError={metaError}
-            notify={notify}
-            focusField={focusField && focusField.paper === loaded ? focusField : null}
-            onFocused={() => setFocusField(null)}
-          />
-        ) : (
-          <p className="empty">論文を開くと、訳・用語・数式・記録が表示されます。</p>
-        )}
+      <aside className="sidebar right" aria-label="右サイドバー（補足情報）" aria-hidden={!rightOpen} inert={!rightOpen}>
+        {rightOpen && <ResizeHandle side="right" width={ws.rightWidth} onResize={(w) => patch({ rightWidth: w })} onDragging={setResizing} label="右サイドバーの幅" />}
+        <div className="sidebar-inner">
+          {current ? (
+            <RightPanel
+              paperId={current}
+              tab={tab}
+              setTab={setTab}
+              ann={ann}
+              update={update}
+              activeId={activeId}
+              setActive={setActiveId}
+              jump={jump}
+              busy={busy}
+              aiReady={aiReady}
+              retry={retry}
+              note={note}
+              noteKey={noteKey}
+              status={status}
+              onField={onField}
+              onStatus={(s) => void onStatus(s)}
+              onOpenSettings={() => setDialog("settings")}
+              onMeta={onMeta}
+              metaError={metaError}
+              notify={notify}
+              focusField={focusField && focusField.paper === loaded ? focusField : null}
+              onFocused={() => setFocusField(null)}
+            />
+          ) : (
+            <p className="empty">論文を開くと、訳・用語・数式・記録が表示されます。</p>
+          )}
+        </div>
       </aside>
+
+      <StatusBar
+        items={[
+          { key: "save", node: saveLabel ? <span className={save.kind === "error" ? "status-err" : undefined}>{saveLabel}</span> : null },
+          // 対訳は保存先のサーバーがあるときだけ使える
+          { key: "sentences", node: backend.kind === "server" && view === "paper" && current ? <SentenceStatus key={current} paperId={current} /> : null },
+          { key: "marks", node: view === "paper" && current ? `マーカー ${highlightCount}` : null },
+          { key: "papers", node: `論文 ${papers.length}`, title: "保管庫にある論文の数" },
+          { key: "vault", node: backend.name, title: backend.persistent ? "保存先" : "メモリ上の保管庫（閉じると消えます）" },
+        ]}
+      />
+
+      <ListModal open={overlay === "lists"} onClose={() => setOverlay(null)} onJump={onListJump} />
+      {overlay === "settings" && (
+        <SettingsModal
+          backend={backend}
+          aiReady={aiReady}
+          onOpenClaude={() => setDialog("settings")}
+          onOpenTemplate={() => setDialog("template")}
+          onClose={() => setOverlay(null)}
+          onSwitchVault={onClose}
+        />
+      )}
+      {overlay === "help" && <HelpModal onClose={() => setOverlay(null)} />}
 
       {dialog === "settings" && (
         <SettingsDialog
@@ -567,102 +701,5 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       {dialog === "url" && <UrlImportDialog onClose={() => setDialog(null)} onImport={onImportUrl} />}
       <Snackbar snack={snack} onClose={() => setSnack(null)} />
     </div>
-  );
-}
-
-/** 「追加」のボタンとメニュー（PDF ファイル、URL）。サーバー版だけで使う */
-function AddMenu({ onFile, onUrl }: { onFile: () => void; onUrl: () => void }) {
-  const [open, setOpen] = useState(false);
-  const box = useRef<HTMLDivElement>(null);
-  const button = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    (box.current?.querySelector('[role="menuitem"]') as HTMLElement | null)?.focus();
-    const onDown = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      setOpen(false);
-      button.current?.focus();
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-  const pick = (fn: () => void) => () => {
-    setOpen(false);
-    fn();
-  };
-  return (
-    <div className="add-menu" ref={box}>
-      <button ref={button} className="btn sm primary" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        追加<span aria-hidden="true">▾</span>
-      </button>
-      {open && (
-        <div
-          className="menu-surface add-menu-list"
-          role="menu"
-          aria-label="論文を追加"
-          onKeyDown={(e) => {
-            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-            e.preventDefault();
-            const items = [...e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')];
-            const i = items.indexOf(document.activeElement as HTMLElement);
-            items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
-          }}
-        >
-          <button role="menuitem" className="menu-item" onClick={pick(onFile)}>PDF ファイルを選ぶ</button>
-          <button role="menuitem" className="menu-item" onClick={pick(onUrl)}>URL から追加</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-const RAIL: { id: View; label: string }[] = [
-  { id: "paper", label: "論文" },
-  { id: "graph", label: "グラフ" },
-  { id: "settings", label: "設定" },
-];
-
-function RailIcon({ name }: { name: View }) {
-  const d = {
-    paper: "M6 3h9l5 5v13H6z M15 3v5h5 M9 13h8 M9 17h8",
-    graph: "M6 7a2 2 0 1 0 0-.01 M18 6a2 2 0 1 0 0-.01 M12 18a2 2 0 1 0 0-.01 M7.5 8l3.5 8.5 M16.5 7.5l-3.5 9 M8 6.5h8",
-    settings: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M12 2v3 M12 19v3 M2 12h3 M19 12h3 M4.9 4.9l2.1 2.1 M17 17l2.1 2.1 M4.9 19.1L7 17 M17 7l2.1-2.1",
-  }[name];
-  return (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={d} />
-    </svg>
-  );
-}
-
-function ThemeToggle() {
-  const [theme, setTheme] = useState<string>(() => {
-    try {
-      return localStorage.getItem("paperlens.theme") ?? "auto";
-    } catch {
-      return "auto";
-    }
-  });
-  useEffect(() => {
-    const root = document.documentElement;
-    if (theme === "auto") root.removeAttribute("data-theme");
-    else root.setAttribute("data-theme", theme);
-    try {
-      localStorage.setItem("paperlens.theme", theme);
-    } catch {
-      // 保存できなくても表示は切り替わる
-    }
-  }, [theme]);
-  const next = theme === "auto" ? "light" : theme === "light" ? "dark" : "auto";
-  const label = { auto: "画面の配色: 端末に合わせる", light: "画面の配色: 明るい", dark: "画面の配色: 暗い" }[theme];
-  return (
-    <button className="btn text sm" onClick={() => setTheme(next)} title="画面の配色を切り替える">
-      {label}
-    </button>
   );
 }

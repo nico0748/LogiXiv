@@ -26,7 +26,7 @@ let dataDir = '';
 let close: () => Promise<void> = async () => {};
 
 before(async () => {
-  dataDir = await mkdtemp(join(tmpdir(), 'logixiv-failure-test-'));
+  dataDir = await mkdtemp(join(tmpdir(), 'paperlens-failure-test-'));
   // 到達しないポートを指定して、フォールバック解析（pdf.js 経路）を必ず通す。
   const started = await start({ port: 0, dataDir, grobidUrl: 'http://127.0.0.1:9', webDir: null });
   baseUrl = started.url;
@@ -262,8 +262,8 @@ test('書き出せない大きさかどうかは、書き出す前に読める',
 
 /** 書き出し HTML の体裁だけを作る（埋め込み JS は使わないので JSON だけで足りる）。 */
 function exportHtmlWith(document: unknown): string {
-  const payload = JSON.stringify({ format: 'logixiv-export', formatVersion: 1, document });
-  return `<script type="application/json" id="logixiv-data">${payload}</script>`;
+  const payload = JSON.stringify({ format: 'paperlens-export', formatVersion: 1, document });
+  return `<script type="application/json" id="paperlens-data">${payload}</script>`;
 }
 
 function glossaryOf(count: number, prefix = 'term'): { term: string; translation: string; note: null }[] {

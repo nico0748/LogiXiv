@@ -1,19 +1,19 @@
-import type { PaperDocument } from '@logixiv/core';
+import type { PaperDocument } from '@paperlens/core';
 
 /**
- * MCP サーバーは LogiXiv 本体のプロセスに HTTP で話しかける。
+ * MCP サーバーは PaperLens 本体のプロセスに HTTP で話しかける。
  *
  * ファイルを直接触らないのは、書き手を 1 プロセスに絞るため。
  * こうしておくと排他制御が 1 箇所で済み、Claude が書いた訳がそのまま SSE で
  * 開いているブラウザに流れる（MCP から直接ファイルを書くと画面が更新されない）。
  */
 
-export class LogiXivNotRunningError extends Error {
+export class PaperLensNotRunningError extends Error {
   constructor(baseUrl: string, cause: string) {
     super(
-      `LogiXiv 本体 (${baseUrl}) に接続できません: ${cause}\n` +
+      `PaperLens 本体 (${baseUrl}) に接続できません: ${cause}\n` +
         'リポジトリのディレクトリで `npm start` を実行して本体を起動してから、もう一度試してください。\n' +
-        '別のポートで動かしている場合は、MCP の設定で環境変数 LOGIXIV_URL をそのアドレスに合わせてください。',
+        '別のポートで動かしている場合は、MCP の設定で環境変数 PAPERLENS_SERVER_URL をそのアドレスに合わせてください。',
     );
   }
 }
@@ -71,22 +71,22 @@ export interface SentenceView {
 function describeEmptyFailure(status: number, path: string): string {
   if (status === 431) {
     return (
-      `LogiXiv 本体が ${status}（リクエストが大きすぎる）を本文なしで返しました。` +
+      `PaperLens 本体が ${status}（リクエストが大きすぎる）を本文なしで返しました。` +
       'URL に載せた値が Node の既定ヘッダ上限（16KB）を越えています。' +
       '検索語のような長い値は本文で渡すか、短くしてから渡し直してください。' +
       `（要求: ${path.slice(0, 120)}）`
     );
   }
   if (status === 413) {
-    return `LogiXiv 本体が ${status}（本文が大きすぎる）を本文なしで返しました。渡す量を減らしてください。`;
+    return `PaperLens 本体が ${status}（本文が大きすぎる）を本文なしで返しました。渡す量を減らしてください。`;
   }
   return (
-    `LogiXiv 本体が HTTP ${status} を本文なしで返しました（理由の説明が付いていません）。` +
+    `PaperLens 本体が HTTP ${status} を本文なしで返しました（理由の説明が付いていません）。` +
     `本体のログに手掛かりが出ているはずです。（要求: ${path.slice(0, 120)}）`
   );
 }
 
-export class LogiXivClient {
+export class PaperLensClient {
   private readonly baseUrl: string;
 
   constructor(baseUrl: string) {
@@ -102,13 +102,13 @@ export class LogiXivClient {
           Accept: 'application/json',
           // 本体に「MCP から来た」と分かるようにする。画面側で
           // 「設定が効いているのか分からない」を解くために要る。
-          'X-LogiXiv-Client': 'mcp',
+          'X-PaperLens-Client': 'mcp',
           ...(init?.headers ?? {}),
         },
         signal: AbortSignal.timeout(180_000),
       });
     } catch (error) {
-      throw new LogiXivNotRunningError(this.baseUrl, error instanceof Error ? error.message : String(error));
+      throw new PaperLensNotRunningError(this.baseUrl, error instanceof Error ? error.message : String(error));
     }
     const text = await response.text();
     if (!response.ok) {

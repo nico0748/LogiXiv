@@ -30,6 +30,24 @@ import { NodeVault } from "./nodeVault.ts";
 import { normalizeSource } from "./arxiv.ts";
 import { FetchFailed, FetchRefused, MAX_BODY } from "./fetchpdf.ts";
 import { importBytes, importFrom, paperText, requirePaper } from "./service.ts";
+import { collectLists } from "./lists.ts";
+import { readWorkspace, writeWorkspace } from "./workspace.ts";
+import {
+  type ParserChoice,
+  SentencesError,
+  addSentenceNote,
+  clearTranslation,
+  editSentenceBoundary,
+  parseSentences,
+  removeGlossary,
+  removeSentenceNote,
+  sentencesState,
+  setTranslation,
+  skipSentences,
+  undoSentenceEdit,
+  unskipSentences,
+  upsertGlossary,
+} from "./sentences.ts";
 import { VERSION } from "./version.ts";
 
 export { VERSION };
@@ -49,7 +67,7 @@ export function setHostBridge(b: HostBridge | null) {
 // 保存先フォルダを見張り、MCP サーバーや Obsidian が書き換えたときも画面へ知らせる。
 // このサーバー自身が書いたファイルには、書き込みを頼んだ画面の ID を添える（その画面は通知を無視する）。
 
-type Change = { kind: "papers" | "note" | "annotations" | "template" | "config"; paper?: string; origin?: string };
+type Change = { kind: "papers" | "note" | "annotations" | "sentences" | "template" | "config"; paper?: string; origin?: string };
 
 const clients = new Set<http.ServerResponse>();
 /** このサーバーが最後に書いたときの更新時刻。同じなら自分の書き込み、違えば別のプロセスの書き込み。 */
@@ -76,6 +94,7 @@ function classify(rel: string): Change | null {
   const paper = parts[1];
   if (parts[2] === "note.md") return { kind: "note", paper };
   if (parts[2] === "paperlens.json") return { kind: "annotations", paper };
+  if (parts[2] === "sentences.json" || parts[2] === "sentences.status.json") return { kind: "sentences", paper };
   if (parts.length === 2 || parts[2] === "paper.pdf") return { kind: "papers", paper };
   return null;
 }
@@ -229,6 +248,8 @@ route("GET", "/api/papers", async (r) => {
 route("POST", "/api/papers", async (r) => {
   const data = await r.body();
   const id = await importBytes(vaultFor(r.origin), r.query.get("name") || "paper.pdf", data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer, r.query.get("title") ?? undefined);
+  // 取り込んだらすぐ文に分け始める。終わるのは待たない（画面には通知で知らせる）。
+  startParse(id, "auto");
   return { id };
 });
 // URL か arXiv の番号から取り込む。端末のパスは受け付けない（MCP だけが使う）
@@ -238,7 +259,9 @@ route("POST", "/api/papers/from-url", async (r) => {
   const n = normalizeSource(s);
   if (n.kind === "url" && !/^https?:\/\//i.test(s)) throw new HttpError(400, "http または https で始まる URL か、arXiv の番号を指定してください。");
   try {
-    return await importFrom(vaultFor(r.origin), s, typeof title === "string" ? title : undefined);
+    const res = await importFrom(vaultFor(r.origin), s, typeof title === "string" ? title : undefined);
+    if (!res.existing) startParse(res.id, "auto");
+    return res;
   } catch (e) {
     if (e instanceof FetchRefused) throw new HttpError(400, e.message);
     if (e instanceof FetchFailed) throw new HttpError(502, e.message);
@@ -285,6 +308,90 @@ route("GET", "/api/papers/:id/text", async (r) => {
   return paperText(v, r.params[0], Number(r.query.get("from") || 1), r.query.get("to") ? Number(r.query.get("to")) : undefined);
 });
 
+// --- 1 文ずつの対訳（papers/<id>/sentences.json） ---
+
+const PARSE_ORIGIN = "sentences-parser";
+
+/**
+ * 解析を裏で始める。始まり・終わり・失敗を画面へ知らせる。
+ * 書き込みは解析専用の書き手として行う（頼んだ画面も、終わった通知を受け取れるように）。
+ */
+function startParse(id: string, parser: ParserChoice = "auto") {
+  const done = parseSentences(vaultFor(PARSE_ORIGIN), id, parser);
+  broadcast({ kind: "sentences", paper: id, origin: PARSE_ORIGIN });
+  void done.then(() => broadcast({ kind: "sentences", paper: id, origin: PARSE_ORIGIN }));
+  return done;
+}
+
+const PARSERS: ParserChoice[] = ["auto", "grobid", "fallback"];
+const strList = (v: unknown, name: string) => {
+  if (!Array.isArray(v) || v.length === 0 || !v.every((x) => typeof x === "string")) throw new HttpError(400, `${name} を文字列の配列で指定してください。`);
+  return v as string[];
+};
+/** 書き込みの後は、いつも最新の状態（status "ready"）を返す。 */
+const ready = (r: Req) => sentencesState(vaultFor(r.origin), r.params[0]);
+
+route("GET", "/api/papers/:id/sentences", async (r) => sentencesState(vaultFor(r.origin), r.params[0]));
+route("POST", "/api/papers/:id/sentences/parse", async (r) => {
+  const { parser = "auto" } = await jsonBody<{ parser?: ParserChoice }>(r);
+  if (!PARSERS.includes(parser)) throw new HttpError(400, "parser は auto / grobid / fallback のどれかです。");
+  const v = vaultFor(r.origin);
+  await requirePaper(v, r.params[0]);
+  void startParse(r.params[0], parser);
+  return sentencesState(v, r.params[0]);
+});
+route("PUT", "/api/papers/:id/sentences/translations/:hash", async (r) => {
+  const { text } = await jsonBody<{ text?: string }>(r);
+  if (!str(text, "text").trim()) throw new HttpError(400, "訳が空です。消すときは DELETE を使ってください。");
+  await setTranslation(vaultFor(r.origin), r.params[0], r.params[1], text as string, "human");
+  return ready(r);
+});
+route("DELETE", "/api/papers/:id/sentences/translations/:hash", async (r) => {
+  await clearTranslation(vaultFor(r.origin), r.params[0], r.params[1]);
+  return ready(r);
+});
+route("POST", "/api/papers/:id/sentences/notes", async (r) => {
+  const { hash, body } = await jsonBody<{ hash?: string; body?: string }>(r);
+  await addSentenceNote(vaultFor(r.origin), r.params[0], str(hash, "hash"), str(body, "body"));
+  return ready(r);
+});
+route("DELETE", "/api/papers/:id/sentences/notes/:noteId", async (r) => {
+  await removeSentenceNote(vaultFor(r.origin), r.params[0], r.params[1]);
+  return ready(r);
+});
+route("POST", "/api/papers/:id/sentences/skip", async (r) => {
+  const { hashes, reason } = await jsonBody<{ hashes?: unknown; reason?: string | null }>(r);
+  await skipSentences(vaultFor(r.origin), r.params[0], strList(hashes, "hashes"), typeof reason === "string" ? reason : null);
+  return ready(r);
+});
+route("DELETE", "/api/papers/:id/sentences/skip", async (r) => {
+  const { hashes } = await jsonBody<{ hashes?: unknown }>(r);
+  await unskipSentences(vaultFor(r.origin), r.params[0], strList(hashes, "hashes"));
+  return ready(r);
+});
+route("POST", "/api/papers/:id/sentences/edits", async (r) => {
+  const { type, hashes, offsets } = await jsonBody<{ type?: string; hashes?: unknown; offsets?: unknown }>(r);
+  if (type !== "merge" && type !== "split" && type !== "drop") throw new HttpError(400, "type は merge / split / drop のどれかです。");
+  if (offsets !== undefined && (!Array.isArray(offsets) || !offsets.every((x) => Number.isInteger(x)))) {
+    throw new HttpError(400, "offsets を整数の配列で指定してください。");
+  }
+  await editSentenceBoundary(vaultFor(r.origin), r.params[0], { type, hashes: strList(hashes, "hashes"), offsets: offsets as number[] | undefined });
+  return ready(r);
+});
+route("DELETE", "/api/papers/:id/sentences/edits/:editId", async (r) => {
+  await undoSentenceEdit(vaultFor(r.origin), r.params[0], r.params[1]);
+  return ready(r);
+});
+route("PUT", "/api/papers/:id/sentences/glossary", async (r) => {
+  const { term, translation, note } = await jsonBody<{ term?: string; translation?: string; note?: string | null }>(r);
+  await upsertGlossary(vaultFor(r.origin), r.params[0], { term: str(term, "term"), translation: str(translation, "translation"), note: typeof note === "string" ? note : null });
+  return ready(r);
+});
+route("DELETE", "/api/papers/:id/sentences/glossary/:term", async (r) => {
+  await removeGlossary(vaultFor(r.origin), r.params[0], r.params[1]);
+  return ready(r);
+});
+
 route("GET", "/api/template", async (r) => new Raw("text/markdown; charset=utf-8", await readTemplate(vaultFor(r.origin))));
 route("PUT", "/api/template", async (r) => {
   const { text } = await jsonBody<{ text?: string }>(r);
@@ -297,6 +404,13 @@ route("GET", "/api/graph", async (r) => {
 });
 route("GET", "/api/search", async (r) => searchNotes(vaultFor(r.origin), str(r.query.get("q") ?? undefined, "q")));
 route("GET", "/api/mcp", async () => mcpInfo());
+route("GET", "/api/lists", async (r) => collectLists(vaultFor(r.origin)));
+route("GET", "/api/workspace", async (r) => readWorkspace(vaultFor(r.origin)));
+route("PUT", "/api/workspace", async (r) => {
+  const body = await jsonBody<Record<string, unknown>>(r);
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "配置はオブジェクトで指定してください。");
+  return writeWorkspace(vaultFor(r.origin), body);
+});
 
 route("POST", "/api/desktop/pick-folder", async (r) => {
   if (!host) throw new HttpError(400, "フォルダの選択はデスクトップ版でだけ使えます。");
@@ -399,7 +513,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
         res.end(JSON.stringify(out));
       }
     } catch (e) {
-      const status = e instanceof HttpError ? e.status : (e as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 400;
+      const status = e instanceof HttpError || e instanceof SentencesError ? e.status : (e as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 400;
       const msg = (e as NodeJS.ErrnoException).code === "ENOENT" ? "ファイルが見つかりません。" : e instanceof Error ? e.message : String(e);
       res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ error: msg }));

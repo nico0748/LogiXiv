@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildExportHtml, type PaperDocument } from '@logixiv/core';
+import { buildExportHtml, type PaperDocument } from '@paperlens/core';
 import type { Config } from './config.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -33,7 +33,7 @@ export async function loadViewerAssets(config: Config): Promise<{ script: string
     }
   }
   throw new ViewerNotBuiltError(
-    `書き出し用ビューアが見つかりません。npm run build -w @logixiv/viewer を実行してください。探した場所: ${tried.join(', ')}`,
+    `書き出し用ビューアが見つかりません。npm run build -w @paperlens/viewer を実行してください。探した場所: ${tried.join(', ')}`,
   );
 }
 

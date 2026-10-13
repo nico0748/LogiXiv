@@ -1,5 +1,5 @@
 {
-  "name": "logixiv",
+  "name": "paperlens",
   "version": "0.1.0",
   "private": true,
   "description": "論文PDFを1文単位で読むためのローカルファースト対訳リーダー",
@@ -17,14 +17,14 @@
     "node": ">=22.6"
   },
   "scripts": {
-    "build": "npm run build -w @logixiv/core && npm run build -w @logixiv/server && npm run build -w @logixiv/mcp && npm run build -w @logixiv/viewer && npm run build -w @logixiv/web && npm run build -w @logixiv/reader",
+    "build": "npm run build -w @paperlens/core && npm run build -w @paperlens/server && npm run build -w @paperlens/mcp && npm run build -w @paperlens/viewer && npm run build -w @paperlens/web && npm run build -w @paperlens/app",
     "typecheck": "tsc -b packages/core packages/server packages/mcp --pretty false && tsc -p apps/web --noEmit --pretty false && tsc -p apps/viewer --noEmit --pretty false && tsc -p apps/reader --noEmit --pretty false",
-    "test": "npm run test -w @logixiv/core && npm run test -w @logixiv/server && npm run test -w @logixiv/reader",
+    "test": "npm run test -w @paperlens/core && npm run test -w @paperlens/server && npm run test -w @paperlens/app",
     "test:e2e": "node --experimental-strip-types scripts/e2e-smoke.ts",
-    "dev": "npm run dev -w @logixiv/web",
-    "dev:reader": "npm run dev -w @logixiv/reader",
+    "dev": "npm run dev -w @paperlens/web",
+    "dev:reader": "npm run dev -w @paperlens/app",
     "start": "node packages/server/dist/cli.js",
     "clean": "rm -rf packages/*/dist apps/*/dist packages/*/*.tsbuildinfo",
-    "measure": "npm run build -w @logixiv/core && node --experimental-strip-types scripts/measure-quality.ts"
+    "measure": "npm run build -w @paperlens/core && node --experimental-strip-types scripts/measure-quality.ts"
   }
 }

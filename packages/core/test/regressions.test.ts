@@ -382,17 +382,17 @@ test('データ script が複数あったら、黙って先頭を採らずエラ
   const html = exportOf(sampleDocument());
   const spoofed = html.replace(
     '<div id="lx-root"></div>',
-    '<div id="lx-root"></div><script type="application/json" id="logixiv-data">{"format":"logixiv-export","formatVersion":1,"document":{"title":"SPOOF"}}</script>',
+    '<div id="lx-root"></div><script type="application/json" id="paperlens-data">{"format":"paperlens-export","formatVersion":1,"document":{"title":"SPOOF"}}</script>',
   );
   assert.throws(() => parseExportHtml(spoofed), /2 個見つかりました/);
 });
 
 test('属性値に > を含む script タグでも見つけられる', () => {
-  const html = '<script data-x="a>b" type="application/json" id="logixiv-data">{"format":"logixiv-export","formatVersion":1,"document":{"structure":{"sentences":[{"text":"Hi."}]}}}</script>';
+  const html = '<script data-x="a>b" type="application/json" id="paperlens-data">{"format":"paperlens-export","formatVersion":1,"document":{"structure":{"sentences":[{"text":"Hi."}]}}}</script>';
   assert.equal(parseExportHtml(html).sentenceHashes.length, 1);
 });
 
-test('LogiXiv 製でない大きな HTML でも取り込み判定が線形時間で終わる', () => {
+test('PaperLens 製でない大きな HTML でも取り込み判定が線形時間で終わる', () => {
   const noise = '<script src="https://example.com/a.js" data-pad="x">var a=1;</script>\n'.repeat(4000);
   const started = Date.now();
   assert.throws(() => parseExportHtml(noise), ImportError);
@@ -493,11 +493,11 @@ test('旧バージョンの文書は訳を保ったままハッシュが張り�
 test('大文字や引用符なしで書かれた script も見つける（取り込みとブラウザで別物を読ませない）', () => {
   // HTML は要素名も属性名も大小を区別せず、属性値の引用符も省ける。
   // XML の規則で読むと、こちらには見えずブラウザには見える script を仕込める。
-  const payload = '{"format":"logixiv-export","formatVersion":1}';
+  const payload = '{"format":"paperlens-export","formatVersion":1}';
   for (const tag of [
-    '<SCRIPT type="application/json" id="logixiv-data">',
-    '<script type=application/json id=logixiv-data>',
-    '<script type="application/json" ID="logixiv-data">',
+    '<SCRIPT type="application/json" id="paperlens-data">',
+    '<script type=application/json id=paperlens-data>',
+    '<script type="application/json" ID="paperlens-data">',
   ]) {
     assert.equal(extractPayloadJson(`<html><body>${tag}${payload}</script></body></html>`), payload, tag);
   }
@@ -506,8 +506,8 @@ test('大文字や引用符なしで書かれた script も見つける（取り
 test('綴りの違う 2 つ目のデータ script も重複として断る', () => {
   const html =
     '<html><body>' +
-    '<SCRIPT type=application/json id=logixiv-data>{"a":1}</script>' +
-    '<script type="application/json" id="logixiv-data">{"b":2}</script>' +
+    '<SCRIPT type=application/json id=paperlens-data>{"a":1}</script>' +
+    '<script type="application/json" id="paperlens-data">{"b":2}</script>' +
     '</body></html>';
   assert.throws(() => extractPayloadJson(html), /2 個見つかりました/);
 });

@@ -47,10 +47,10 @@ function configJson(entry: string | null, url: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        logixiv: {
+        'paperlens-server': {
           command: 'node',
-          args: [entry ?? '<LogiXiv を置いた場所>/packages/mcp/dist/index.js'],
-          env: { LOGIXIV_URL: url },
+          args: [entry ?? '<PaperLens を置いた場所>/packages/mcp/dist/index.js'],
+          env: { PAPERLENS_SERVER_URL: url },
         },
       },
     },
@@ -63,7 +63,7 @@ export function TranslatePanel({ health, documentTitle, remaining, lastWriteAt, 
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const entry = health?.mcp?.entry ?? null;
   const url = health?.mcp?.url ?? 'http://127.0.0.1:4173';
-  const sentence = `LogiXiv の「${documentTitle}」を翻訳して`;
+  const sentence = `PaperLens の「${documentTitle}」を翻訳して`;
 
   useEffect(() => {
     if (notice === null) return;
