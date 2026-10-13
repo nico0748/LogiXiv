@@ -1,9 +1,10 @@
 import katex from "katex";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { STATUSES } from "../lib/defaultTemplate.ts";
 import type { Annotations, Equation, Highlight, Term } from "../lib/model.ts";
 import { MARKER_LABEL } from "../lib/model.ts";
 import { type FieldDef, parseFields } from "../lib/template.ts";
+import { EmptyState } from "./EmptyState.tsx";
+import { StatusChips } from "./StatusChips.tsx";
 
 export type Tab = "translate" | "terms" | "math" | "record";
 
@@ -58,10 +59,10 @@ export function RightPanel(p: Props) {
       </div>
       <div className="panel" role="tabpanel" id={`panel-${p.tab}`} aria-labelledby={`tab-${p.tab}`}>
         {!p.aiReady && p.tab !== "record" && (
-          <p className="notice warn" style={{ marginTop: 0, marginBottom: 12 }}>
-            訳や用語の説明を自動で入れるには、Claude の API キーが必要です。キーが無くても手で入力できます。{" "}
-            <button className="btn text sm" onClick={p.onOpenSettings}>API キーを設定する</button>
-          </p>
+          <div className="notice" style={{ marginTop: 0, marginBottom: 12 }}>
+            <p style={{ margin: "0 0 8px" }}>訳や用語の説明を自動で入れるには、Claude の API キーが必要です。キーが無くても手で入力できます。</p>
+            <button className="btn tonal sm" onClick={p.onOpenSettings}>API キーを設定する</button>
+          </div>
         )}
         {p.tab === "translate" && <TranslateList {...p} />}
         {p.tab === "terms" && <TermList {...p} />}
@@ -82,9 +83,7 @@ function TranslateList(p: Props) {
   }, [p.activeId]);
   if (!list.length)
     return (
-      <p className="empty">
-        PDF の文を選択し、「訳す」かマーカーの色を選んでください。選んだ文と訳がここに並び、読解ノートの「マーカーと訳」に書き込まれます。
-      </p>
+      <EmptyState title="訳はまだありません">PDF の文を選択して「訳す」かマーカーの色を押すと、ここに並びます。</EmptyState>
     );
   const set = (id: string, patch: Partial<Highlight>) =>
     p.update((a) => ({ ...a, highlights: a.highlights.map((h) => (h.id === id ? { ...h, ...patch } : h)) }));
@@ -144,7 +143,7 @@ function TranslateList(p: Props) {
             {p.aiReady && b !== "working" && (
               <div className="card-actions">
                 <button className="btn sm text" onClick={() => p.retry("translate", h.id)}>
-                  {h.translation ? "訳し直す" : "Claude で訳す"}
+                  {h.translation ? "もう一度訳す" : "Claude で訳す"}
                 </button>
               </div>
             )}
@@ -175,7 +174,11 @@ function TermList(p: Props) {
   };
   return (
     <>
-      <p className="panel-note">PDF で語を選択して「用語を調べる」を押すか、下の欄に入力してください。用語は読解ノートに [[リンク]] として書き込まれ、グラフで他の論文とつながります。</p>
+      {p.ann.terms.length ? (
+        <p className="panel-note">PDF で語を選択して「用語を調べる」を押すか、下の欄に入力してください。用語は読解ノートに [[リンク]] として書き込まれ、グラフで他の論文とつながります。</p>
+      ) : (
+        <EmptyState title="用語はまだありません">PDF で語を選択して「用語を調べる」を押すか、下の欄に入力してください。</EmptyState>
+      )}
       <div className="row" style={{ marginBottom: 12 }}>
         <label className="visually-hidden" htmlFor="term-new">用語を追加</label>
         <input id="term-new" className="input grow" placeholder="用語を入力" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && add()} />
@@ -260,8 +263,12 @@ function MathList(p: Props) {
     }));
   return (
     <>
-      <p className="panel-note">PDF で数式を選択して「数式にする」を押すと、選択範囲の画像から TeX を書き起こします。TeX は手で直せます。</p>
-      <div style={{ marginBottom: 12 }}><button className="btn sm" onClick={add}>空の数式を追加</button></div>
+      {p.ann.equations.length ? (
+        <p className="panel-note">PDF で数式を選択して「数式にする」を押すと、選択範囲の画像から TeX を書き起こします。TeX は手で直せます。</p>
+      ) : (
+        <EmptyState title="数式はまだありません">PDF で数式を選択して「数式にする」を押してください。</EmptyState>
+      )}
+      <div style={{ marginBottom: 12 }}><button className="btn sm" onClick={add}>数式を手で追加</button></div>
       {p.ann.equations.map((e) => {
         const b = p.busy[e.id];
         return (
@@ -280,7 +287,7 @@ function MathList(p: Props) {
             <label className="visually-hidden" htmlFor={`ex-${e.id}`}>説明</label>
             <textarea id={`ex-${e.id}`} className="textarea" rows={2} placeholder="記号の意味や式の役割" value={e.explanation} onChange={(ev) => set(e.id, { explanation: ev.target.value })} />
             {p.aiReady && e.source && b !== "working" && (
-              <div className="card-actions"><button className="btn sm text" onClick={() => p.retry("tex", e.id)}>書き起こし直す</button></div>
+              <div className="card-actions"><button className="btn sm text" onClick={() => p.retry("tex", e.id)}>もう一度書き起こす</button></div>
             )}
           </div>
         );
@@ -311,11 +318,7 @@ function RecordForm({ note, status, onField, onStatus }: { note: string; status:
     <>
       <p className="panel-note">ここに入力した内容は、読解ノート（note.md）の対応する箇所に自動で保存されます。</p>
       <div className="field-label" id="phase-label">読解の段階</div>
-      <ul className="phase-steps" aria-labelledby="phase-label">
-        {STATUSES.map((s) => (
-          <li key={s}><button aria-pressed={status === s} onClick={() => onStatus(s)}>{s}</button></li>
-        ))}
-      </ul>
+      <StatusChips value={status} onChange={onStatus} labelledBy="phase-label" />
       {groups.map((g) => (
         <section key={g.section}>
           {g.section && <h3 className="record-section">{g.section}</h3>}

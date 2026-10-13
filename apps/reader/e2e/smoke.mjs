@@ -91,9 +91,24 @@ await step("数式にする（画像を送る）", async () => {
 await step("記録を入力", async () => {
   await page.getByRole("tab", { name: "記録" }).click();
   await page.getByLabel("一言でいうと").fill("窓付きの疎な注意で、長い論文を少ないメモリで読めるようにした。");
-  await page.getByRole("button", { name: "精読" }).click();
+  await page.getByRole("radio", { name: "精読" }).click();
   await page.waitForTimeout(900);
   await page.screenshot({ path: `${shotDir}/04-record.png` });
+});
+
+const noteMd = () => page.evaluate(async () => {
+  const v = window.__vault; const [d] = (await v.list("papers")); return v.readText(`papers/${d.name}/note.md`);
+});
+
+await step("段階のチップを矢印キーで選ぶ", async () => {
+  await page.getByRole("radio", { name: "精読" }).focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(() => document.activeElement?.getAttribute("aria-checked") === "true" && document.activeElement.textContent === "検討");
+  await page.waitForTimeout(300);
+  if (!(await noteMd()).includes("status: 検討")) throw new Error("右矢印キーで段階が変わらない");
+  await page.keyboard.press("ArrowLeft");
+  await page.waitForTimeout(300);
+  if (!(await noteMd()).includes("status: 精読")) throw new Error("左矢印キーで段階が戻らない");
 });
 
 let md;

@@ -174,7 +174,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
           ))}
         {menu && (
           <div
-            className="sel-menu"
+            className="sel-menu menu-surface"
             style={{ left: Math.max(8, menu.x - 180), top: menu.y }}
             onMouseUp={(e) => e.stopPropagation()}
             role="menu"

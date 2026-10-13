@@ -428,6 +428,7 @@ button, input, textarea, select { font: inherit; color: inherit; letter-spacing:
   border-color: transparent; font-weight: 700; padding-left: 6px;
 }
 .phase-steps button:is([aria-pressed="true"], [aria-checked="true"])::after { content: "✓"; order: -1; }
+.phase-steps .chip-count { font-weight: 400; font-size: 12px; letter-spacing: 0; }
 .record-section { margin: 18px 0 8px; font-size: 15px; font-weight: 700; padding-bottom: 4px; border-bottom: 1px solid var(--md-sys-color-outline-variant); }
 .record-field { margin-bottom: 14px; }
 

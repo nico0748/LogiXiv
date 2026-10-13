@@ -479,9 +479,9 @@ function ThemeToggle() {
     }
   }, [theme]);
   const next = theme === "auto" ? "light" : theme === "light" ? "dark" : "auto";
-  const label = { auto: "表示: 端末に合わせる", light: "表示: 明るい", dark: "表示: 暗い" }[theme];
+  const label = { auto: "画面の配色: 端末に合わせる", light: "画面の配色: 明るい", dark: "画面の配色: 暗い" }[theme];
   return (
-    <button className="btn text sm" onClick={() => setTheme(next)} title="表示の明るさを切り替える">
+    <button className="btn text sm" onClick={() => setTheme(next)} title="画面の配色を切り替える">
       {label}
     </button>
   );
