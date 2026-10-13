@@ -18,7 +18,7 @@ export interface Normalized {
 
 const NEW_ID = /^(\d{4}\.\d{4,5})(v\d+)?$/;
 const OLD_ID = /^([a-z-]+(?:\.[A-Z]{2})?\/\d{7})(v\d+)?$/;
-const ARXIV_URL = /^https?:\/\/(?:www\.|export\.)?arxiv\.org\/(?:abs|pdf)\/(.+?)(?:\.pdf)?\/?(?:[?#].*)?$/i;
+const ARXIV_URL = /^(?:https?:\/\/)?(?:www\.|export\.)?arxiv\.org\/(?:abs|pdf)\/(.+?)(?:\.pdf)?\/?(?:[?#].*)?$/i;
 
 function arxivOf(id: string): Normalized | null {
   const m = id.match(NEW_ID) ?? id.match(OLD_ID);
@@ -38,7 +38,7 @@ export function normalizeSource(input: string): Normalized {
   }
   const bare = arxivOf(s.replace(/^arxiv:\s*/i, ""));
   if (bare) return bare;
-  if (/^https?:\/\/(dx\.)?doi\.org\//i.test(s) || /^10\.\d{4,9}\/\S+$/.test(s)) return { kind: "doi" };
+  if (/^https?:\/\/(dx\.)?doi\.org\//i.test(s) || /^(doi:\s*)?10\.\d{4,9}\/\S+$/i.test(s)) return { kind: "doi" };
   if (/^https?:\/\//i.test(s)) return { kind: "url", pdfUrl: s };
   return { kind: "url" };
 }

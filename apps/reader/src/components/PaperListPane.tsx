@@ -115,7 +115,7 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
         <div className="search-box">
           <label className="visually-hidden" htmlFor="paper-search">論文とノートを検索</label>
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z M15.5 15.5L20 20" /></svg>
-          <input id="paper-search" className="input" type="search" placeholder="題名・著者・ノートの中を検索" value={draft} onChange={(e) => setDraft(e.target.value)} />
+          <input id="paper-search" className="input" type="search" placeholder="題名・著者・ノートを検索" value={draft} onChange={(e) => setDraft(e.target.value)} />
           {draft && (
             <button className="icon-btn" aria-label="検索を消す" onClick={() => { setDraft(""); setQuery(""); }}>×</button>
           )}

@@ -121,3 +121,10 @@ test("空の配列は key: [] で書く", () => {
 test("空のフロー形式の一覧（テンプレートの authors: []）に書くと、ブロック形式になる", () => {
   assert.equal(inner(set(fm("authors: []\nyear: 2024"), "authors", ["A", "B"])), "authors:\n  - A\n  - B\nyear: 2024");
 });
+
+test("0 で始まる数字は引用符で囲み、読み直すと同じ文字列になる", () => {
+  const out = set(fm("title: x\nyear: 2024"), "year", "007");
+  assert.match(inner(out), /^year: "007"$/m);
+  assert.equal(readFrontmatter(out).year, "007");
+  assert.match(inner(set(fm("year: 1"), "year", "2017")), /^year: 2017$/m);
+});

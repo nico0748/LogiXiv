@@ -188,7 +188,8 @@ const SPECIAL_HEAD = /^[-?:[\]{}!&*#|>@`]/;
 
 export function yamlScalar(v: string) {
   if (v === "") return '""';
-  if (RESERVED.test(v) || SPECIAL_HEAD.test(v)) return JSON.stringify(v);
+  // 0 で始まる数字（007）は、引用符が無いと YAML では数の 7 になる
+  if (RESERVED.test(v) || SPECIAL_HEAD.test(v) || /^0\d+$/.test(v)) return JSON.stringify(v);
   if (/^[\w　-鿿＀-￯-]+$/.test(v)) return v;
   return JSON.stringify(v);
 }

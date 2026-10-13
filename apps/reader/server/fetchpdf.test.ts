@@ -95,6 +95,13 @@ test("9. 時間内に応答が無ければ止める", async () => {
   await assert.rejects(fetchPdf(`${base}/slow`, { timeoutMs: 200 }, pub), (e) => e instanceof FetchFailed && /秒以内に取得できなかった/.test(e.message));
 });
 
+test("9b. 名前の解決が終わらなくても、時間切れで止める", async () => {
+  const hang = () => new Promise<never>(() => undefined);
+  const start = Date.now();
+  await assert.rejects(fetchPdf("https://example.com/paper.pdf", { timeoutMs: 200 }, { lookup: hang }), (e) => e instanceof FetchFailed && /秒以内に取得できなかった/.test(e.message));
+  assert.ok(Date.now() - start < 2000);
+});
+
 test("10. PDF でなければ取り込まない", async () => {
   await assert.rejects(fetchPdf(`${base}/html`, {}, pub), (e) => e instanceof FetchRefused && /PDF ではない/.test(e.message));
 });

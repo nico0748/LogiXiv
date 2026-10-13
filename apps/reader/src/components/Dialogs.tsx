@@ -124,7 +124,7 @@ export function UrlImportDialog({ onClose, onImport }: { onClose: () => void; on
           <div className="record-field">
             <label className="field-label" htmlFor="import-url">PDF の URL か arXiv の番号</label>
             <span className="field-hint" id="import-url-hint">
-              arXiv の論文は、題名・著者・年も自動で入ります。取り込んだ PDF は保存先フォルダに保存されます。公開している Git リポジトリには入れないでください。
+              arXiv の論文は、題名・著者・年も自動で入ります。取り込んだ PDF は保存先フォルダに保存されます。保存先フォルダを公開の Git リポジトリで共有する場合は、PDF を含めないでください。
             </span>
             <input
               id="import-url"

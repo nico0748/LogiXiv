@@ -50,8 +50,22 @@ export interface FetchOptions {
 
 const allowPrivate = () => process.env.PAPERLENS_ALLOW_PRIVATE_URLS === "1";
 
-/** 接続してよい URL か。だめなら FetchRefused を投げる。 */
-export async function checkUrl(u: URL, lookup: Lookup = dns.promises.lookup as Lookup): Promise<void> {
+/** p を待つ。signal が先に止まったら、その理由で失敗する（dns.lookup は AbortSignal を受け取らないため） */
+function untilAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(
+      (v) => (signal.removeEventListener("abort", onAbort), resolve(v)),
+      (e) => (signal.removeEventListener("abort", onAbort), reject(e)),
+    );
+  });
+}
+
+/** 接続してよい URL か。だめなら FetchRefused を投げる。signal が止まったら、名前の解決も待たない */
+export async function checkUrl(u: URL, lookup: Lookup = dns.promises.lookup as Lookup, signal?: AbortSignal): Promise<void> {
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new FetchRefused("http または https で始まる URL を指定してください。");
   if (u.username || u.password) throw new FetchRefused("利用者名やパスワードを含む URL は使えません。");
   if (allowPrivate()) return;
@@ -59,7 +73,7 @@ export async function checkUrl(u: URL, lookup: Lookup = dns.promises.lookup as L
   let addrs: { address: string }[];
   try {
     // IP の文字列もここを通す（dns.lookup は IP をそのまま返す）
-    addrs = await lookup(host, { all: true });
+    addrs = await untilAbort(lookup(host, { all: true }), signal);
   } catch (e) {
     throw new FetchFailed(failText(e));
   }
@@ -154,7 +168,13 @@ export async function fetchChecked(
     throw new FetchRefused("http または https で始まる URL を指定してください。");
   }
   for (let redirects = 0; ; redirects++) {
-    await checkUrl(u, opts.lookup);
+    try {
+      await checkUrl(u, opts.lookup, signal);
+    } catch (e) {
+      // 名前の解決が終わらないまま時間切れになったときも、時間切れの文言にする
+      if (signal.aborted && !(e instanceof FetchRefused)) throw new FetchFailed(timeoutText);
+      throw e;
+    }
     let res: Response;
     try {
       res = await fetch(u, { redirect: "manual", signal, headers });
