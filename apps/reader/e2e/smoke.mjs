@@ -190,6 +190,11 @@ await step("暗い表示", async () => {
   if (resolved.primary !== "rgb(84, 90, 146)") throw new Error(`ページの中の primary が明るい表示の値でない: ${resolved.primary}`);
   if (resolved.pageNo !== "rgb(199, 197, 208)") throw new Error(`ページ番号の色が暗い表示の値でない: ${resolved.pageNo}`);
   await page.screenshot({ path: `${shotDir}/07-dark.png` });
+  // ページの上のマーカーの点のフォーカス: 明るい表示の secondary の輪と、白い縁
+  await page.keyboard.press("Shift");
+  await page.locator(".pdf-page button[aria-label^='p.1 のマーカー']").nth(1).focus();
+  const ring = await page.evaluate(() => { const cs = getComputedStyle(document.activeElement); return [cs.outlineColor, cs.boxShadow]; });
+  if (ring[0] !== "rgb(91, 93, 114)" || !ring[1].includes("rgb(255, 255, 255)")) throw new Error(`マーカーの点のフォーカスの輪が違う: ${ring}`);
 });
 
 console.log("\n--- note.md ---\n" + md);
