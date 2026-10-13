@@ -1,6 +1,7 @@
 import * as pdfjs from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { attachGlyphs, charSpan, type FontLike, layoutGlyphs } from "../lib/glyphs.ts";
 import type { Highlight, MarkerColor, Rect } from "../lib/model.ts";
 import { openPdf } from "../lib/pdf.ts";
 import { setSentenceFocus, setSentenceMarksVisible, useSentenceFocus, useSentenceMarksVisible } from "../lib/sentenceFocus.ts";
@@ -149,18 +150,19 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
     const startEl = (range.startContainer.parentElement ?? null)?.closest<HTMLElement>(".pdf-page");
     if (!startEl) return setMenu(null);
     const pageNo = Number(startEl.dataset.page);
+    // 横位置は描画命令から求めたグリフの位置を使う（テキスト層の代わりのフォントでは文頭・文末がずれる）
+    const tl = startEl.querySelector<HTMLElement>(".textLayer");
+    const layer = tl ? textLayers.get(tl) : undefined;
+    const xs = layer && doc ? await pageGlyphs(doc, pageNo) : null;
     const pr = startEl.getBoundingClientRect();
-    const rects = mergeRects(
-      [...range.getClientRects()]
-        .filter((r) => r.width > 1 && r.height > 1)
-        .filter((r) => r.top >= pr.top - 2 && r.bottom <= pr.bottom + 2)
-        .map((r) => ({
-          x: (r.left - pr.left) / pr.width,
-          y: (r.top - pr.top) / pr.height,
-          w: r.width / pr.width,
-          h: r.height / pr.height,
-        })),
-    );
+    const rects = layer
+      ? selectionRects(range, layer, xs, pr)
+      : mergeRects(
+          [...range.getClientRects()]
+            .filter((r) => r.width > 1 && r.height > 1)
+            .filter((r) => r.top >= pr.top - 2 && r.bottom <= pr.bottom + 2)
+            .map((r) => toFraction(r, pr)),
+        );
     if (!rects.length) return setMenu(null);
     const full = await pageText(pageNo);
     const around = surrounding(full, text);
@@ -173,7 +175,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
       y: last.bottom - sr.top + scrollRef.current.scrollTop + 6,
       sel: { page: pageNo, rects, text, around, crop },
     });
-  }, [pageText]);
+  }, [pageText, doc]);
 
   const run = (a: SelectionAction) => {
     if (!menu) return;
@@ -339,7 +341,9 @@ function PageView({
     const tl = textRef.current;
     tl.replaceChildren();
     const layer = new pdfjs.TextLayer({ textContentSource: page.streamTextContent(), container: tl, viewport: vp });
-    void layer.render().catch(() => undefined);
+    textLayers.set(tl, layer);
+    // 選んだときに待たないよう、グリフの位置を先に求めておく
+    void layer.render().then(() => pageGlyphs(doc, n), () => undefined);
     task.promise.catch(() => undefined);
     return () => {
       task.cancel();
@@ -401,6 +405,81 @@ function PageView({
       <span className="page-no">{n}</span>
     </div>
   );
+}
+
+/** テキスト層の要素から、その TextLayer（textDivs と元の文字列を持つ）を引く。 */
+const textLayers = new WeakMap<HTMLElement, pdfjs.TextLayer>();
+
+/** 文書ごと・ページごとの、テキストの各項目の各文字の横位置（src/lib/glyphs.ts）。 */
+const glyphCache = new WeakMap<PDFDocumentProxy, Map<number, Promise<Float64Array[] | null>>>();
+
+function pageGlyphs(doc: PDFDocumentProxy, n: number): Promise<Float64Array[] | null> {
+  let byPage = glyphCache.get(doc);
+  if (!byPage) glyphCache.set(doc, (byPage = new Map()));
+  let hit = byPage.get(n);
+  if (!hit) {
+    hit = (async () => {
+      const page = await doc.getPage(n);
+      const vp = page.getViewport({ scale: 1 });
+      const [tc, ops] = await Promise.all([
+        page.getTextContent(),
+        page.getOperatorList({ annotationMode: pdfjs.AnnotationMode.DISABLE }),
+      ]);
+      const getFont = (name: string) => {
+        try {
+          return page.commonObjs.has(name) ? (page.commonObjs.get(name) as FontLike) : null;
+        } catch {
+          return null;
+        }
+      };
+      const strs = tc.items.flatMap((i) => ("str" in i ? [i.str] : []));
+      return attachGlyphs(strs, layoutGlyphs(pdfjs.OPS, ops.fnArray, ops.argsArray, getFont, vp.transform), vp.width);
+    })().catch(() => null);
+    byPage.set(n, hit);
+  }
+  return hit;
+}
+
+function toFraction(r: DOMRect, pr: DOMRect): Rect {
+  return { x: (r.left - pr.left) / pr.width, y: (r.top - pr.top) / pr.height, w: r.width / pr.width, h: r.height / pr.height };
+}
+
+/**
+ * 選択範囲を、テキスト層の各項目の「実際に選ばれた文字」ごとの矩形にする。
+ * 縦の位置はテキスト層の文字の箱、横の位置はグリフの位置 xs（無ければテキスト層の箱）から取る。
+ * 行末の余白まで引きずった選択や、要素の境目で終わる選択でも、選ばれていない文字は含めない。
+ */
+function selectionRects(range: Range, layer: pdfjs.TextLayer, xs: Float64Array[] | null, pr: DOMRect): Rect[] {
+  const out: Rect[] = [];
+  const strs = layer.textContentItemsStr;
+  layer.textDivs.forEach((div, k) => {
+    const t = div.firstChild;
+    if (!t || t.nodeType !== Node.TEXT_NODE || !range.intersectsNode(t)) return;
+    const str = t.textContent ?? "";
+    let a = t === range.startContainer ? range.startOffset : 0;
+    let b = (t === range.endContainer ? range.endOffset : str.length) - 1;
+    while (a <= b && /\s/.test(str[a])) a++;
+    while (b >= a && /\s/.test(str[b])) b--;
+    if (a > b) return;
+    const sub = document.createRange();
+    sub.setStart(t, a);
+    sub.setEnd(t, b + 1);
+    const box = sub.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 1) return;
+    const r = toFraction(box, pr);
+    const g = xs && strs[k] === str ? xs[k] : null;
+    if (g) {
+      sub.setStart(t, 0);
+      sub.setEnd(t, str.length);
+      const span = charSpan(str, g, toFraction(sub.getBoundingClientRect(), pr), a, b + 1);
+      if (span) {
+        r.x = span[0];
+        r.w = span[1] - span[0];
+      }
+    }
+    out.push(r);
+  });
+  return mergeRects(out);
 }
 
 /** 同じ行に並ぶ矩形をまとめる。テキスト層は単語ごとに分かれているため。 */

@@ -1,5 +1,6 @@
 import type { DocumentStructure, NonBodySentence, Rect, Sentence, SentenceEdit } from './types.ts';
 import { sentenceHash, sentenceId } from './hash.ts';
+import { estimateTextAdvance } from './advance.ts';
 
 /**
  * 文の区切りを人が直せるようにする。
@@ -372,8 +373,8 @@ function relocateCuts(text: string, pieceHashes: readonly string[]): number[] | 
  * 1 文を複数に割る。`offsets` は原文テキスト内の文字位置。
  * 同じ本文の文がほかにもあれば、そちらも同じ位置で割る。
  *
- * 矩形は文字数の比で按分する。等幅ではないので境目は数文字ずれるが、
- * 「どのあたりか」が分かる方が、枠が消えるより読みやすい。
+ * 矩形は字形の幅の見積もりの比で按分する（advance.ts）。行の継ぎ目の空白も幅に数えるので
+ * 境目は少しずれうるが、「どのあたりか」が分かる方が、枠が消えるより読みやすい。
  */
 export function splitSentence(
   structure: DocumentStructure,
@@ -397,6 +398,11 @@ export function splitSentence(
   const limit = options.limit ?? Infinity;
   const wanted = options.at ? new Set(options.at) : null;
   const length = target.text.length;
+  // 枠の按分は文字数ではなく**字形の幅の見積もり**の比で行う（解析側の mergeRects と同じ。
+  // advance.ts）。文字数の比では、和文に欧文が混ざる文や語間の広い行で境目が数文字ずれる。
+  const totalAdvance = estimateTextAdvance(target.text);
+  const advanceRatio = (offset: number): number =>
+    totalAdvance > 0 ? estimateTextAdvance(target.text.slice(0, offset)) / totalAdvance : offset / length;
   let occurrences = 0;
   const at: number[] = [];
   let emitted = 0;
@@ -410,7 +416,7 @@ export function splitSentence(
     emitted += pieces.length;
     return pieces.map((piece) => {
       const pieceHash = sentenceHash(piece.text);
-      const rects = sliceRects(sentence.rects, piece.from / length, piece.to / length);
+      const rects = sliceRects(sentence.rects, advanceRatio(piece.from), advanceRatio(piece.to));
       return {
         id: sentenceId(pieceHash, 0),
         hash: pieceHash,

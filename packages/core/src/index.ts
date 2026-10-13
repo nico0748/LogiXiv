@@ -3,6 +3,7 @@ export * from './hash.ts';
 export * from './xml.ts';
 export * from './tei.ts';
 export * from './sentences.ts';
+export * from './advance.ts';
 export * from './layout.ts';
 export * from './edits.ts';
 export * from './nonbody.ts';

@@ -227,6 +227,17 @@ export interface DocumentStructure {
    * 取り込んだ文書は別の環境で解析されたものなので、こちらで測り直した値ではない。
    */
   quality?: StructureQuality;
+  /**
+   * 文の枠（rects）の文頭・文末の端を、どう決めたか。
+   *
+   * - `glyph`    … PDF の描画命令から求めた実際のグリフの端に合わせてある（PaperLens アプリのサーバーが解析後に直す）。
+   *               照合できなかった端だけは見積もりのまま。
+   * - `estimate` … グリフの位置が取れなかった（文字コードの対応表が壊れている等）ので、字幅の見積もりのまま。
+   * - 無い       … この印より前に解析された。再解析すれば `glyph` になりうる（画面はそれを案内する）。
+   *
+   * 枠の座標だけの話で、本文・ハッシュは変わらない（STRUCTURE_VERSION は上げない）。
+   */
+  rectEdges?: 'glyph' | 'estimate';
 }
 
 export type TranslationSource = 'claude' | 'human' | 'import';

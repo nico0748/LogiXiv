@@ -63,6 +63,8 @@ interface PlacedItem {
   height: number;
   /** viewport 座標での傾き（ラジアン）。 */
   angle: number;
+  /** 等幅書体か（文の枠を文字片の途中で割るときの幅の見積もりに使う）。 */
+  mono: boolean;
 }
 
 /** 15 度。これより小さい傾きは、同じ向きの組版の誤差とみなす。 */
@@ -136,6 +138,7 @@ interface PdfJsTextItem {
   transform: number[];
   width: number;
   height: number;
+  fontName?: string;
 }
 
 interface Extracted {
@@ -191,6 +194,7 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
       pageSizes.push({ page: pageNumber, width: viewport.width, height: viewport.height });
 
       const content = await page.getTextContent();
+      const styles = content.styles as Record<string, { fontFamily?: string } | undefined>;
       const pageItems: PlacedItem[] = [];
       for (const raw of content.items as unknown[]) {
         const item = raw as PdfJsTextItem;
@@ -212,7 +216,10 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
         // item.width は既に viewport の尺度で返るので、字高の係数を掛けてはいけない
         // （掛けると幅が字高の倍だけ伸び、行の組み立てが総崩れになる）。
         const width = item.width;
-        pageItems.push({ text: item.str, x: tx[4] ?? 0, y: tx[5] ?? 0, width, height, angle });
+        // 等幅かどうかは pdf.js が書体の情報（FixedPitch など）から決めた代替書体名で分かる。
+        // セリフ／サンセリフの方は当てにならない（Computer Modern が sans-serif と出る）ので使わない。
+        const mono = styles[item.fontName ?? '']?.fontFamily === 'monospace';
+        pageItems.push({ text: item.str, x: tx[4] ?? 0, y: tx[5] ?? 0, width, height, angle, mono });
       }
 
       // 向きは**ページ単位で**決める。
@@ -270,6 +277,7 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
             y: y + offsetY,
             w: entry.width,
             h: entry.height,
+            ...(entry.mono ? { mono: true } : {}),
           });
           continue;
         }

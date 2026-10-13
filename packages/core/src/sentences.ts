@@ -9,6 +9,7 @@ import type {
   StructureQuality,
 } from './types.ts';
 import { sentenceHash, sentenceId, stableId } from './hash.ts';
+import { chunkCharEdges } from './advance.ts';
 import {
   assessReadingOrder,
   buildLines,
@@ -41,6 +42,14 @@ export interface TextChunk {
    * 図のある論文で普通に起きる。
    */
   rotated?: boolean;
+  /**
+   * 等幅書体（verbatim・listings）で組まれた文字片。
+   *
+   * 文の枠を文字片の途中で割るとき、文字ごとの幅の見積もりを切り替えるのに使う
+   * （advance.ts）。プロポーショナルの見積もりを当てると、`i` と `m` が同じ幅の
+   * コードの行で境目がずれる。
+   */
+  mono?: boolean;
 }
 
 /**
@@ -575,8 +584,9 @@ interface ChunkSpan {
  * あるため、2 文が同一の矩形を持ち、PDF を押しても隣の文が選ばれる（しかも後から
  * 描かれた文に完全に覆われて、二度と選べない文まで出る）。
  *
- * 文字片の一部だけを使ったときは、**文字数の比**で x を按分する。等幅ではないので
- * 境目は数文字ぶんずれるが、行の左半分と右半分が別の文に分かれるという肝心の性質は保たれる。
+ * 文字片の一部だけを使ったときは、**字形の幅の見積もり**で x を按分する（advance.ts）。
+ * 以前は文字数の比だったので、語間の伸びた両端揃えの行や、和文に欧文が混ざる行で
+ * 境目が 1〜4 文字ずれ、文頭が枠から外れる／前の文の枠が次の文の頭まで食い込んでいた。
  * 文字ごとの正確な x は pdf.js の TextItem には無い（取るには文字単位で組版し直すしかない）。
  */
 function mergeRects(owners: CharOwner[]): Rect[] {
@@ -605,8 +615,9 @@ function mergeRects(owners: CharOwner[]): Rect[] {
     // 継ぎ目の空白しか含まない文字片は、この文の本文をひと文字も持たない。
     if (span.to <= span.from || chunk.text.length === 0) continue;
     const length = chunk.text.length;
-    const x0 = chunk.x + (chunk.w * Math.min(span.from, length)) / length;
-    const x1 = chunk.x + (chunk.w * Math.min(span.to, length)) / length;
+    const edges = chunkCharEdges(chunk);
+    const x0 = edges[Math.min(span.from, length)]!;
+    const x1 = edges[Math.min(span.to, length)]!;
     const band = byLine.get(span.line);
     if (band) {
       band.x0 = Math.min(band.x0, x0);

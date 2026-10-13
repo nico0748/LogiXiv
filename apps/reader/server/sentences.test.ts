@@ -43,6 +43,8 @@ test("解析前は none、解析中は parsing、終わると ready", async () =
   assert.equal(doc.structure.parser, "fallback");
   assert.ok(doc.structure.sentences.length > 5, `${doc.structure.sentences.length}`);
   assert.ok(fs.existsSync(file()));
+  // 文の枠の端は実際のグリフに合わせてあり、その印が保存される（画面は印が無い文書に再解析を案内する）
+  assert.equal(doc.structure.rectEdges, "glyph");
   // GROBID が使えなかったことは warning で伝わる
   assert.match((await S.sentencesState(vault, id) as { warning?: string }).warning ?? "", /GROBID/);
 });

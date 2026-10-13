@@ -31,6 +31,8 @@ import {
 import { GrobidParseError, GrobidUnavailableError, parseWithPdfJs, processFulltext } from "@paperlens/server";
 import { checkId, notePath, pdfPath, PAPERS_DIR } from "../src/lib/papers.ts";
 import type { NodeVault } from "./nodeVault.ts";
+import { readPages } from "./pdftext.ts";
+import { type GlyphPage, glyphPagesFromText, refineStructureRects } from "./refineRects.ts";
 
 export type ParserChoice = "auto" | "grobid" | "fallback";
 export type SentencesState =
@@ -219,6 +221,26 @@ export async function sentencesState(vault: NodeVault, id: string): Promise<Sent
   return warning ? { status: "ready", document: doc, warning } : { status: "ready", document: doc };
 }
 
+// --- 文の枠の端 --------------------------------------------------------------------
+
+/**
+ * PDF の各グリフの実際の位置（描画命令から求める。pdftext.ts がファイルごとに覚えておく）。
+ * 読めなければ空（枠は見積もりのまま）。
+ */
+async function glyphPages(vault: NodeVault, id: string, structure: DocumentStructure): Promise<GlyphPage[]> {
+  try {
+    return glyphPagesFromText(await readPages(vault.resolve(pdfPath(id)), { glyphs: true }), structure.pageSizes);
+  } catch {
+    return [];
+  }
+}
+
+/** 文の枠の文頭・文末を、実際のグリフの端に合わせる（文の分け方・本文・ハッシュは変えない）。 */
+const withGlyphEdges = (doc: PaperDocument, pages: readonly GlyphPage[]): PaperDocument => ({
+  ...doc,
+  structure: refineStructureRects(doc.structure, pages).structure,
+});
+
 // --- 解析 ------------------------------------------------------------------------
 
 /** 失敗を「人が読める日本語」と「画面が分岐できる短い印」にする。 */
@@ -261,6 +283,7 @@ async function runParse(vault: NodeVault, id: string, parser: ParserChoice, star
     if (structure.sentences.length === 0) {
       throw new SentencesError(422, "本文の文を 1 つも取り出せませんでした。本文が画像（スキャン）だけの PDF かもしれません。");
     }
+    const glyphs = await glyphPages(vault, id, structure);
     await withLock(vault, id, async () => {
       // 解析の間に論文が消されていたら、何も書かない（消したフォルダを作り直さない）。
       await requirePaper(vault, id);
@@ -272,9 +295,11 @@ async function runParse(vault: NodeVault, id: string, parser: ParserChoice, star
         // 壊れたファイルは捨てずに横へ置く。手で中身を拾える余地を残す。
         await fs.rename(vault.resolve(sentencesPath(id)), vault.resolve(`${PAPERS_DIR}/${id}/sentences.corrupt-${Date.now()}.json`));
       }
-      const next = current
-        ? applyStructure(current, structure).document
-        : createDocument({ structure, sourceFileName: "paper.pdf", id });
+      // 区切りの直し（分割）を当て直したあとの枠も含めて、端をグリフに合わせる
+      const next = withGlyphEdges(
+        current ? applyStructure(current, structure).document : createDocument({ structure, sourceFileName: "paper.pdf", id }),
+        glyphs,
+      );
       await writeDocument(vault, next);
       await writeStatus(vault, id, { status: "done", at: new Date().toISOString(), ...(warning ? { warning } : {}) });
     });
@@ -372,16 +397,34 @@ export function unskipSentences(vault: NodeVault, id: string, hashes: string[]) 
   return mutate(vault, id, (doc) => coreUnskip(doc, hashes).document);
 }
 
+/**
+ * 区切りの直しで作り直した枠（分割した文の境目は字幅の見積もり）も、グリフに合わせる。
+ * グリフに合わせて解析した文書だけ。古い文書は再解析を案内しているので、ここでは触らない。
+ */
+async function boundaryMutate(vault: NodeVault, id: string, fn: (doc: PaperDocument) => PaperDocument) {
+  let pages: GlyphPage[] | null = null;
+  try {
+    const doc = await withLock(vault, id, () => readDocument(vault, id));
+    if (doc?.structure.rectEdges === "glyph") pages = await glyphPages(vault, id, doc.structure);
+  } catch {
+    // 読めないときは mutate が理由付きで断る
+  }
+  return mutate(vault, id, (doc) => {
+    const next = fn(doc);
+    return pages?.length && next.structure.rectEdges === "glyph" ? withGlyphEdges(next, pages) : next;
+  });
+}
+
 export function editSentenceBoundary(
   vault: NodeVault,
   id: string,
   edit: { type: "merge" | "split" | "drop"; hashes: string[]; offsets?: number[] },
 ) {
-  return mutate(vault, id, (doc) => must(coreEditBoundary(doc, edit), "文の区切りを直せませんでした").document);
+  return boundaryMutate(vault, id, (doc) => must(coreEditBoundary(doc, edit), "文の区切りを直せませんでした").document);
 }
 
 export function undoSentenceEdit(vault: NodeVault, id: string, editId: string) {
-  return mutate(vault, id, (doc) => must(coreUndoEdit(doc, editId), "取り消せる編集がありません").document);
+  return boundaryMutate(vault, id, (doc) => must(coreUndoEdit(doc, editId), "取り消せる編集がありません").document);
 }
 
 export function upsertGlossary(vault: NodeVault, id: string, entry: { term: string; translation: string; note?: string | null }) {
