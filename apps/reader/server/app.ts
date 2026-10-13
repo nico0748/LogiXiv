@@ -27,6 +27,7 @@ import {
 import { APP_ROOT, dataRoot, readConfig, writeConfig } from "./config.ts";
 import { mcpInfo } from "./mcpinfo.ts";
 import { NodeVault } from "./nodeVault.ts";
+import { MAX_BODY } from "./fetchpdf.ts";
 import { importBytes, paperText, requirePaper } from "./service.ts";
 import { VERSION } from "./version.ts";
 
@@ -161,7 +162,6 @@ class HttpError extends Error {
   }
 }
 
-const MAX_BODY = 200 * 1024 * 1024;
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];

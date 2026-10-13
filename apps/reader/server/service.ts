@@ -15,7 +15,17 @@ import {
 } from "../src/lib/model.ts";
 import { changeAnnotations, checkId, importPaper, loadAnnotations, notePath, pdfPath } from "../src/lib/papers.ts";
 import type { NodeVault } from "./nodeVault.ts";
+import { FetchRefused, MAX_BODY, fetchPdf } from "./fetchpdf.ts";
 import { findText, readPages } from "./pdftext.ts";
+
+/** URL の最後の部分からファイル名を作る。 */
+function fileNameOf(url: string) {
+  try {
+    return decodeURIComponent(new URL(url).pathname.split("/").pop() || "paper") || "paper";
+  } catch {
+    return "paper";
+  }
+}
 
 /** PDF の文書情報から題名を取る。取れなければ null。 */
 export async function pdfTitle(data: ArrayBuffer): Promise<string | null> {
@@ -38,15 +48,17 @@ export async function importBytes(vault: NodeVault, fileName: string, data: Arra
   return importPaper(vault, fileName, data, t);
 }
 
-/** 端末にある PDF ファイル、または URL から取り込む。 */
+/** 端末にある PDF ファイル、または URL から取り込む。端末のパスは MCP からだけ使う。 */
 export async function importFrom(vault: NodeVault, source: string, title?: string) {
-  if (/^https?:\/\//.test(source)) {
-    const res = await fetch(source);
-    if (!res.ok) throw new Error(`PDF を取得できませんでした（${res.status}）: ${source}`);
-    const name = decodeURIComponent(new URL(source).pathname.split("/").pop() || "paper") || "paper";
-    return importBytes(vault, name.endsWith(".pdf") ? name : `${name}.pdf`, await res.arrayBuffer(), title);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(source)) {
+    // 接続先・大きさ・時間・リダイレクトを確かめながら読む（fetchpdf.ts）
+    const { data, finalUrl } = await fetchPdf(source);
+    const name = fileNameOf(finalUrl);
+    return importBytes(vault, name.endsWith(".pdf") ? name : `${name}.pdf`, data, title);
   }
-  const b = await fs.readFile(path.resolve(source));
+  const file = path.resolve(source);
+  if ((await fs.stat(file)).size > MAX_BODY) throw new FetchRefused(`PDF が ${MAX_BODY / 1024 / 1024}MB を超えているため取り込めません。`);
+  const b = await fs.readFile(file);
   return importBytes(vault, path.basename(source), b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer, title);
 }
 
