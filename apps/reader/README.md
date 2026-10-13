@@ -1,11 +1,13 @@
 # PaperLens
 
-論文を読みながら、訳・用語・数式・読解メモを Markdown のノートに残すアプリです。
+論文を読みながら、1 文ごとの対訳と、訳・用語・数式・読解メモを Markdown のノートに残すアプリです。
+旧 LogiXiv（1 文単位の対訳リーダー）の文分割と対訳を取り込み、1 つのアプリにまとめました。
 
-- 中央に論文の PDF、右側に選んだ文の訳、用語の説明、TeX 形式の数式を表示します。
+- 中央に論文の PDF、右側に 1 文ごとの対訳と、選んだ箇所の訳、用語の説明、TeX 形式の数式、読解メモを表示します。
+- PDF は取り込むと 1 文ずつに分けます。GROBID があれば使い、無ければ pdf.js で簡易に分けます。全文の訳は Claude が MCP 経由で入れます。
 - 記録はテンプレートから作った読解ノート（note.md）に書き込みます。保存先フォルダは Obsidian の保管庫としてそのまま開けます。
 - データはすべて保存先フォルダの普通のファイルです。データベースは使いません。
-- MCP サーバーを登録すると、Claude Desktop や Claude Code などの AI エージェントが、画面と同じ操作（取り込み、本文の読み取り、マーカーと訳、用語、数式、記録欄の入力、読解の段階の変更）を行えます。
+- MCP サーバーを登録すると、Claude Desktop や Claude Code などの AI エージェントが、画面と同じ操作（取り込み、本文の読み取り、全文の対訳、マーカーと訳、用語、数式、記録欄の入力、読解の段階の変更）を行えます。
 
 構成は [SecOwl](https://github.com/nico0748/secowl) と同じです。ローカルサーバー（127.0.0.1 だけで待ち受け）が保存先フォルダを読み書きし、画面はブラウザかデスクトップ版（Electron）で表示します。MCP サーバーは同じ処理を直接呼ぶため、アプリを起動していなくても使えます。
 
@@ -14,20 +16,30 @@
 | もの | 用途 | 備考 |
 | --- | --- | --- |
 | Node.js 22.6 以上 | アプリと MCP サーバーの実行 | `node -v` で確認できます |
-| Claude の API キー | 画面からの訳・用語の説明・数式の書き起こし | 任意です。無くても手で入力できます。AI エージェントから使う場合は不要です |
+| GROBID（Docker） | 1 文ずつの正確な区切りと PDF 上の位置 | 強く推奨します。無くても簡易解析で動きますが、精度は明確に落ちます |
+| Claude の API キー | 画面からの訳・用語の説明・数式の書き起こし | 任意です。無くても手で入力できます。全文の対訳は MCP 経由なので不要です |
 
 ## 実行方法
 
 ### 1. 取得と準備
 
-PaperLens は LogiXiv リポジトリの `apps/reader` にあります。依存パッケージはリポジトリの最上位でまとめて入れます。
+PaperLens 本体はリポジトリの `apps/reader` にあります（リポジトリ名は旧名の LogiXiv のままです）。依存パッケージはリポジトリの最上位でまとめて入れ、共有パッケージ（`packages/core`、`packages/server`）を先にビルドします。
 
 ```bash
 git clone https://github.com/nico0748/LogiXiv.git
 cd LogiXiv
 npm install
+npm run build
 cd apps/reader
 ```
+
+GROBID を使う場合は、リポジトリの最上位で起動しておきます。
+
+```bash
+docker compose -f docker/grobid.yml up -d      # http://localhost:8070
+```
+
+別のホストの GROBID を使う場合は、環境変数 `PAPERLENS_GROBID_URL`（旧名 `LOGIXIV_GROBID_URL` も使えます）で指定します。
 
 以降のコマンドは `apps/reader` で実行します。
 
@@ -69,18 +81,24 @@ npm run build:single
 ```
 
 `dist-single/index.html` ができます。Chrome か Edge で直接開くと、ブラウザで選んだフォルダに保存して動きます。
-この形では MCP サーバーと保存先の自動反映は使えません。
+この形では対訳（1 文ずつの解析）、MCP サーバー、保存先の自動反映は使えません。
 
 ### 3. 使い始める
 
-1. 左上の「PDF を追加」で論文を取り込みます。取り込むと、テンプレートから読解ノートを作ります。
-2. PDF の文を選択すると、次の操作が出ます。
+1. 左端のリボンの「論文一覧」（`⌘/Ctrl + \`）を開き、PDF を取り込みます（ドロップでも取り込めます）。取り込むと、テンプレートから読解ノートを作り、1 文ずつへの解析を始めます。
+2. 右側の「対訳」タブに文が並びます。カードを押すと PDF のその位置へ、PDF 上の文の枠を押すとそのカードへ移ります。`j` / `k` で前後の文へ、`n` で次の未訳の文へ移ります。
+   カードでは、訳の手直し、メモ、「訳す対象から外す」、次の文との結合、文の分割ができます。解析方式（GROBID / 簡易解析）と崩れの疑いは、タブの上部とステータスバーに出ます。
+3. 全文の訳は、MCP サーバーを登録した Claude に頼みます（「AI エージェントから使う」を参照）。訳は画面にすぐ反映されます。
+4. PDF の文を選択すると、次の操作が出ます。
    - 色の丸: その色のマーカーを引く
    - 訳す: 選んだ文を日本語に訳す
    - 用語を調べる: 選んだ語の説明を作る
    - 数式にする: 選んだ数式を TeX に書き起こす
-3. 右側の「記録」タブに読解メモを入力します。入力は note.md に自動で保存されます。
-4. 左端の「グラフ」で、論文と用語のつながりを見られます。
+5. 右側の「記録」タブに読解メモを入力します。入力は note.md に自動で保存されます。
+6. 左端の「リスト」（`⌘/Ctrl + Shift + L`）で、すべての論文の用語（対訳の用語集を含む）と数式を、単語帳と数式帳として引けます。
+7. 左端の「グラフ」で、論文と用語のつながりを見られます。
+
+サイドバーの開閉と幅は、保存先の `.paperlens/workspace.json` に保存します。キーボード操作の一覧は、左端の「ヘルプ」にあります。
 
 Obsidian で保存先フォルダを開いてノートを書き換えても、PaperLens の画面にすぐ反映されます。
 
@@ -136,8 +154,12 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 | `remove_annotation` | マーカー・用語・数式を消す |
 | `get_template` / `set_template` / `reset_template` | テンプレートを読む、書き換える、初期状態に戻す |
 | `set_data_root` | 保存先を変える |
+| `get_sentence_outline` / `get_sentences` / `search_sentences` | 対訳の概要（解析方式・進捗・用語集）、文の取得、対訳の中の検索 |
+| `get_translation_batch` / `set_translations` | 全文翻訳の窓を受け取り、訳をまとめて書き戻す |
+| `parse_sentences` | PDF を 1 文ずつに分ける・分け直す（訳とメモは引き継ぎます） |
+| `add_sentence_note` / `update_glossary` / `skip_sentences` / `fix_sentence_boundary` | 文のメモ、訳語の統一、訳さない記録、区切りの直し |
 
-ほかに、段階を追って論文を読む `read_paper` と、読んだ論文をふり返る `review_notes` のプロンプトがあります。読解ノートは `paperlens://papers/<論文ID>/note.md` の資料としても読めます。
+ほかに、段階を追って論文を読む `read_paper`、1 文ずつ全文を訳す `translate_paper`、読んだ論文をふり返る `review_notes` のプロンプトがあります。対訳のツールの詳しい設計は [../../docs/mcp.md](../../docs/mcp.md) にあります。読解ノートは `paperlens://papers/<論文ID>/note.md` の資料としても読めます。
 
 - 環境変数 `PAPERLENS_MCP_READONLY=1` を付けると、読み取りのツールだけを公開します。設定画面の「読み取りだけを許可する」で、その設定を作れます。
 - アプリを起動している間は、エージェントの変更が画面にすぐ反映されます。画面とエージェントが同じ論文を同時に編集しても、互いの変更を消しません。
@@ -154,11 +176,14 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 
 ```
 <保存先>/
+  .paperlens/workspace.json     画面の配置（サイドバーの開閉・幅・開いている論文）
   _templates/reading-note.md    読解ノートのテンプレート
   papers/20261012-attention/
     paper.pdf                   取り込んだ PDF
     note.md                     読解ノート
-    paperlens.json              マーカーの位置などの補助データ
+    paperlens.json              マーカー・用語・数式（位置などの補助データ）
+    sentences.json              1 文ずつの対訳（文・位置・訳・メモ・用語集）
+    sentences.status.json       解析の進み具合（解析中・失敗・完了）
 ```
 
 ## テンプレートを変える
@@ -180,7 +205,7 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 
 | コマンド | 内容 |
 | --- | --- |
-| `npm test` | 単体テスト（テンプレート、注釈の差分、サーバーの API、MCP のツール） |
+| `npm test` | 単体テスト（テンプレート、注釈の差分、サーバーの API、対訳の保存と解析、MCP のツール、画面の配置、リスト） |
 | `npx tsc --noEmit` | 型を検査する。最上位の `npm run typecheck` にも含まれます |
 | `npm run e2e` | ヘッドレス Chromium で操作を確認する。先に `npm run build:single` と `npm run build` を実行してください |
 | `npm run sample` | お試し用のサンプル PDF（`src/demo/sample.pdf`）を作り直す |
@@ -188,10 +213,11 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 `npm run e2e` を初めて実行する前に、`npx playwright install chromium` でブラウザを入れてください。
 
 ```
-server/      ローカルサーバー（API、保存先の見張り、PDF の本文取り出し）
-mcp/         MCP サーバー（tools.ts にツールの定義）
+server/      ローカルサーバー（API、保存先の見張り、PDF の本文取り出し、対訳の保存と解析 sentences.ts）
+mcp/         MCP サーバー（tools.ts に読解ノートのツール、sentenceTools.ts に対訳のツール）
 electron/    デスクトップ版
-src/         画面（React）。src/lib/ の論文フォルダの処理はサーバーと MCP からも使う
+src/         画面（React）。src/components/shell/ に Obsidian 風の枠（リボン・サイドバー・ステータスバー）、
+             src/components/sentences/ に対訳。src/lib/ の論文フォルダの処理はサーバーと MCP からも使う
 ```
 
 ## うまく動かないとき
@@ -203,6 +229,9 @@ src/         画面（React）。src/lib/ の論文フォルダの処理はサ�
 | エージェントが別のフォルダを見ている | 設定画面に表示される登録方法で登録し直してください。保存先を `PAPERLENS_DATA` で固定している場合は、その値がアプリとそろっているか確かめてください |
 | 訳を頼むと「API キーが正しくありません」と表示される | 設定画面でキーを入れ直してください |
 | PDF の文を選択できない | 画像だけの PDF（スキャンした PDF）は文字情報が無いため選択できません。OCR をかけてから取り込んでください |
+| 対訳が「簡易解析」になる | GROBID に届いていません。`docker compose -f docker/grobid.yml up -d` で起動してから、対訳タブの「解析し直す」で GROBID を選んでください |
+| 対訳の文が途中で切れている、2 段組の左右が混ざっている | 簡易解析の限界です。GROBID で解析し直してください。リポジトリの最上位の README の「簡易解析で何が起きうるか」に詳しく書いています |
+| 対訳を単一の HTML に書き出したい | まだ PaperLens 本体にはありません。旧 LogiXiv の Web 画面（`apps/web`。リポジトリの最上位で `npm start`）で行えます |
 
 ## ライセンス
 

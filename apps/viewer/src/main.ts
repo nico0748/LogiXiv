@@ -21,7 +21,9 @@ import {
  *  - 埋め込みデータは JSON.parse で読むだけ。innerHTML への流し込みもしない
  */
 
-const DATA_ELEMENT_ID = 'logixiv-data';
+const DATA_ELEMENT_ID = 'paperlens-data';
+/** 改名前（LogiXiv）の書き出しが使っていた id。 */
+const LEGACY_DATA_ELEMENT_ID = 'logixiv-data';
 const RESIZE_DEBOUNCE_MS = 300;
 
 /**
@@ -35,9 +37,11 @@ const RESIZE_DEBOUNCE_MS = 300;
  * 静的フォールバックごと消えた真っ白なページになる。
  */
 function readPayload(): ExportPayload | null {
-  // 取り込み側と同じものを指す。id だけで拾うと、<div id="logixiv-data"> のような
+  // 取り込み側と同じものを指す。id だけで拾うと、<div id="paperlens-data"> のような
   // 取り込み側には見えない要素からビューアだけが起動してしまう。
-  const elements = document.querySelectorAll(`script#${DATA_ELEMENT_ID}[type="application/json"]`);
+  const elements = document.querySelectorAll(
+    `script#${DATA_ELEMENT_ID}[type="application/json"], script#${LEGACY_DATA_ELEMENT_ID}[type="application/json"]`,
+  );
   if (elements.length !== 1) return null;
   try {
     const payload = JSON.parse(elements[0]!.textContent ?? '') as ExportPayload;
@@ -185,7 +189,7 @@ function boot(): void {
     else notesByHash.set(note.sentenceHash, [note]);
   }
 
-  document.title = `${paper.title} — LogiXiv`;
+  document.title = `${paper.title} — PaperLens`;
 
   const layout = el('div', 'lxv-layout');
   const header = el('header', 'lxv-header');
@@ -641,7 +645,7 @@ function safeBoot(): void {
     if (staticFallback) staticFallback.hidden = false;
     const root = document.getElementById('lx-root');
     if (root) root.replaceChildren();
-    console.error('LogiXiv viewer failed to start', error);
+    console.error('PaperLens viewer failed to start', error);
   }
 }
 

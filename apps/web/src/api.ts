@@ -410,7 +410,7 @@ export const api = {
     }
     return {
       blob: await response.blob(),
-      fileName: fileNameFrom(response.headers.get('Content-Disposition')) ?? `${id}.logixiv.html`,
+      fileName: fileNameFrom(response.headers.get('Content-Disposition')) ?? `${id}.paperlens.html`,
     };
   },
 

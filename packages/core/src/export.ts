@@ -2,7 +2,7 @@ import type { ExportPayload, NonBodySentence, PaperDocument, Sentence } from './
 import { escapeHtml, escapeJsonForScript } from './escape.ts';
 import { progress } from './document.ts';
 import { placeNonBody } from './nonbody.ts';
-import { LOGIXIV_VERSION } from './hash.ts';
+import { PAPERLENS_VERSION } from './hash.ts';
 
 /**
  * 書き出し HTML の作り。
@@ -37,7 +37,14 @@ function sealInline(source: string, kind: 'script' | 'style'): string {
   return source.replaceAll(`</${kind}`, `<\\/${kind}`);
 }
 
-export const EXPORT_DATA_ELEMENT_ID = 'logixiv-data';
+export const EXPORT_DATA_ELEMENT_ID = 'paperlens-data';
+export const EXPORT_FORMAT = 'paperlens-export';
+/**
+ * 改名前（LogiXiv）の書き出しが使っていた id と format。
+ * 書くのは新しい名前だけだが、読むときは古い書き出しも受け付ける。
+ */
+export const LEGACY_EXPORT_DATA_ELEMENT_IDS: readonly string[] = ['logixiv-data'];
+export const LEGACY_EXPORT_FORMATS: readonly string[] = ['logixiv-export'];
 
 export function buildExportPayload(input: {
   document: PaperDocument;
@@ -45,7 +52,7 @@ export function buildExportPayload(input: {
   exportedAt?: string;
 }): ExportPayload {
   return {
-    format: 'logixiv-export',
+    format: EXPORT_FORMAT,
     formatVersion: 1,
     exportedAt: input.exportedAt ?? new Date().toISOString(),
     document: input.document,
@@ -225,8 +232,8 @@ export function buildExportHtml(input: BuildExportInput): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="generator" content="LogiXiv ${LOGIXIV_VERSION}">
-<title>${title} — LogiXiv</title>
+<meta name="generator" content="PaperLens ${PAPERLENS_VERSION}">
+<title>${title} — PaperLens</title>
 <style>${STATIC_STYLE}</style>
 <style>${sealInline(input.viewerStyle, 'style')}</style>
 </head>
@@ -236,7 +243,7 @@ export function buildExportHtml(input: BuildExportInput): string {
 <h1>${title}</h1>
 <p class="lx-banner">${progressLine}</p>
 ${riskLine}
-<p class="lx-banner">この HTML は LogiXiv の書き出しです。JavaScript が動く環境では PDF と対訳が並んだビューアが開きます。動かない環境では以下の対訳がそのまま読めます。<br>（未訳）＝まだ訳していない文、（訳さない）＝参考文献や数式など訳す対象から外した文、✓ ＝人が手を入れた訳です。</p>
+<p class="lx-banner">この HTML は PaperLens の書き出しです。JavaScript が動く環境では PDF と対訳が並んだビューアが開きます。動かない環境では以下の対訳がそのまま読めます。<br>（未訳）＝まだ訳していない文、（訳さない）＝参考文献や数式など訳す対象から外した文、✓ ＝人が手を入れた訳です。</p>
 ${staticFallback(input.document)}
 ${glossarySection(input.document)}
 </div>

@@ -37,7 +37,7 @@ export function Library({ onOpen }: Props): React.JSX.Element {
   }, [reload]);
 
   /**
-   * PDF と「LogiXiv の書き出し HTML」の両方を受ける。
+   * PDF と「PaperLens の書き出し HTML」の両方を受ける。
    * 後者は他人から送られてくるものなので、1 本も持っていない人でも
    * ここから始められる必要がある。
    */
@@ -75,7 +75,7 @@ export function Library({ onOpen }: Props): React.JSX.Element {
   return (
     <div className="library">
       <header className="library-header">
-        <h1>LogiXiv</h1>
+        <h1>PaperLens</h1>
         <p className="library-sub">論文を 1 文ずつ読むための対訳リーダー</p>
       </header>
 
@@ -98,7 +98,7 @@ export function Library({ onOpen }: Props): React.JSX.Element {
           void accept(files[0]!);
         }}
       >
-        <p>PDF、または LogiXiv の書き出し HTML をここにドロップ</p>
+        <p>PDF、または PaperLens の書き出し HTML をここにドロップ</p>
         <label className="button-link">
           ファイルを選ぶ
           <input
@@ -141,7 +141,7 @@ export function Library({ onOpen }: Props): React.JSX.Element {
           <li className="pane-message">
             一覧を取得できませんでした: {listError}
             <br />
-            LogiXiv のサーバーが動いているか確認してください（データは消えていません）。
+            PaperLens のサーバーが動いているか確認してください（データは消えていません）。
           </li>
         )}
         {listError === null && documents.length === 0 && (

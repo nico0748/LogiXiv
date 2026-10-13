@@ -3,6 +3,10 @@ import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Highlight, MarkerColor, Rect } from "../lib/model.ts";
 import { openPdf } from "../lib/pdf.ts";
+import { setSentenceFocus, setSentenceMarksVisible, useSentenceFocus, useSentenceMarksVisible } from "../lib/sentenceFocus.ts";
+import { type SentenceMark, hitTest, marksByPage, sentenceAnchor } from "../lib/sentencesView.ts";
+import { SentenceMarkLayer } from "./sentences/SentenceMarks.tsx";
+import { useSentences } from "./sentences/useSentences.ts";
 
 
 export interface SelectionInfo {
@@ -28,11 +32,18 @@ interface Props {
   onHighlightClick: (id: string) => void;
   onLoaded?: (doc: PDFDocumentProxy) => void;
   jumpTo?: { page: number; y: number; n: number } | null;
+  /** 開いている論文の id。あれば対訳の文の枠を描き、対訳タブと選択を同期する。 */
+  paperId?: string | null;
+  /** そのページの先頭までスクロールする。nonce が変わるたびに動く。 */
+  scrollToPage?: { page: number; nonce: number };
 }
+
+/** 文の枠が無いページに渡す配列。毎回 [] を作ると memo が外れる。 */
+const NO_MARKS: SentenceMark[] = [];
 
 const COLORS: MarkerColor[] = ["yellow", "cyan", "magenta", "green"];
 
-export function PdfView({ data, highlights, activeId, onAction, onHighlightClick, onLoaded, jumpTo }: Props) {
+export function PdfView({ data, highlights, activeId, onAction, onHighlightClick, onLoaded, jumpTo, paperId, scrollToPage }: Props) {
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -40,6 +51,15 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
   const scrollRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; sel: SelectionInfo } | null>(null);
   const texts = useRef(new Map<number, string>());
+
+  // 対訳の文の枠。解析済みのときだけ描く。
+  const sentences = useSentences(paperId);
+  const sdoc = sentences.state?.status === "ready" ? sentences.state.document : null;
+  const marksVisible = useSentenceMarksVisible();
+  const markMap = useMemo(() => (sdoc ? marksByPage(sdoc) : null), [sdoc]);
+  const focus = useSentenceFocus();
+  const activeSentence = paperId && focus.paperId === paperId ? focus.id : null;
+  const pickSentence = useCallback((m: SentenceMark) => paperId && setSentenceFocus(paperId, m.id, m.hash, "pdf"), [paperId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,6 +100,27 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
       behavior: "smooth",
     });
   }, [jumpTo]);
+
+  const scrollToFraction = useCallback((pageNo: number, y: number, smooth: boolean) => {
+    const el = scrollRef.current;
+    const page = el?.querySelector<HTMLElement>(`[data-page="${pageNo}"]`);
+    if (!el || !page) return;
+    el.scrollTo({ top: Math.max(0, page.offsetTop + page.offsetHeight * y - 120), behavior: smooth ? "smooth" : "auto" });
+  }, []);
+
+  // 対訳タブ（やキー操作）で選んだ文まで動かす。PDF 上で選んだときは動かさない。
+  useEffect(() => {
+    if (!sdoc || !paperId || focus.paperId !== paperId || !focus.id || focus.origin === "pdf") return;
+    const at = sentenceAnchor(sdoc, focus.id);
+    if (at) scrollToFraction(at.page, at.y, focus.origin === "panel");
+    // 選び直したとき（nonce）だけ動かす。訳が届いて文書が変わっただけでは動かさない。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus.nonce]);
+
+  useEffect(() => {
+    if (scrollToPage && doc) scrollToFraction(scrollToPage.page, 0, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollToPage?.nonce, doc]);
 
   const pageText = useCallback(
     async (n: number) => {
@@ -148,6 +189,16 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
       <div className="pdf-toolbar" role="toolbar" aria-label="表示の操作">
         <span>{doc ? `${doc.numPages} ページ` : "読み込み中"}</span>
         <span className="spacer" />
+        {sdoc && (
+          <button
+            className={`btn text sm sl-marks-toggle${marksVisible ? " is-on" : ""}`}
+            aria-pressed={marksVisible}
+            title={marksVisible ? "PDF の文の枠を隠す" : "PDF に文の枠を出す（押すと対訳のカードへ）"}
+            onClick={() => setSentenceMarksVisible(!marksVisible)}
+          >
+            文の枠
+          </button>
+        )}
         <button className="icon-btn" aria-label="縮小" onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.1).toFixed(2)))}>−</button>
         <span style={{ minWidth: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
         <button className="icon-btn" aria-label="拡大" onClick={() => setZoom((z) => Math.min(3, +(z + 0.1).toFixed(2)))}>＋</button>
@@ -170,6 +221,9 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
               highlights={highlights.filter((h) => h.page === n)}
               activeId={activeId}
               onHighlightClick={onHighlightClick}
+              marks={marksVisible ? (markMap?.get(n) ?? NO_MARKS) : NO_MARKS}
+              activeSentence={activeSentence}
+              onPickSentence={pickSentence}
             />
           ))}
         {menu && (
@@ -209,6 +263,9 @@ function PageView({
   highlights,
   activeId,
   onHighlightClick,
+  marks,
+  activeSentence,
+  onPickSentence,
 }: {
   doc: PDFDocumentProxy;
   n: number;
@@ -216,12 +273,37 @@ function PageView({
   highlights: Highlight[];
   activeId: string | null;
   onHighlightClick: (id: string) => void;
+  marks: SentenceMark[];
+  activeSentence: string | null;
+  onPickSentence: (m: SentenceMark) => void;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
   const [page, setPage] = useState<PDFPageProxy | null>(null);
   const [visible, setVisible] = useState(n <= 2);
+  const [hover, setHover] = useState<string | null>(null);
+  // 選択中の文がこのページに無ければ null を渡し、他のページの枠を描き直さない
+  const pageActive = activeSentence && marks.some((m) => m.id === activeSentence) ? activeSentence : null;
+
+  // 文の枠はテキスト層の下にあるので、当たりは座標で取る（文字の選択を邪魔しないため）
+  const markAt = (e: React.MouseEvent): SentenceMark | null => {
+    if (!marks.length || !boxRef.current) return null;
+    const r = boxRef.current.getBoundingClientRect();
+    return hitTest(marks, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+  };
+  const onMove = (e: React.MouseEvent) => {
+    if (!marks.length || e.buttons) return;
+    const id = markAt(e)?.id ?? null;
+    if (id !== hover) setHover(id);
+  };
+  const onClick = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button, .sel-menu")) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return; // 文字を選んだだけのときは文を選ばない
+    const m = markAt(e);
+    if (m) onPickSentence(m);
+  };
 
   useEffect(() => {
     void doc.getPage(n).then(setPage);
@@ -275,6 +357,10 @@ function PageView({
       data-page={n}
       ref={boxRef}
       style={{ width: w, height: h, ["--total-scale-factor" as string]: scale }}
+      onMouseMove={onMove}
+      onMouseLeave={() => hover && setHover(null)}
+      onClick={onClick}
+      data-sl-hover={hover ? "" : undefined}
     >
       <canvas ref={canvasRef} aria-hidden="true" />
       <div className="mk-layer">
@@ -288,6 +374,7 @@ function PageView({
           )),
         )}
       </div>
+      {marks.length > 0 && <SentenceMarkLayer marks={marks} activeId={pageActive} hoverId={hover} />}
       <div className="textLayer" ref={textRef} />
       {highlights.length > 0 && (
         <div style={{ position: "absolute", inset: 0, zIndex: 3, pointerEvents: "none" }}>

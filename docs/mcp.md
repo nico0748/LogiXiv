@@ -1,13 +1,14 @@
 # MCP インターフェース
 
-LogiXiv の翻訳は Claude が MCP 経由で行う。翻訳 API のキーは要らず、追加費用も発生しない。
+PaperLens の全文翻訳は Claude が MCP 経由で行う。翻訳 API のキーは要らず、追加費用も発生しない。
+MCP サーバーは `apps/reader/mcp`（stdio）。読解ノートの操作（記録欄・マーカー・用語・数式）と、
+旧 LogiXiv から移した 1 文ずつの対訳の操作を、同じサーバーで公開している。
 
 ## 設定
 
-**いちばん簡単なのは、リーダー画面の「訳す」ボタン。** 絶対パス入りの設定と、
-**貼り先のファイル**、Claude に言う一文がそのまま出る。Claude から一度でも
-呼び出しが届くと「Claude とつながっています」に変わるので、設定が効いたかどうかも
-その場で分かる。以下は同じ内容を手で書く場合の説明。
+**いちばん簡単なのは、設定画面の「AI エージェント（MCP）」。** この端末の絶対パスが入った
+Claude Desktop の設定（JSON）と Claude Code のコマンドが出るので、「コピーする」で貼ればよい。
+以下は同じ内容を手で書く場合の説明。`<apps/reader>` は実際のパスに置き換える。
 
 貼り先は OS で違う。
 
@@ -17,51 +18,106 @@ LogiXiv の翻訳は Claude が MCP 経由で行う。翻訳 API のキーは要
 | Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Linux | `~/.config/Claude/claude_desktop_config.json` |
 
-Claude Code なら `claude mcp add-json logixiv '{…}'` の 1 行で済む
-（画面の「訳す」にそのまま貼れる形で出る）。
-
-本体を起動しておく。
-
-```bash
-npm start          # http://127.0.0.1:4173
-```
-
-Claude 側の MCP 設定に追加する。
-
 ```json
 {
   "mcpServers": {
-    "logixiv": {
+    "paperlens": {
       "command": "node",
-      "args": ["/path/to/LogiXiv/packages/mcp/dist/index.js"],
-      "env": { "LOGIXIV_URL": "http://127.0.0.1:4173" }
+      "args": ["<apps/reader>/dist-server/mcp.js"],
+      "env": { "PAPERLENS_CONFIG": "<apps/reader>/paperlens.config.json" }
     }
   }
 }
 ```
 
-MCP サーバーはファイルを直接触らず、本体へ HTTP で話しかける。書き手を 1 プロセスに
-絞ることで排他制御が 1 箇所で済み、Claude の書き込みがそのまま SSE で
-開いているブラウザへ流れる。本体が落ちているときは、その旨と `npm start` の案内をエラーで返す。
+Claude Code なら 1 行で済む。
 
-最初の 1 本はブラウザから入れる。MCP には取り込みツールを置いていない
-（ローカルの任意パスを読むツールを MCP の面に出さない、という判断）。
+```bash
+claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json -- node <apps/reader>/dist-server/mcp.js
+```
+
+`dist-server/mcp.js` は `apps/reader` の `npm run build` で作られる。ビルド前は
+`node --experimental-strip-types <apps/reader>/mcp/main.ts` でも動く。
+
+**MCP サーバーは保管庫のファイルを直接読み書きする。** アプリを起動していなくても使える。
+保管庫の場所はアプリと同じ決め方（`PAPERLENS_DATA` → `PAPERLENS_CONFIG` の設定ファイル → 初期値）で、
+登録方法には保管庫そのものではなく設定ファイルの場所を入れる。画面で保管庫を変えると、
+Claude も同じフォルダに付いてくる。アプリを開いていれば、Claude の書き込みはファイルの見張りを
+通じて画面にすぐ反映される。
+
+`PAPERLENS_MCP_READONLY=1` を付けると、読み取りのツールだけを公開する。
+
+### 旧 LogiXiv Web 版の MCP について
+
+旧 Web 版（`apps/web`）には別の MCP サーバー（`packages/mcp`）がある。こちらはファイルを
+直接触らず、本体（`npm start`、`http://127.0.0.1:4173`）へ HTTP で話しかける。書き手を
+1 プロセスに絞って排他を 1 箇所で済ませ、Claude の書き込みをそのまま SSE で流すための形だった。
+接続先は `PAPERLENS_SERVER_URL`（旧名 `LOGIXIV_URL` も可）。この版には取り込みツールが無い
+（ローカルの任意パスを読むツールを MCP の面に出さない、という判断）。PaperLens 本体はこの判断を
+変え、`import_paper` で端末の PDF の絶対パスか URL から取り込めるようにした（中身が `%PDF` で
+始まらないファイルは断る）。読み取りだけに絞りたいときは `PAPERLENS_MCP_READONLY=1` を使う。
+
+以下は PaperLens 本体（`apps/reader/mcp`）の説明。設計の理由は旧 Web 版と共通で、
+違うのは主にツール名と引数名（下の対応表）。
 
 ## ツール
 
+### 対訳（1 文ずつの全文翻訳）
+
 | ツール | 用途 |
 | --- | --- |
-| `list_documents` | 取り込み済みの論文と進捗、GROBID の生死。まずこれで `document_id` を決める |
-| `get_document_outline` | タイトル・節構成・ページ数・解析方式・用語集・進捗 |
+| `get_sentence_outline` | タイトル・節構成・ページ数・解析方式（`caveat` / `quality`）・用語集・進捗・再開位置（`firstUntranslatedOrder`） |
 | `get_sentences` | 文を範囲・節・ページで取得（原文 + 既存訳 + メモ）。`from` は**通し番号 (order)** |
 | `get_translation_batch` | 翻訳作業の入口。連続した本文と、そのうちの未訳リストを返す |
+| `search_sentences` | 原文・訳文・メモを横断検索。ヒットに訳文とメモが入る |
+| `parse_sentences` | PDF を文に分ける・分け直す（`parser`: `auto` / `grobid` / `fallback`）。訳とメモはハッシュで再結合される |
 | `set_translations` | 訳をまとめて書き込む（1 回 最大 120 文）。結果は JSON |
-| `add_note` | 文にメモを付ける。存在しない hash は拒否される |
-| `search_document` | 原文・訳文・メモを横断検索。ヒットに訳文とメモが入る |
-| `update_glossary` | 用語集を更新。既定は追記、`mode: "replace"` で全置換 |
-| `skip_sentences` | 「この文は訳す対象ではない」と記録する。未訳の集計から外れる |
+| `add_sentence_note` | 文にメモを付ける。存在しない hash は拒否される |
+| `update_glossary` | 訳語の対応表（用語集）を更新。既定は追記、`mode: "replace"` で全置換 |
+| `skip_sentences` | 「この文は訳す対象ではない」と記録する。未訳の集計から外れる。`undo: true` で取り消し |
 | `fix_sentence_boundary` | 文の区切りを直す（結合・分割・**取り除き**・取り消し）。再解析しても保たれる |
-| `reparse_document` | 同じ PDF を解析し直す。訳とメモはハッシュで再結合される |
+
+論文の指定はすべて `paper`（`papers/` の下のフォルダ名。`list_papers` が返す `id`）。
+`list_papers` は対訳の進み具合も添えて返す。
+
+`parse_sentences` は最大 50 秒だけ解析の終わりを待ち、それを過ぎたら `status: "parsing"` を返す
+（長い論文の GROBID で MCP の呼び出しが時間切れにならないように）。そのときは
+しばらく待って `get_sentence_outline` を呼び直す。取り込んだ直後は自動で解析が始まるので、
+たいていは呼ばなくてよい。
+
+### 読解ノート
+
+| ツール | 用途 |
+| --- | --- |
+| `get_settings` | 保管庫、フォルダ構成、読解の段階、テンプレートの記録欄 |
+| `list_papers` / `get_paper` / `get_note` | 論文の一覧、論文 1 本の記録（記録欄・マーカー・用語・数式）、ノートの本文 |
+| `read_paper_text` / `find_in_paper` | PDF の本文をページごとに読む、本文の中を探す |
+| `search_notes` / `get_graph` | すべてのノートの横断検索、論文と用語のつながり |
+| `import_paper` | 端末の PDF や URL（arXiv など）から取り込む。取り込み後に文への解析を自動で始める |
+| `set_fields` / `set_status` / `set_meta` | 記録欄、読解の段階、書誌情報を書く |
+| `add_highlight` / `update_highlight` | 本文の文にマーカーと訳を付ける。PDF の該当位置にも色が付く |
+| `add_term` / `update_term` / `add_equation` / `update_equation` | 用語と数式を登録する |
+| `remove_annotation` | マーカー・用語・数式を消す |
+| `get_template` / `set_template` / `reset_template` | テンプレートを読む、書き換える、初期状態に戻す |
+| `set_data_root` | 保管庫を変える |
+
+読解ノートは `paperlens://papers/<論文ID>/note.md` の資料（resource）としても読める。
+
+`update_glossary`（対訳の訳語の統一）と `add_term`（ノートに用語の説明を残す。Obsidian で
+リンクされる）は別物。前者は `sentences.json` に、後者は `paperlens.json` と `note.md` に入る。
+画面の「リスト」の単語帳には、両方が論文をまたいで集まる。
+
+### 旧 Web 版のツール名との対応
+
+| 旧 LogiXiv（`packages/mcp`） | PaperLens（`apps/reader/mcp`） |
+| --- | --- |
+| `list_documents` | `list_papers` |
+| `get_document_outline` | `get_sentence_outline` |
+| `search_document` | `search_sentences` |
+| `add_note` | `add_sentence_note` |
+| `reparse_document` | `parse_sentences` |
+| `get_sentences` / `get_translation_batch` / `set_translations` / `update_glossary` / `skip_sentences` / `fix_sentence_boundary` | 同名 |
+| 引数 `document_id` | 引数 `paper` |
 
 ### 割り込んだ断片は `drop` で取り除く
 
@@ -131,24 +187,24 @@ stated otherwise, and the residual fraction is ρ = 0.25.
 訳は**文の正規化ハッシュ**に付く。同じ本文が Introduction と Results に出てくる文書では、
 1 件の訳が両方に反映される。再解析で訳が外れないための設計だが、進捗の数え方に影響する:
 
-- `get_document_outline` は `sentences`（延べ）と `uniqueSentences`（異なり文）を別に返す
+- `get_sentence_outline` は `sentences`（延べ）と `uniqueSentences`（異なり文）を別に返す
 - `set_translations` は `applied`（書き込んだ異なり文）と `sentencesAffected`（反映された延べ数）を返す
-- 同じ hash を 1 回の呼び出しに複数入れると、後勝ちで 1 件として扱い `duplicates` に載せる
+- 同じ hash を 1 回の呼び出しに複数入れると、後勝ちで 1 件として扱い、`hint` にその件数が出る
 
 ### 検索は総数と続きを返す
 
-`search_document` は `{total, truncated, nextFrom, hits}` を返し、`limit` / `from` で
-続きを取れる。ヒットには `order` / `translation` / `notes` が入っているので、
-訳語の揺れは `search_document` → `set_translations` の 2 手で直せる。
+`search_sentences` は `{total, nextFrom, hits}` を返し、`limit` / `from` で
+続きを取れる。ヒットには `order` / `hash` / `translation` / `notes` が入っているので、
+訳語の揺れは `search_sentences` → `set_translations` の 2 手で直せる。
+参考文献・図表キャプションなど本文として扱わなかった行も `isBody: false` で返る（訳の対象ではない）。
 
 ### 書き込みの結果は機械可読
 
-`set_translations` は `{applied, skipped: [{sentenceHash, reason, code}]}` を返す。
+`set_translations` は `{applied, overwritten, sentencesAffected, remainingUnique, nextUntranslatedFrom, skipped: [{sentenceHash, code, reason}]}` を返す。
 `code` は次のいずれかで、必要な対応が正反対なので分けてある。
 
 - `revised_by_human` … 人手修正済み。**対応不要**（上書きしないのが仕様）
-- `unknown_hash` … この文書に無い hash。取り直すべき
-- `other` … その他
+- `unknown_hash` … この論文に無い hash。取り直すべき（読んでから書くまでの間に再解析が挟まった場合もこれになる）
 
 打ち切りはしない（1 回 120 件上限なので全件返しても小さい）。
 
@@ -161,9 +217,9 @@ stated otherwise, and the residual fraction is ρ = 0.25.
 | --- | --- |
 | `set_translations` | `{ "sentenceHash": "…", "text": "日本語訳" }` |
 | `update_glossary` | `{ "term": "原語", "translation": "訳語", "note": "なぜその訳か（任意）" }` |
-| `add_note` | `{ "document_id": "…", "sentence_hash": "…", "body": "メモ本文" }` |
-| `skip_sentences` | `{ "document_id": "…", "sentence_hashes": ["…"], "reason": "…" }` |
-| `fix_sentence_boundary` | `{ "document_id": "…", "action": "merge"｜"split"｜"drop"｜"undo", "sentence_hashes": ["…"], "offsets": [12] }` |
+| `add_sentence_note` | `{ "paper": "…", "sentence_hash": "…", "body": "メモ本文" }` |
+| `skip_sentences` | `{ "paper": "…", "sentence_hashes": ["…"], "reason": "…" }` |
+| `fix_sentence_boundary` | `{ "paper": "…", "action": "merge"｜"split"｜"drop"｜"undo", "sentence_hashes": ["…"], "offsets": [12] }` |
 
 `skip_sentences` の `reason` は自由文字列ではなく、次のどれか:
 `reference` / `figure` / `table` / `equation` / `header` / `footer` / `unreadable` / `other`。
@@ -175,8 +231,8 @@ stated otherwise, and the residual fraction is ρ = 0.25.
 
 ### 解析方式による制約はその場で伝える
 
-簡易解析で取り込んだ文書は、`get_document_outline` と `get_sentences` が
-`caveat` に理由と対処（`reparse_document`）を入れて返す。節が取れなかったときだけ
+簡易解析で分けた論文は、`get_sentence_outline` と `get_translation_batch`（最初の呼び出し）が
+`caveat` に理由と対処（GROBID を起動して `parse_sentences` を `parser="grobid"` で）を入れて返す。節が取れなかったときだけ
 「節は取れていません」が付く（簡易解析でも節はたいてい取れるので、
 取れているものを取れないと言わない）。
 
@@ -189,28 +245,35 @@ stated otherwise, and the residual fraction is ρ = 0.25.
 **読み順が崩れている疑いが検出されているときも、それを先に言う。** 2 段組の左右が
 語単位で噛み合うと、訳が正しくても原文そのものが壊れている。この状態は
 `fix_sentence_boundary` では戻せない（結合と分割では噛み合った語をほどけない）ので、
-訳す前に原文を確かめ、GROBID を立てて `reparse_document` するのが唯一の道になる。
+訳す前に原文を確かめ、GROBID を立てて `parse_sentences` するのが唯一の道になる。
 
 ## プロンプト
 
-`translate_paper`（引数: `document_id`、任意で `field`）に手順と訳し方の方針が入っている。
+`translate_paper`（引数: `paper`、任意で `field`）に手順と訳し方の方針が入っている。
 
 - 1 文は 1 文として訳す（画面上で原文と 1 対 1 に並ぶため、2 文に割らない）
 - 専門用語は用語集に従う。無ければ `update_glossary` に足してから続ける（既定は追記）
 - 数式・記号・変数名・引用番号は原文のまま残す
-- 原文が曖昧な箇所は片方を選んで訳し切り、`add_note` に理由を残す
+- 原文が曖昧な箇所は片方を選んで訳し切り、`add_sentence_note` に理由を残す
 - 分からない箇所を、それらしい日本語で埋めない
-- 訳す対象でない断片は訳さずに飛ばす
+- 訳す対象でない断片は `skip_sentences` に渡す（飛ばすだけでは残り続ける）
+- 人が直した訳（`revisedByHuman`）は上書きされない
+
+ほかに、テンプレートの段階に沿って読解ノートを埋める `read_paper`（引数: `paper`、任意で `focus`）と、
+読んだ論文を横断してふり返る `review_notes`（任意で `topic`）がある。
 
 ## 動作確認
 
 ```bash
-npm run test:e2e
+cd apps/reader
+npm test
 ```
 
-MCP を stdio で起動し、`initialize` → `tools/list`（`TOOL_NAMES` と一致するか）→
-`prompts/list` → `tools/call` まで通ることと、`get_translation_batch` の応答に
-文脈の重複が無いことを確認する。
+`server/mcp-sentences.test.ts` が、MCP のクライアントから対訳のツールを呼び、概要・窓の取得
+（同じ本文は 1 回だけ）・訳の書き込み（人手修正済みと未知の hash を機械可読に断る）・
+訳さない記録・終了判定・区切りの直しと取り消し・読み取り専用の公開範囲を確かめる。旧 Web 版の MCP は、リポジトリの最上位の
+`npm run test:e2e` が stdio で起動し、`initialize` → `tools/list` → `prompts/list` →
+`tools/call` まで通ることと、`get_translation_batch` の応答に文脈の重複が無いことを確かめる。
 
 ## 翻訳の終わりをどう判定するか
 

@@ -1,13 +1,13 @@
 # GROBID をローカルで動かす。
 #
 # 上流の配布は用途で 2 系統に分かれている（https://grobid.readthedocs.io/en/latest/Grobid-docker/）:
-#   grobid/grobid:<ver>-crf   CRF のみ。軽量・CPU で十分速い。LogiXiv の既定はこちら
+#   grobid/grobid:<ver>-crf   CRF のみ。軽量・CPU で十分速い。PaperLens の既定はこちら
 #   grobid/grobid:<ver>-full  Deep Learning 入り。精度は上がるが重く、GPU 推奨
 # 文の分割と座標付けは CRF 版で実用になるので、まずはこのまま使ってよい。
 services:
   grobid:
     image: grobid/grobid:0.9.1-crf
-    container_name: logixiv-grobid
+    container_name: paperlens-grobid
     init: true
     ulimits:
       core: 0

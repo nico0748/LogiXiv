@@ -2,7 +2,7 @@
  * 「PDF を読めなかった」の言い方を 1 箇所に集める。
  *
  * pdf.js は失敗を英語の 1 行（`No password given` / `Invalid PDF structure.`）で返す。
- * それをそのまま画面に出していた頃は、**どのファイルの話なのか・LogiXiv が何を
+ * それをそのまま画面に出していた頃は、**どのファイルの話なのか・PaperLens が何を
  * しようとしていたのか・次に何をすればいいのか**が、どこにも書かれていなかった。
  * 他の失敗表示は全部日本語なので、ここだけライブラリの内部文字列が素通りしていた。
  *
@@ -88,7 +88,7 @@ export function describePdfFailure(
   const detail = raw.message;
 
   if (raw.name === 'PasswordException') {
-    // code 2 は「渡したパスワードが違う」だが、LogiXiv はパスワードを渡さないので
+    // code 2 は「渡したパスワードが違う」だが、PaperLens はパスワードを渡さないので
     // 実際に届くのは常に「パスワードが要る」側。どちらでも人のやることは同じ。
     return new PdfUnreadableError(
       'encrypted',
@@ -128,7 +128,7 @@ export function describePdfFailure(
   return new PdfUnreadableError(
     'unknown',
     `${subject(fileName, '解析できませんでした。')}` +
-      'PDF が壊れているか、LogiXiv が扱えない作りのファイルです。' +
+      'PDF が壊れているか、PaperLens が扱えない作りのファイルです。' +
       `原因の手がかり: ${detail}`,
     { fileName, detail },
   );

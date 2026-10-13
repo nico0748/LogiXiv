@@ -7,7 +7,7 @@ import {
   deleteTranslation,
   describeSanitizeReport,
   editSentenceBoundary,
-  LOGIXIV_VERSION,
+  PAPERLENS_VERSION,
   mergeAnnotations,
   overlapRatio,
   parseExportHtml,
@@ -31,7 +31,7 @@ import {
   updateNote,
   type GlossaryEntry,
   type PaperDocument,
-} from '@logixiv/core';
+} from '@paperlens/core';
 import type { Config } from './config.ts';
 import { DocumentMissingError, DocumentStore } from './store.ts';
 import { EventBus } from './bus.ts';
@@ -181,7 +181,7 @@ class Semaphore {
   }
 }
 
-export class LogiXivApi {
+export class PaperLensApi {
   readonly store: DocumentStore;
   readonly bus: EventBus;
   readonly config: Config;
@@ -996,7 +996,7 @@ export class LogiXivApi {
     const pdf = await this.readPdf(id);
     const html = await exportDocumentHtml(this.config, document, pdf);
     const safeTitle = document.title.replace(/[^\p{L}\p{N} ._-]/gu, '').trim() || document.id;
-    return { html, fileName: `${safeTitle}.logixiv.html` };
+    return { html, fileName: `${safeTitle}.paperlens.html` };
   }
 
   /**
@@ -1042,8 +1042,8 @@ export class LogiXivApi {
     const declared = parsed.declaredStructureVersion;
     if (declared !== null && declared > STRUCTURE_VERSION) {
       throw new BadRequestError(
-        `この書き出しは新しい版の LogiXiv で作られています（構造 v${declared} / ` +
-          `このプログラムは v${STRUCTURE_VERSION} まで）。LogiXiv を更新してください。`,
+        `この書き出しは新しい版の PaperLens で作られています（構造 v${declared} / ` +
+          `このプログラムは v${STRUCTURE_VERSION} まで）。PaperLens を更新してください。`,
       );
     }
 
@@ -1211,7 +1211,7 @@ export class LogiXivApi {
   }> {
     return {
       ok: true,
-      version: LOGIXIV_VERSION,
+      version: PAPERLENS_VERSION,
       grobid: (await isGrobidAlive(this.config.grobidUrl)) ? 'up' : 'down',
       grobidUrl: this.config.grobidUrl,
       dataDir: this.config.dataDir,
@@ -1225,10 +1225,10 @@ export class LogiXivApi {
         url: this.config.publicUrl,
         configPath: this.config.claudeConfigPath,
         addCommand: this.config.mcpEntry
-          ? `claude mcp add-json logixiv '${JSON.stringify({
+          ? `claude mcp add-json paperlens-server '${JSON.stringify({
               command: 'node',
               args: [this.config.mcpEntry],
-              env: { LOGIXIV_URL: this.config.publicUrl },
+              env: { PAPERLENS_SERVER_URL: this.config.publicUrl },
             })}'`
           : null,
         lastContactAt: this.lastMcpContactAt,

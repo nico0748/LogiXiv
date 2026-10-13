@@ -2,11 +2,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
-import { ImportError } from '@logixiv/core';
+import { ImportError } from '@paperlens/core';
 import type { Config } from './config.ts';
 import {
   BadRequestError,
-  LogiXivApi,
+  PaperLensApi,
   MAX_GLOSSARY_ENTRIES,
   MAX_PDF_BYTES,
   NotFoundError,
@@ -266,11 +266,11 @@ function clientGoneSignal(
   return controller.signal;
 }
 
-export function createHttpServer(config: Config, api: LogiXivApi): Server {
+export function createHttpServer(config: Config, api: PaperLensApi): Server {
   const server = createServer((request, response) => {
     handle(config, api, request, response).catch((error: unknown) => {
       const status = errorStatus(error);
-      if (status === 500) console.error('[logixiv]', error);
+      if (status === 500) console.error('[paperlens-server]', error);
       // 相手が居なくなって中止したときは、書く先がもう無い。書こうとすると
       // ERR_STREAM_WRITE_AFTER_END が上がり、本当の失敗のように見えてしまう。
       if (response.writableEnded || response.destroyed) return;
@@ -316,7 +316,7 @@ export function createHttpServer(config: Config, api: LogiXivApi): Server {
 
 async function handle(
   config: Config,
-  api: LogiXivApi,
+  api: PaperLensApi,
   request: IncomingMessage,
   response: ServerResponse,
 ): Promise<void> {
@@ -328,7 +328,9 @@ async function handle(
   // MCP から来た呼び出しを記録する。画面の「訳す」で、設定が効いているのか
   // どうかを人が確かめられるようにするため（押しても何も始まらないボタンの前で、
   // 自分の設定が悪いのか待てばいいのかが判断できなかった）。
-  if (request.headers['x-logixiv-client'] === 'mcp') api.noteMcpContact();
+  // 改名前の MCP（X-LogiXiv-Client を送る）からの接続も数える。
+  const client = request.headers['x-paperlens-client'] ?? request.headers['x-logixiv-client'];
+  if (client === 'mcp') api.noteMcpContact();
 
   const url = new URL(request.url ?? '/', 'http://localhost');
   const path = url.pathname;

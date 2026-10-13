@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 export const STRUCTURE_VERSION = 2;
 
 /** 書き出し HTML の generator などに出すバージョン。ここが唯一の定義。 */
-export const LOGIXIV_VERSION = '0.1.0';
+export const PAPERLENS_VERSION = '0.1.0';
 
 /**
  * 注釈の結合キーになる正規化。

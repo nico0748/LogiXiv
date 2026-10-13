@@ -35,6 +35,8 @@ import {
   requirePaper,
   updateItem,
 } from "../server/service.ts";
+import { parseSentences } from "../server/sentences.ts";
+import { SENTENCE_READ_TOOLS, SENTENCE_WRITE_TOOLS, sentenceProgress } from "./sentenceTools.ts";
 
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 // 引数の型は inputSchema（zod）で検査済み
@@ -108,11 +110,16 @@ const READ: Tool[] = [
     name: "list_papers",
     config: {
       title: "論文の一覧",
-      description: "保存先にある論文の ID・題名・読解の段階・年を返します。ほかのツールに渡す論文 ID はここで調べます。",
+      description:
+        "保存先にある論文の ID・題名・読解の段階・年と、1 文ずつの対訳の進み具合（sentences: 解析の状態・未訳の文の数）を返します。ほかのツールに渡す論文 ID はここで調べます。",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    handler: async () => json(await listPapers(await vault())),
+    handler: async () => {
+      const v = await vault();
+      const papers = await listPapers(v);
+      return json(await Promise.all(papers.map(async (p) => ({ ...p, sentences: await sentenceProgress(v, p.id) }))));
+    },
   },
   {
     name: "get_paper",
@@ -220,7 +227,7 @@ const WRITE: Tool[] = [
     config: {
       title: "論文を取り込む",
       description:
-        "PDF を取り込み、テンプレートから読解ノートを作ります。source には端末上の PDF の絶対パスか、PDF の URL（arXiv の PDF など）を指定します。作った論文 ID を返します。",
+        "PDF を取り込み、テンプレートから読解ノートを作ります。source には端末上の PDF の絶対パスか、PDF の URL（arXiv の PDF など）を指定します。作った論文 ID を返します。取り込むと 1 文ずつの対訳の解析が裏で始まります（終わったかは get_sentence_outline で確かめます）。",
       inputSchema: {
         source: z.string().min(1).describe("PDF の絶対パス、または https:// で始まる URL"),
         title: z.string().optional().describe("題名。省略すると PDF の文書情報かファイル名を使います"),
@@ -228,8 +235,11 @@ const WRITE: Tool[] = [
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     handler: async ({ source, title }) => {
-      const id = await importFrom(await vault(), source, title);
-      return json({ id, note: notePath(id) });
+      const v = await vault();
+      const id = await importFrom(v, source, title);
+      // 対訳の土台（sentences.json）は裏で作る。待つと GROBID の解析で呼び出しが時間切れになる
+      void parseSentences(v, id, "auto").catch(() => undefined);
+      return json({ id, note: notePath(id), sentences: "parsing" });
     },
   },
   {
@@ -460,6 +470,8 @@ function clean(o: Record<string, unknown>) {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 }
 
-export const READ_TOOLS = READ;
-export const WRITE_TOOLS = WRITE;
-export const TOOLS = [...READ, ...WRITE];
+export const READ_TOOLS = [...READ, ...SENTENCE_READ_TOOLS];
+export const WRITE_TOOLS = [...WRITE, ...SENTENCE_WRITE_TOOLS];
+/** 対訳（sentences.json）を扱うツールの名前。設定画面で分けて見せる。 */
+export const SENTENCE_TOOL_NAMES = new Set([...SENTENCE_READ_TOOLS, ...SENTENCE_WRITE_TOOLS].map((t) => t.name));
+export const TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];

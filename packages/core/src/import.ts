@@ -1,5 +1,14 @@
 import type { Annotations, PaperDocument } from './types.ts';
-import { EXPORT_DATA_ELEMENT_ID } from './export.ts';
+import {
+  EXPORT_DATA_ELEMENT_ID,
+  EXPORT_FORMAT,
+  LEGACY_EXPORT_DATA_ELEMENT_IDS,
+  LEGACY_EXPORT_FORMATS,
+} from './export.ts';
+
+/** 書き出しデータとみなす script の id。改名前の書き出しも読めるよう古い id も含める。 */
+const DATA_ELEMENT_IDS = new Set([EXPORT_DATA_ELEMENT_ID, ...LEGACY_EXPORT_DATA_ELEMENT_IDS]);
+const ACCEPTED_FORMATS = new Set([EXPORT_FORMAT, ...LEGACY_EXPORT_FORMATS]);
 import { decodeEntities } from './xml.ts';
 import { newId } from './hash.ts';
 import { sanitizeAnnotations, sanitizeDocument, emptySanitizeReport, isRecord, type SanitizeReport } from './validate.ts';
@@ -14,7 +23,7 @@ import { sanitizeAnnotations, sanitizeDocument, emptySanitizeReport, isRecord, t
  *
  * 探索は正規表現ではなく線形スキャンで行う。理由は 2 つ:
  *  - `<script[^>]*id=...>` は一致しない入力でバックトラックし、入力長に対して二次で劣化する
- *    （LogiXiv 製でない大きな HTML を投げたとき＝いちばん起きやすい誤操作で固まる）
+ *    （PaperLens 製でない大きな HTML を投げたとき＝いちばん起きやすい誤操作で固まる）
  *  - 属性値に `>` を含む script タグを取りこぼす
  * さらに、該当 script が複数あるときは「最初の 1 つ」を黙って採らずエラーにする。
  * 本物の前に偽のデータ script を置いた HTML を配られる経路を残さないため。
@@ -34,7 +43,7 @@ interface FoundScript {
  * HTML の属性を読む。**XML 用の parseAttrs は使わない。**
  *
  * HTML の要素名と属性名は大文字小文字を区別せず、属性値は引用符が無くてもよい。
- * XML の規則で読むと `<SCRIPT id=logixiv-data>` がこちらには見えず、ブラウザには
+ * XML の規則で読むと `<SCRIPT id=paperlens-data>` がこちらには見えず、ブラウザには
  * 見える、という食い違いが作れる。取り込んだ側とビューアが別の payload を読む状態は、
  * 「同じファイルなのに人によって中身が違う」という最悪の壊れ方になる。
  */
@@ -57,7 +66,7 @@ function parseHtmlAttrs(source: string): Record<string, string> {
  * 開始タグの終わりを探す。**HTML の状態機械に従う。**
  *
  * XML 用の findTagEnd は引用符を無条件に区切りとして扱うので、
- * `id=logixiv-data data-x=a'b>` のように引用符なしの値に `'` が混ざると
+ * `id=paperlens-data data-x=a'b>` のように引用符なしの値に `'` が混ざると
  * そこから引用中だと思い込み、タグの終わりを見失う。
  * ブラウザは `'` を値の一部として読むので、そこで両者の見え方が割れる。
  */
@@ -135,7 +144,7 @@ function findDataScripts(html: string): FoundScript[] {
     const attrs = parseHtmlAttrs(html.slice(open + 7, tagEnd));
     const close = lower.indexOf('</script', tagEnd + 1);
     const bodyEnd = close === -1 ? html.length : close;
-    if (attrs['id'] === EXPORT_DATA_ELEMENT_ID) {
+    if (DATA_ELEMENT_IDS.has(attrs['id'] ?? '')) {
       found.push({ json: html.slice(tagEnd + 1, bodyEnd), at: open });
     }
     cursor = close === -1 ? html.length : close + 8;
@@ -146,11 +155,11 @@ function findDataScripts(html: string): FoundScript[] {
 export function extractPayloadJson(html: string): string {
   const found = findDataScripts(html);
   if (found.length === 0) {
-    throw new ImportError('LogiXiv の書き出しデータが見つかりません（この HTML は LogiXiv 製ではないかもしれません）');
+    throw new ImportError('PaperLens の書き出しデータが見つかりません（この HTML は PaperLens 製ではないかもしれません）');
   }
   if (found.length > 1) {
     throw new ImportError(
-      `LogiXiv の書き出しデータが ${found.length} 個見つかりました。どれが本物か判断できないため取り込みません。`,
+      `PaperLens の書き出しデータが ${found.length} 個見つかりました。どれが本物か判断できないため取り込みません。`,
     );
   }
   return found[0]!.json;
@@ -196,8 +205,8 @@ export function parseExportHtml(html: string): ParsedImport {
     throw new ImportError('埋め込みデータの JSON を解析できませんでした');
   }
   if (!isRecord(parsed)) throw new ImportError('埋め込みデータの形式が不正です');
-  if (parsed['format'] !== 'logixiv-export') {
-    throw new ImportError('LogiXiv の書き出し形式ではありません');
+  if (typeof parsed['format'] !== 'string' || !ACCEPTED_FORMATS.has(parsed['format'])) {
+    throw new ImportError('PaperLens の書き出し形式ではありません');
   }
   if (parsed['formatVersion'] !== 1) {
     throw new ImportError(`未対応の書き出しバージョンです: ${String(parsed['formatVersion'])}`);

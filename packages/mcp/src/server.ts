@@ -1,10 +1,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { LOGIXIV_VERSION, needsTranslation, progress, type PaperDocument, type Sentence } from '@logixiv/core';
-import { LogiXivClient } from './client.ts';
+import { PAPERLENS_VERSION, needsTranslation, progress, type PaperDocument, type Sentence } from '@paperlens/core';
+import { PaperLensClient } from './client.ts';
 
 /**
- * Claude から LogiXiv を触るための MCP サーバー。
+ * Claude から PaperLens を触るための MCP サーバー。
  *
  * 設計方針は 3 つ。
  *
@@ -157,14 +157,14 @@ function sentenceView(document: PaperDocument, sentence: Sentence) {
 }
 
 export function createMcpServer(baseUrl: string): McpServer {
-  const client = new LogiXivClient(baseUrl);
+  const client = new PaperLensClient(baseUrl);
   const glossaryIfChanged = makeGlossaryTracker();
   const noteProgress = makeProgressWatcher();
   const server = new McpServer(
-    { name: 'logixiv', version: LOGIXIV_VERSION },
+    { name: 'paperlens-server', version: PAPERLENS_VERSION },
     {
       instructions:
-        'LogiXiv は論文 PDF を 1 文単位で読むためのローカルツールです。' +
+        'PaperLens は論文 PDF を 1 文単位で読むためのローカルツールです。' +
         'まず list_documents で対象を選び、get_translation_batch で未訳の文を前後の文脈ごと受け取り、' +
         'set_translations でまとめて書き戻してください。' +
         '訳しにくい箇所は勝手に意訳せず add_note に判断を残すのが望ましい運用です。' +
@@ -179,7 +179,7 @@ export function createMcpServer(baseUrl: string): McpServer {
     {
       title: '文書一覧',
       description:
-        'LogiXiv に取り込まれている論文の一覧と翻訳の進捗、本体の状態（GROBID の生死を含む）を返す。' +
+        'PaperLens に取り込まれている論文の一覧と翻訳の進捗、本体の状態（GROBID の生死を含む）を返す。' +
         'まずこれを呼んで document_id を決める。',
       inputSchema: {},
     },
@@ -195,7 +195,7 @@ export function createMcpServer(baseUrl: string): McpServer {
           return jsonResult({
             documents: [],
             hint:
-              '取り込み済みの論文がありません。LogiXiv の画面（既定では http://127.0.0.1:4173）を開いて PDF をドラッグしてください。' +
+              '取り込み済みの論文がありません。PaperLens の画面（既定では http://127.0.0.1:4173）を開いて PDF をドラッグしてください。' +
               (health?.grobid === 'down'
                 ? ' GROBID が未接続です。精度の高い文分割には docker compose -f docker/grobid.yml up -d を先に実行してください。'
                 : ''),
@@ -924,7 +924,7 @@ export function createMcpServer(baseUrl: string): McpServer {
           content: {
             type: 'text' as const,
             text: [
-              `LogiXiv の文書 ${document_id} を翻訳してください。${field ? `分野は「${field}」です。` : ''}`,
+              `PaperLens の文書 ${document_id} を翻訳してください。${field ? `分野は「${field}」です。` : ''}`,
               '',
               '手順:',
               '1. get_document_outline で節構成・解析方式・用語集を確認する。firstUntranslatedOrder が再開位置。',

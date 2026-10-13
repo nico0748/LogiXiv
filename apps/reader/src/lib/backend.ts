@@ -26,7 +26,7 @@ export type Link = { paper: string; term: string };
 
 /** 保存先で起きた変更。paper が無いものは論文一覧やテンプレートの変更。 */
 export interface ChangeEvent {
-  kind: "papers" | "note" | "annotations" | "template" | "config";
+  kind: "papers" | "note" | "annotations" | "sentences" | "template" | "config";
   paper?: string;
 }
 

@@ -15,7 +15,12 @@ const PACKAGED = electronApp.isPackaged;
 // サーバーを読み込む前に、書き込める場所を指すよう環境変数を決める。
 // MCP サーバーの設定にもこの値が入るため、AI エージェントも同じ保存先を見る。
 const userData = electronApp.getPath("userData");
-process.env.PAPERLENS_CONFIG ||= path.join(userData, "paperlens.config.json");
+// 開発時（npm run app）の userData はパッケージ名から決まるため、@logixiv/reader → @paperlens/app の
+// 改名で置き場が変わった。新しい側に設定が無く古い側にあるなら、古い設定を読み続ける。
+const legacyDevConfig = path.join(electronApp.getPath("appData"), "@logixiv", "reader", "paperlens.config.json");
+const currentConfig = path.join(userData, "paperlens.config.json");
+process.env.PAPERLENS_CONFIG ||=
+  !PACKAGED && !fs.existsSync(currentConfig) && fs.existsSync(legacyDevConfig) ? legacyDevConfig : currentConfig;
 process.env.PAPERLENS_DEFAULT_DATA ||= PACKAGED
   ? path.join(electronApp.getPath("documents"), "PaperLens")
   : path.join(APP_ROOT, "data");
