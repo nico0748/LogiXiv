@@ -30,7 +30,7 @@ export function SettingsDialog({ value, onSave, onClose }: { value: AiSettings; 
       <form method="dialog" onSubmit={(e) => { e.preventDefault(); onSave({ apiKey: key.trim(), model: model.trim() || DEFAULT_MODEL }); }}>
         <div className="dlg-body">
           <h2 id="settings-title">Claude の設定</h2>
-          <p style={{ marginTop: 0, fontSize: 14, color: "var(--text-sub)" }}>
+          <p style={{ marginTop: 0, fontSize: 14, color: "var(--md-sys-color-on-surface-variant)" }}>
             訳・用語の説明・数式の書き起こしに Claude を使います。API キーは Anthropic Console で発行できます。
           </p>
           <div className="record-field">
@@ -68,7 +68,7 @@ export function TemplateDialog({ backend, onClose }: { backend: Backend; onClose
     <dialog ref={ref} className="wide" aria-labelledby="tpl-title">
       <div className="dlg-body">
         <h2 id="tpl-title">読解ノートのテンプレート</h2>
-        <p style={{ marginTop: 0, fontSize: 14, color: "var(--text-sub)" }}>
+        <p style={{ marginTop: 0, fontSize: 14, color: "var(--md-sys-color-on-surface-variant)" }}>
           保管庫の <code>{TEMPLATE_PATH}</code> を編集します。変更は、これから取り込む論文のノートに使われます。
           入力欄は <code>&lt;!-- field: ID | 見出し | 説明 --&gt;</code> と <code>&lt;!-- /field --&gt;</code> で囲みます。
           直前の <code>##</code> 見出しが、記録タブでのまとまりになります。
