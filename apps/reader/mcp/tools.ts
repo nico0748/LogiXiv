@@ -21,6 +21,7 @@ import {
   writeMeta,
   writeTemplate,
 } from "../src/lib/papers.ts";
+import { toBibtex } from "../src/lib/bibtex.ts";
 import { parseFields, setField } from "../src/lib/template.ts";
 import { dataRoot, readConfig, writeConfig } from "../server/config.ts";
 import { NodeVault } from "../server/nodeVault.ts";
@@ -137,6 +138,21 @@ const READ: Tool[] = [
     },
   },
   {
+    name: "get_bibtex",
+    config: {
+      title: "BibTeX",
+      description:
+        "論文の frontmatter（題名・著者・年・掲載先・DOI・arXiv）から BibTeX を作って返します。画面の「BibTeX をコピー」と同じ内容です。",
+      inputSchema: { paper: PAPER },
+      annotations: { readOnlyHint: true },
+    },
+    handler: async ({ paper }) => {
+      const v = await vault();
+      await requirePaper(v, paper);
+      return text(toBibtex((await paperDetail(v, paper)).frontmatter, paper));
+    },
+  },
+  {
     name: "get_note",
     config: {
       title: "読解ノートの本文",
@@ -190,7 +206,8 @@ const READ: Tool[] = [
     name: "search_notes",
     config: {
       title: "ノートを横断検索",
-      description: "すべての読解ノートから語句を含む行を探します。過去に読んだ論文の記録を参照するときに使います。",
+      description:
+        "すべての読解ノートから語句を含む行を探します。過去に読んだ論文の記録を参照するときに使います。region は当たった場所です（frontmatter=書誌情報、field=記録欄（field に欄の ID）、list:highlights=マーカーと訳、list:terms=用語、list:equations=数式、body=それ以外の本文）。",
       inputSchema: { query: z.string().min(1).describe("探す語句") },
       annotations: { readOnlyHint: true },
     },
@@ -227,19 +244,19 @@ const WRITE: Tool[] = [
     config: {
       title: "論文を取り込む",
       description:
-        "PDF を取り込み、テンプレートから読解ノートを作ります。source には端末上の PDF の絶対パスか、PDF の URL（arXiv の PDF など）を指定します。作った論文 ID を返します。取り込むと 1 文ずつの対訳の解析が裏で始まります（終わったかは get_sentence_outline で確かめます）。",
+        "PDF を取り込み、テンプレートから読解ノートを作ります。source には、次のどれかを指定します。\n- 端末上の PDF の絶対パス\n- PDF の URL\n- arXiv の abs／pdf の URL、または番号（例 2410.12345）\n\narXiv の論文は、題名・著者・年・DOI を frontmatter に入れます。同じ arXiv の論文が既にあれば取り込まず、existing: true とその論文の ID を返します。DOI のリンクは使えません。端末内やローカルネットワークの URL は使えません。取り込むと 1 文ずつの対訳の解析が裏で始まります（終わったかは get_sentence_outline で確かめます）。",
       inputSchema: {
-        source: z.string().min(1).describe("PDF の絶対パス、または https:// で始まる URL"),
+        source: z.string().min(1).describe("PDF の絶対パス、PDF の URL、arXiv の URL か番号"),
         title: z.string().optional().describe("題名。省略すると PDF の文書情報かファイル名を使います"),
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     handler: async ({ source, title }) => {
       const v = await vault();
-      const id = await importFrom(v, source, title);
+      const r = await importFrom(v, source, title);
       // 対訳の土台（sentences.json）は裏で作る。待つと GROBID の解析で呼び出しが時間切れになる
-      void parseSentences(v, id, "auto").catch(() => undefined);
-      return json({ id, note: notePath(id), sentences: "parsing" });
+      if (!r.existing) void parseSentences(v, r.id, "auto").catch(() => undefined);
+      return json({ id: r.id, note: notePath(r.id), existing: r.existing, meta: r.meta, sentences: r.existing ? undefined : "parsing" });
     },
   },
   {
@@ -283,11 +300,11 @@ const WRITE: Tool[] = [
     config: {
       title: "書誌情報を変える",
       description:
-        "読解ノートの frontmatter の1項目を書き換えます。title・authors・year・venue・doi などに使います。項目が無ければ追加します。",
+        "読解ノートの frontmatter の1項目を書き換えます。title・authors・year・venue・doi などに使います。項目が無ければ追加します。著者など一覧の項目は配列で渡します（例: [\"A. Example\", \"B. Sample\"]）。一覧の書き方（ブロック形式・フロー形式）は元の形を保ちます。複数行の値の項目は書き換えられません。",
       inputSchema: {
         paper: PAPER,
         key: z.string().regex(/^[\w-]+$/).describe("項目名（英数字・ハイフン・下線）"),
-        value: z.string().describe("値"),
+        value: z.union([z.string(), z.array(z.string())]).describe("値。一覧の項目は文字列の配列"),
       },
       annotations: { readOnlyHint: false, idempotentHint: true },
     },

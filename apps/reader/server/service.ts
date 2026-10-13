@@ -13,9 +13,21 @@ import {
   type Term,
   newId,
 } from "../src/lib/model.ts";
-import { changeAnnotations, checkId, importPaper, loadAnnotations, notePath, pdfPath } from "../src/lib/papers.ts";
+import { changeAnnotations, checkId, importPaper, listPapers, loadAnnotations, loadNote, notePath, pdfPath } from "../src/lib/papers.ts";
 import type { NodeVault } from "./nodeVault.ts";
+import { type FmValue, fmText, readFrontmatter } from "../src/lib/frontmatter.ts";
+import { type ArxivMeta, arxivQueue, fetchArxivMeta, normalizeSource } from "./arxiv.ts";
+import { FetchFailed, FetchRefused, MAX_BODY, fetchPdf } from "./fetchpdf.ts";
 import { findText, readPages } from "./pdftext.ts";
+
+/** URL の最後の部分からファイル名を作る。 */
+function fileNameOf(url: string) {
+  try {
+    return decodeURIComponent(new URL(url).pathname.split("/").pop() || "paper") || "paper";
+  } catch {
+    return "paper";
+  }
+}
 
 /** PDF の文書情報から題名を取る。取れなければ null。 */
 export async function pdfTitle(data: ArrayBuffer): Promise<string | null> {
@@ -38,16 +50,82 @@ export async function importBytes(vault: NodeVault, fileName: string, data: Arra
   return importPaper(vault, fileName, data, t);
 }
 
-/** 端末にある PDF ファイル、または URL から取り込む。 */
-export async function importFrom(vault: NodeVault, source: string, title?: string) {
-  if (/^https?:\/\//.test(source)) {
-    const res = await fetch(source);
-    if (!res.ok) throw new Error(`PDF を取得できませんでした（${res.status}）: ${source}`);
-    const name = decodeURIComponent(new URL(source).pathname.split("/").pop() || "paper") || "paper";
-    return importBytes(vault, name.endsWith(".pdf") ? name : `${name}.pdf`, await res.arrayBuffer(), title);
+export interface ImportResult {
+  id: string;
+  /** 同じ論文が既にあり、取り込まなかった */
+  existing: boolean;
+  /** frontmatter に入れた書誌情報 */
+  meta: Partial<ArxivMeta> & { arxiv?: string; url?: string };
+}
+
+// 取得の処理。テストでだけ差し替える（setFetchers）。外へ通信しないテストを書くため
+const defaultFetchers = { pdf: (url: string) => fetchPdf(url), arxiv: (id: string) => fetchArxivMeta(id) };
+let fetchers = defaultFetchers;
+/** テスト専用: PDF と arXiv の書誌情報の取得を差し替える。引数なしで元に戻す */
+export function setFetchers(f?: Partial<typeof defaultFetchers>) {
+  fetchers = { ...defaultFetchers, ...f };
+}
+
+const BUSY = "arXiv が混み合っています。少し待ってからもう一度取り込んでください。";
+
+/**
+ * 端末にある PDF ファイル、URL、arXiv の番号から取り込む。端末のパスは MCP からだけ使う。
+ *
+ * 1. 入力を見分ける。DOI は論文のページを指すので止める
+ * 2. arXiv は、取得の前に重複を確かめ、書誌情報を取る（取れなくても続ける）
+ * 3. PDF を取る。arXiv が 429・503 を返したら、やり直さずに止める（接続の間隔の決まりを守るため）
+ * 4. 題名を決め（引数 → arXiv → PDF の文書情報 → ファイル名）、フォルダ名と frontmatter を 1 回で作る
+ */
+export async function importFrom(vault: NodeVault, source: string, title?: string): Promise<ImportResult> {
+  const n = normalizeSource(source);
+  if (n.kind === "doi") throw new FetchRefused("DOI のリンクは論文のページを指すため取り込めません。PDF の URL を指定してください。");
+
+  if (n.kind === "url" && !n.pdfUrl) {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(source)) throw new FetchRefused("http または https で始まる URL を指定してください。");
+    const file = path.resolve(source);
+    if ((await fs.stat(file)).size > MAX_BODY) throw new FetchRefused(`PDF が ${MAX_BODY / 1024 / 1024}MB を超えているため取り込めません。`);
+    const b = await fs.readFile(file);
+    const id = await importBytes(vault, path.basename(source), b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer, title);
+    return { id, existing: false, meta: {} };
   }
-  const b = await fs.readFile(path.resolve(source));
-  return importBytes(vault, path.basename(source), b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer, title);
+
+  const papers = await listPapers(vault);
+  let meta: ImportResult["meta"] = {};
+  let got: { data: ArrayBuffer; finalUrl: string };
+  if (n.kind === "arxiv") {
+    const id = n.arxivId!;
+    const same = papers.find((p) => p.arxiv === id);
+    if (same) return { id: same.id, existing: true, meta: {} };
+    const am = await fetchers.arxiv(id);
+    meta = { ...(am ?? {}), arxiv: id, url: `https://arxiv.org/abs/${id}${n.version ?? ""}` };
+    try {
+      got = await arxivQueue.run(() => fetchers.pdf(n.pdfUrl!));
+    } catch (e) {
+      if (e instanceof FetchFailed && (e.status === 429 || e.status === 503)) {
+        throw new FetchFailed(e.retryAfter ? `${BUSY}待つ時間の目安は ${e.retryAfter} 秒です。` : BUSY, e.status, e.retryAfter);
+      }
+      throw e;
+    }
+  } else {
+    got = await fetchers.pdf(n.pdfUrl!);
+    // arXiv でない URL は、取得した後の最終 URL で重複を見分ける
+    for (const p of papers) {
+      const fm = readFrontmatter(await loadNote(vault, p.id));
+      if (fmText(fm.url) === got.finalUrl) return { id: p.id, existing: true, meta: {} };
+    }
+    meta = { url: got.finalUrl };
+  }
+
+  const head = new TextDecoder().decode(new Uint8Array(got.data.slice(0, 5)));
+  if (!head.startsWith("%PDF")) throw new FetchRefused("PDF ではないため取り込めません。論文のページではなく、PDF の URL を指定してください。");
+  const name = fileNameOf(got.finalUrl);
+  const fileName = name.endsWith(".pdf") ? name : `${name}.pdf`;
+  const t = title?.trim() || meta.title || (await pdfTitle(got.data)) || fileName.replace(/\.pdf$/i, "");
+  const fm: Record<string, FmValue> = {};
+  if (meta.authors?.length) fm.authors = meta.authors;
+  for (const k of ["year", "venue", "doi", "arxiv", "url"] as const) if (meta[k]) fm[k] = meta[k]!;
+  const id = await importPaper(vault, fileName, got.data, t, { slugFrom: t, meta: fm });
+  return { id, existing: false, meta };
 }
 
 /** 論文が無ければ、一覧の調べ方を添えて止める。 */

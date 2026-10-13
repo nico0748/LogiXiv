@@ -4,9 +4,11 @@
 //   MCP サーバーや Obsidian がファイルを書き換えたときは、サーバーから通知が届く。
 // - VaultBackend: サーバーなしで動かすとき。ブラウザで選んだフォルダか、メモリ上の保管庫を直接読み書きする。
 
+import type { FmValue } from "./frontmatter.ts";
 import type { AnnotationOp, Annotations } from "./model.ts";
 import {
   type PaperSummary,
+  type SearchHit,
   changeAnnotations,
   collectGraph,
   ensureLayout,
@@ -16,6 +18,7 @@ import {
   loadNote,
   loadPdf,
   readTemplate,
+  searchNotes,
   writeField,
   writeMeta,
   writeTemplate,
@@ -45,15 +48,20 @@ export interface Backend {
   persistent: boolean;
   listPapers(): Promise<PaperSummary[]>;
   importPaper(fileName: string, data: ArrayBuffer, title: string): Promise<string>;
+  /** URL か arXiv の番号から取り込む。サーバー版だけが持つ（単体 HTML 版では、他のサイトの PDF を取得できないため） */
+  importUrl?(url: string): Promise<{ id: string; existing: boolean }>;
   loadPdf(id: string): Promise<ArrayBuffer>;
   loadNote(id: string): Promise<string>;
   loadAnnotations(id: string): Promise<Annotations>;
   writeField(id: string, field: string, value: string): Promise<string>;
-  writeMeta(id: string, key: string, value: string): Promise<string>;
+  /** frontmatter の1項目を書く。一覧の項目は配列で渡す */
+  writeMeta(id: string, key: string, value: FmValue): Promise<string>;
   changeAnnotations(id: string, ops: AnnotationOp[]): Promise<{ annotations: Annotations; note: string }>;
   readTemplate(): Promise<string>;
   writeTemplate(text: string): Promise<void>;
   graph(): Promise<Link[]>;
+  /** すべての読解ノートから語句を探す */
+  search(q: string): Promise<SearchHit[]>;
   /** 変更の通知を受け取る。戻り値を呼ぶと止まる。 */
   subscribe(fn: (e: ChangeEvent) => void): () => void;
 }
@@ -91,7 +99,7 @@ export class VaultBackend implements Backend {
   writeField(id: string, field: string, value: string) {
     return writeField(this.vault, id, field, value);
   }
-  writeMeta(id: string, key: string, value: string) {
+  writeMeta(id: string, key: string, value: FmValue) {
     return writeMeta(this.vault, id, key, value);
   }
   changeAnnotations(id: string, ops: AnnotationOp[]) {
@@ -106,6 +114,9 @@ export class VaultBackend implements Backend {
   async graph() {
     return collectGraph(this.vault, await listPapers(this.vault));
   }
+  search(q: string) {
+    return searchNotes(this.vault, q);
+  }
   subscribe() {
     return () => undefined;
   }
@@ -115,6 +126,15 @@ export class VaultBackend implements Backend {
 
 /** この画面を見分ける ID。自分の書き込みで届いた通知を無視するのに使う。 */
 const CLIENT_ID = Math.random().toString(36).slice(2);
+
+/** サーバーが断ったときの誤り。status は HTTP の状態（409 は書き換えられない frontmatter の項目） */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, msg: string) {
+    super(msg);
+    this.status = status;
+  }
+}
 
 async function call<T>(url: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = { "x-paperlens-client": CLIENT_ID };
@@ -128,7 +148,7 @@ async function call<T>(url: string, init: RequestInit = {}): Promise<T> {
     } catch {
       // 本文が JSON でないときは状態コードだけを伝える
     }
-    throw new Error(msg);
+    throw new ApiError(res.status, msg);
   }
   const type = res.headers.get("content-type") ?? "";
   if (type.includes("application/json")) return (await res.json()) as T;
@@ -181,6 +201,9 @@ export class ServerBackend implements Backend {
     });
     return r.id;
   }
+  importUrl(url: string) {
+    return call<{ id: string; existing: boolean }>("/api/papers/from-url", { method: "POST", body: json({ url }) });
+  }
   loadPdf(id: string) {
     return call<ArrayBuffer>(`/api/papers/${enc(id)}/pdf`);
   }
@@ -193,7 +216,7 @@ export class ServerBackend implements Backend {
   async writeField(id: string, field: string, value: string) {
     return (await call<{ note: string }>(`/api/papers/${enc(id)}/fields/${enc(field)}`, { method: "PUT", body: json({ value }) })).note;
   }
-  async writeMeta(id: string, key: string, value: string) {
+  async writeMeta(id: string, key: string, value: FmValue) {
     return (await call<{ note: string }>(`/api/papers/${enc(id)}/meta`, { method: "PUT", body: json({ key, value }) })).note;
   }
   changeAnnotations(id: string, ops: AnnotationOp[]) {
@@ -207,6 +230,9 @@ export class ServerBackend implements Backend {
   }
   graph() {
     return call<Link[]>("/api/graph");
+  }
+  search(q: string) {
+    return call<SearchHit[]>(`/api/search?q=${enc(q)}`);
   }
   subscribe(fn: (e: ChangeEvent) => void) {
     const es = new EventSource("/api/events");

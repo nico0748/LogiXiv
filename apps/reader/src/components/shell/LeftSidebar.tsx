@@ -1,22 +1,23 @@
 // 左サイドバー。論文一覧（PDF の取り込み・ドロップ）と、読解ノートの検索を切り替えて表示する。
 import { ArrowLeftRight, FilePlus, Files, Search, Settings } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import type { PaperSummary } from "../../lib/papers.ts";
+import type { Backend } from "../../lib/backend.ts";
+import type { PaperSummary, SearchHit } from "../../lib/papers.ts";
+import { PaperListPane } from "../PaperListPane.tsx";
 import type { LeftTab } from "./workspaceState.ts";
 
-export interface SearchHit {
-  paper: string;
-  line: number;
-  text: string;
-}
-
 interface Props {
+  backend: Backend;
   tab: LeftTab;
   setTab: (t: LeftTab) => void;
   papers: PaperSummary[];
   current: string | null;
   onOpenPaper: (id: string) => void;
   onImport: (files: File[]) => void;
+  /** URL から取り込むダイアログを開く。サーバー版だけ */
+  onImportUrl?: () => void;
+  /** 検索の当たりを押したとき。当たった場所のタブへ移る */
+  onHit: (hit: SearchHit) => void;
   search: (q: string) => Promise<SearchHit[]>;
   vaultName: string;
   onOpenSettings: () => void;
@@ -50,9 +51,13 @@ export function LeftSidebar(p: Props) {
         <SideTab id="files" label="論文一覧" active={p.tab} onClick={p.setTab}><Files size={16} aria-hidden="true" /></SideTab>
         <SideTab id="search" label="検索" active={p.tab} onClick={p.setTab}><Search size={16} aria-hidden="true" /></SideTab>
         <span className="spacer" />
-        <button className="clickable-icon" aria-label="PDF を追加" title="PDF を追加" onClick={() => fileRef.current?.click()}>
-          <FilePlus size={16} aria-hidden="true" />
-        </button>
+        {p.onImportUrl ? (
+          <AddMenu onFile={() => fileRef.current?.click()} onUrl={p.onImportUrl} />
+        ) : (
+          <button className="clickable-icon" aria-label="PDF を追加" title="PDF を追加" onClick={() => fileRef.current?.click()}>
+            <FilePlus size={16} aria-hidden="true" />
+          </button>
+        )}
         <input
           ref={fileRef}
           type="file"
@@ -67,7 +72,11 @@ export function LeftSidebar(p: Props) {
         />
       </div>
 
-      {p.tab === "files" ? <FileList {...p} onAdd={() => fileRef.current?.click()} /> : <SearchView {...p} />}
+      {p.tab === "files" ? (
+        <PaperListPane backend={p.backend} papers={p.papers} current={p.current} showing={p.current !== null} onOpen={p.onOpenPaper} onHit={p.onHit} onAdd={() => fileRef.current?.click()} />
+      ) : (
+        <SearchView {...p} />
+      )}
 
       <div className="sidebar-vault">
         <span className="sidebar-vault-name" title={p.vaultName}>{p.vaultName}</span>
@@ -100,35 +109,7 @@ function SideTab({ id, label, active, onClick, children }: { id: LeftTab; label:
   );
 }
 
-function FileList({ papers, current, onOpenPaper, onAdd }: Props & { onAdd: () => void }) {
-  return (
-    <div className="sidebar-scroll">
-      <div className="nav-header-title">論文 <span className="nav-count">{papers.length}</span></div>
-      {papers.length === 0 ? (
-        <div className="empty">
-          <p>論文はまだありません。PDF をここにドロップするか、取り込んでください。取り込むと、テンプレートから読解ノートを作ります。</p>
-          <button className="btn sm primary" onClick={onAdd}>PDF を追加</button>
-        </div>
-      ) : (
-        <ul className="nav-files">
-          {papers.map((x) => (
-            <li key={x.id}>
-              <button className={`nav-file-title${x.id === current ? " is-active" : ""}`} aria-current={x.id === current} onClick={() => onOpenPaper(x.id)}>
-                <span className="nav-file-title-content">{x.title}</span>
-                <span className="nav-file-meta">
-                  <span className={`tag st-${x.status}`}>{x.status}</span>
-                  {x.year && <span>{x.year}</span>}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function SearchView({ papers, onOpenPaper, search }: Props) {
+function SearchView({ papers, onOpenPaper, onHit, search }: Props) {
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [err, setErr] = useState("");
@@ -188,7 +169,7 @@ function SearchView({ papers, onOpenPaper, search }: Props) {
             <div key={paper} className="search-result">
               <button className="search-result-file" onClick={() => onOpenPaper(paper)}>{titleOf(paper)}</button>
               {hs.map((h) => (
-                <button key={h.line} className="search-result-match" onClick={() => onOpenPaper(paper)}>
+                <button key={h.line} className="search-result-match" onClick={() => onHit(h)}>
                   <Highlight text={h.text} needle={needle} />
                 </button>
               ))}
@@ -210,5 +191,56 @@ function Highlight({ text, needle }: { text: string; needle: string }) {
       <mark>{text.slice(i, i + needle.length)}</mark>
       {text.slice(i + needle.length)}
     </>
+  );
+}
+
+/** 「追加」のボタンとメニュー（PDF ファイル、URL）。URL から取り込めるサーバー版だけで使う */
+function AddMenu({ onFile, onUrl }: { onFile: () => void; onUrl: () => void }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    (box.current?.querySelector('[role="menuitem"]') as HTMLElement | null)?.focus();
+    const onDown = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      button.current?.focus();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const pick = (fn: () => void) => () => {
+    setOpen(false);
+    fn();
+  };
+  return (
+    <div className="add-menu" ref={box}>
+      <button ref={button} className="clickable-icon" aria-label="論文を追加" title="論文を追加" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <FilePlus size={16} aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          className="menu-surface add-menu-list"
+          role="menu"
+          aria-label="論文を追加"
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            e.preventDefault();
+            const items = [...e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+            const i = items.indexOf(document.activeElement as HTMLElement);
+            items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+          }}
+        >
+          <button role="menuitem" className="menu-item" onClick={pick(onFile)}>PDF ファイルを選ぶ</button>
+          <button role="menuitem" className="menu-item" onClick={pick(onUrl)}>URL から追加</button>
+        </div>
+      )}
+    </div>
   );
 }

@@ -1,9 +1,12 @@
 import katex from "katex";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { STATUSES } from "../lib/defaultTemplate.ts";
 import type { Annotations, Equation, Highlight, Term } from "../lib/model.ts";
 import { MARKER_LABEL } from "../lib/model.ts";
+import { toBibtex } from "../lib/bibtex.ts";
+import { type FmValue, fmText, parseFrontmatter, readFrontmatter } from "../lib/frontmatter.ts";
 import { type FieldDef, parseFields } from "../lib/template.ts";
+import { EmptyState } from "./EmptyState.tsx";
+import { StatusChips } from "./StatusChips.tsx";
 import { SentencePanel } from "./sentences/SentencePanel.tsx";
 
 export type Tab = "sentences" | "translate" | "terms" | "math" | "record";
@@ -30,13 +33,24 @@ interface Props {
   onField: (id: string, value: string) => void;
   onStatus: (s: string) => void;
   onOpenSettings: () => void;
-  /** 開いている論文の id。対訳タブが使う。 */
-  paperId?: string | null;
+  /** 開いている論文の id。対訳タブも使う。 */
+  paperId: string;
+  /** frontmatter の1項目を書く（書誌情報の欄） */
+  onMeta: (key: string, value: FmValue) => void;
+  /** 書き込めなかった項目と、その理由 */
+  metaError: Record<string, string>;
+  /** 画面の下に短い知らせを出す */
+  notify: (message: string) => void;
+  /** 記録タブを開いたあとにフォーカスを移す記録欄（検索の当たりから開いたとき） */
+  focusField?: { id: string; n: number } | null;
+  onFocused?: () => void;
+  /** 対訳タブを出すか。対訳は保存先のサーバーがあるときだけ使える */
+  sentences?: boolean;
 }
 
 export function RightPanel(p: Props) {
   const tabs: { id: Tab; label: string; count?: number }[] = [
-    { id: "sentences", label: "対訳" },
+    ...(p.sentences === false ? [] : [{ id: "sentences" as const, label: "対訳" }]),
     { id: "translate", label: "訳", count: p.ann.highlights.length },
     { id: "terms", label: "用語", count: p.ann.terms.length },
     { id: "math", label: "数式", count: p.ann.equations.length },
@@ -62,16 +76,21 @@ export function RightPanel(p: Props) {
       </div>
       <div className="panel" role="tabpanel" id={`panel-${p.tab}`} aria-labelledby={`tab-${p.tab}`}>
         {!p.aiReady && p.tab !== "record" && p.tab !== "sentences" && (
-          <p className="notice warn" style={{ marginTop: 0, marginBottom: 12 }}>
-            訳や用語の説明を自動で入れるには、Claude の API キーが必要です。キーが無くても手で入力できます。{" "}
-            <button className="btn text sm" onClick={p.onOpenSettings}>API キーを設定する</button>
-          </p>
+          <div className="notice" style={{ marginTop: 0, marginBottom: 12 }}>
+            <p style={{ margin: "0 0 8px" }}>訳や用語の説明を自動で入れるには、Claude の API キーが必要です。キーが無くても手で入力できます。</p>
+            <button className="btn tonal sm" onClick={p.onOpenSettings}>API キーを設定する</button>
+          </div>
         )}
         {p.tab === "sentences" && <SentencePanel paperId={p.paperId ?? null} />}
         {p.tab === "translate" && <TranslateList {...p} />}
         {p.tab === "terms" && <TermList {...p} />}
         {p.tab === "math" && <MathList {...p} />}
-        {p.tab === "record" && <RecordForm key={p.noteKey} note={p.note} status={p.status} onField={p.onField} onStatus={p.onStatus} />}
+        {p.tab === "record" && (
+          <>
+            <BiblioSection key={`b-${p.noteKey}`} note={p.note} paperId={p.paperId} onMeta={p.onMeta} metaError={p.metaError} notify={p.notify} />
+            <RecordForm key={p.noteKey} note={p.note} status={p.status} onField={p.onField} onStatus={p.onStatus} focusField={p.focusField} onFocused={p.onFocused} />
+          </>
+        )}
       </div>
     </>
   );
@@ -87,9 +106,7 @@ function TranslateList(p: Props) {
   }, [p.activeId]);
   if (!list.length)
     return (
-      <p className="empty">
-        PDF の文を選択し、「訳す」かマーカーの色を選んでください。選んだ文と訳がここに並び、読解ノートの「マーカーと訳」に書き込まれます。
-      </p>
+      <EmptyState title="訳はまだありません">PDF の文を選択して「訳す」かマーカーの色を押すと、ここに並びます。</EmptyState>
     );
   const set = (id: string, patch: Partial<Highlight>) =>
     p.update((a) => ({ ...a, highlights: a.highlights.map((h) => (h.id === id ? { ...h, ...patch } : h)) }));
@@ -149,7 +166,7 @@ function TranslateList(p: Props) {
             {p.aiReady && b !== "working" && (
               <div className="card-actions">
                 <button className="btn sm text" onClick={() => p.retry("translate", h.id)}>
-                  {h.translation ? "訳し直す" : "Claude で訳す"}
+                  {h.translation ? "もう一度訳す" : "Claude で訳す"}
                 </button>
               </div>
             )}
@@ -180,7 +197,11 @@ function TermList(p: Props) {
   };
   return (
     <>
-      <p className="panel-note">PDF で語を選択して「用語を調べる」を押すか、下の欄に入力してください。用語は読解ノートに [[リンク]] として書き込まれ、グラフで他の論文とつながります。</p>
+      {p.ann.terms.length ? (
+        <p className="panel-note">PDF で語を選択して「用語を調べる」を押すか、下の欄に入力してください。用語は読解ノートに [[リンク]] として書き込まれ、グラフで他の論文とつながります。</p>
+      ) : (
+        <EmptyState title="用語はまだありません">PDF で語を選択して「用語を調べる」を押すか、下の欄に入力してください。</EmptyState>
+      )}
       <div className="row" style={{ marginBottom: 12 }}>
         <label className="visually-hidden" htmlFor="term-new">用語を追加</label>
         <input id="term-new" className="input grow" placeholder="用語を入力" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && add()} />
@@ -265,8 +286,12 @@ function MathList(p: Props) {
     }));
   return (
     <>
-      <p className="panel-note">PDF で数式を選択して「数式にする」を押すと、選択範囲の画像から TeX を書き起こします。TeX は手で直せます。</p>
-      <div style={{ marginBottom: 12 }}><button className="btn sm" onClick={add}>空の数式を追加</button></div>
+      {p.ann.equations.length ? (
+        <p className="panel-note">PDF で数式を選択して「数式にする」を押すと、選択範囲の画像から TeX を書き起こします。TeX は手で直せます。</p>
+      ) : (
+        <EmptyState title="数式はまだありません">PDF で数式を選択して「数式にする」を押してください。</EmptyState>
+      )}
+      <div style={{ marginBottom: 12 }}><button className="btn sm" onClick={add}>数式を手で追加</button></div>
       {p.ann.equations.map((e) => {
         const b = p.busy[e.id];
         return (
@@ -285,7 +310,7 @@ function MathList(p: Props) {
             <label className="visually-hidden" htmlFor={`ex-${e.id}`}>説明</label>
             <textarea id={`ex-${e.id}`} className="textarea" rows={2} placeholder="記号の意味や式の役割" value={e.explanation} onChange={(ev) => set(e.id, { explanation: ev.target.value })} />
             {p.aiReady && e.source && b !== "working" && (
-              <div className="card-actions"><button className="btn sm text" onClick={() => p.retry("tex", e.id)}>書き起こし直す</button></div>
+              <div className="card-actions"><button className="btn sm text" onClick={() => p.retry("tex", e.id)}>もう一度書き起こす</button></div>
             )}
           </div>
         );
@@ -294,10 +319,134 @@ function MathList(p: Props) {
   );
 }
 
+// --- 書誌情報 ---------------------------------------------------------------
+
+const BIB_FIELDS: { key: string; label: string; hint?: string; multi?: boolean; numeric?: boolean }[] = [
+  { key: "title", label: "題名", hint: "題名を変えても、ノート本文の見出し（# の行）は変わりません。" },
+  { key: "authors", label: "著者", hint: "1 行に 1 人ずつ書きます。", multi: true },
+  { key: "year", label: "年", numeric: true },
+  { key: "venue", label: "掲載先", hint: "会議名・論文誌名。arXiv だけの場合は arXiv" },
+  { key: "doi", label: "DOI", hint: "10. から始まる番号。URL でも構いません" },
+];
+const OPEN_KEY = "paperlens.ui.biblioOpen";
+
+/** 欄の文字列を、frontmatter に書く値に直す。著者は 1 行 1 人の配列、DOI は URL の前置きを外す */
+function toMeta(key: string, text: string): FmValue {
+  if (key === "authors") return text.split("\n").map((x) => x.trim()).filter(Boolean);
+  if (key === "doi") return text.trim().replace(/^https?:\/\/(dx\.)?doi\.org\//i, "");
+  return text;
+}
+
+function BiblioSection({ note, paperId, onMeta, metaError, notify }: Pick<Props, "note" | "paperId" | "onMeta" | "metaError" | "notify">) {
+  const meta = useMemo(() => readFrontmatter(note), [note]);
+  // 複数行の値など、PaperLens から書き換えない項目
+  const opaque = useMemo(() => new Set((parseFrontmatter(note)?.entries ?? []).filter((e) => e.kind === "opaque").map((e) => e.key)), [note]);
+  const [local, setLocal] = useState<Record<string, string>>({});
+  const [fallback, setFallback] = useState<string | null>(null);
+  const fallbackRef = useRef<HTMLTextAreaElement>(null);
+  const text = (k: string) => local[k] ?? (Array.isArray(meta[k]) ? (meta[k] as string[]).join("\n") : fmText(meta[k]));
+  const empty = ["authors", "year", "venue", "doi"].every((k) => !fmText(meta[k]).trim());
+  const [open, setOpen] = useState(() => {
+    if (empty) return true;
+    try {
+      return localStorage.getItem(OPEN_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    if (fallback !== null) fallbackRef.current?.select();
+  }, [fallback]);
+
+  const current = { ...meta, ...Object.fromEntries(Object.entries(local).map(([k, v]) => [k, toMeta(k, v)])) };
+  const canCopy = !!(fmText(current.title).trim() || fmText(current.authors).trim());
+  const copy = async () => {
+    const bib = toBibtex(current, paperId);
+    try {
+      await navigator.clipboard.writeText(bib);
+      setFallback(null);
+      notify("BibTeX をコピーしました");
+    } catch {
+      // 権限が無いときや file:// で開いたときは、選択した状態で見せて手でコピーしてもらう
+      setFallback(bib);
+    }
+  };
+  const errorOf = (k: string) =>
+    metaError[k] ?? (opaque.has(k) ? `frontmatter の「${k}」は複数行の値のため、PaperLens からは書き換えません。Obsidian で直してください。` : undefined);
+
+  return (
+    <details
+      className="card biblio"
+      open={open}
+      onToggle={(e) => {
+        const v = (e.currentTarget as HTMLDetailsElement).open;
+        setOpen(v);
+        try {
+          localStorage.setItem(OPEN_KEY, v ? "1" : "0");
+        } catch {
+          // 覚えられなくても開閉はできる
+        }
+      }}
+    >
+      <summary>書誌情報</summary>
+      <div className="biblio-body">
+        {BIB_FIELDS.map((f) => {
+          const err = errorOf(f.key);
+          const common = {
+            id: `bib-${f.key}`,
+            value: text(f.key),
+            readOnly: !!err,
+            "aria-describedby": [f.hint ? `bibh-${f.key}` : "", err ? `bibe-${f.key}` : ""].filter(Boolean).join(" ") || undefined,
+            onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+              setLocal((l) => ({ ...l, [f.key]: e.target.value }));
+              onMeta(f.key, toMeta(f.key, e.target.value));
+            },
+          };
+          return (
+            <div key={f.key}>
+              <label className="field-label" htmlFor={`bib-${f.key}`}>{f.label}</label>
+              {f.hint && <span className="field-hint" id={`bibh-${f.key}`}>{f.hint}</span>}
+              {f.multi ? (
+                <textarea className="textarea" rows={Math.max(2, text(f.key).split("\n").length)} {...common} />
+              ) : (
+                <input className="input" inputMode={f.numeric ? "numeric" : undefined} {...common} />
+              )}
+              {err && <p className="err-msg" id={`bibe-${f.key}`}>{err}</p>}
+            </div>
+          );
+        })}
+        {fmText(meta.arxiv) && (
+          <div className="biblio-arxiv"><span className="field-label">arXiv</span>{fmText(meta.arxiv)}</div>
+        )}
+        <div className="card-actions">
+          {!canCopy && <span className="field-hint" style={{ margin: "0 auto 0 0" }}>題名を入れると BibTeX を作れます。</span>}
+          <button className="btn text sm" disabled={!canCopy} onClick={() => void copy()}>BibTeX をコピー</button>
+        </div>
+        {fallback !== null && (
+          <div>
+            <p className="field-hint" id="bib-fallback-hint">コピーできませんでした。選択した文字を Ctrl+C（mac は ⌘C）でコピーしてください。</p>
+            <textarea ref={fallbackRef} className="textarea tex-input" readOnly rows={8} value={fallback} aria-label="BibTeX" aria-describedby="bib-fallback-hint" />
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 // --- 記録 -----------------------------------------------------------------
 
-function RecordForm({ note, status, onField, onStatus }: { note: string; status: string; onField: (id: string, v: string) => void; onStatus: (s: string) => void }) {
+function RecordForm({ note, status, onField, onStatus, focusField, onFocused }: Pick<Props, "note" | "status" | "onField" | "onStatus" | "focusField" | "onFocused">) {
   const fields = useMemo(() => parseFields(note), [note]);
+  // 検索の当たりから開いたときは、その欄までスクロールしてフォーカスを移す
+  const ready = fields.length > 0;
+  useEffect(() => {
+    if (!focusField || !ready) return;
+    const el = document.getElementById(`f-${focusField.id}`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    el.focus({ preventScroll: true });
+    onFocused?.();
+  }, [focusField, ready, onFocused]);
   // 入力中の値は手元で持ち、ノートの再読み込みで入力が巻き戻らないようにする
   const [local, setLocal] = useState<Record<string, string>>({});
   const value = (f: FieldDef) => local[f.id] ?? f.value;
@@ -316,11 +465,7 @@ function RecordForm({ note, status, onField, onStatus }: { note: string; status:
     <>
       <p className="panel-note">ここに入力した内容は、読解ノート（note.md）の対応する箇所に自動で保存されます。</p>
       <div className="field-label" id="phase-label">読解の段階</div>
-      <ul className="phase-steps" aria-labelledby="phase-label">
-        {STATUSES.map((s) => (
-          <li key={s}><button aria-pressed={status === s} onClick={() => onStatus(s)}>{s}</button></li>
-        ))}
-      </ul>
+      <StatusChips value={status} onChange={onStatus} labelledBy="phase-label" />
       {groups.map((g) => (
         <section key={g.section}>
           {g.section && <h3 className="record-section">{g.section}</h3>}

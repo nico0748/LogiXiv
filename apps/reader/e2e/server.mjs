@@ -16,7 +16,8 @@ import { chromium } from "playwright";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const data = mkdtempSync(path.join(tmpdir(), "paperlens-e2e-"));
 const shotDir = process.argv[2] ?? tmpdir();
-const env = { ...process.env, PAPERLENS_DATA: data, PAPERLENS_PORT: "5297" };
+const env = { ...process.env, PAPERLENS_DATA: data, PAPERLENS_PORT: "5297", PAPERLENS_ALLOW_PRIVATE_URLS: "1" };
+// URL からの取り込みは、このサーバー自身が返す PDF で確かめる（外へは通信しない）
 
 const server = spawn(process.execPath, [path.join(root, "dist-server/server.js")], { env, stdio: ["ignore", "pipe", "inherit"] });
 await new Promise((resolve, reject) => {
@@ -31,15 +32,48 @@ page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 page.on("pageerror", (e) => errors.push(String(e)));
 
 const step = async (name, fn) => { await fn(); console.log("✓", name); };
+// 左端のリボンのボタン（論文一覧・検索・リスト・グラフ・設定・ヘルプ）
+const ribbon = (name) => page.getByRole("navigation", { name: "主要メニュー" }).getByRole("button", { name, exact: true });
+// 左サイドバーは最初は閉じている。⌘/Ctrl+\ で開く
+const openLeft = async () => {
+  if ((await page.locator("aside.sidebar.left").getAttribute("aria-hidden")) !== "true") return;
+  // 配置（/api/workspace）の読み込みが終わる前に押すと、読み込んだ配置で閉じ直されることがあるので、開くまで押し直す
+  await page.getByRole("navigation", { name: "主要メニュー" }).waitFor();
+  for (let i = 0; ; i++) {
+    await page.keyboard.press("Control+Backslash");
+    const ok = await page.waitForFunction(() => document.querySelector("aside.sidebar.left")?.getAttribute("aria-hidden") !== "true", null, { timeout: 2000 }).then(() => true, () => false);
+    if (ok) await page.waitForTimeout(300);
+    if (ok && (await page.locator("aside.sidebar.left").getAttribute("aria-hidden")) !== "true") return;
+    if (i >= 4) throw new Error("⌘/Ctrl+\\ で左サイドバーが開かない");
+  }
+};
+// 右サイドバーのタブ。「訳」は「対訳」と区別するため先頭で合わせる
+const rightTab = (name) => page.getByRole("tablist", { name: "補足情報" }).getByRole("tab", { name: new RegExp(`^${name}`) });
 const done = async (code) => { await browser.close(); server.kill(); process.exit(code); };
 process.on("unhandledRejection", async (e) => { console.error(e); await done(1); });
+// 途中で失敗して終わったときも、サーバーを残さない
+process.on("exit", () => server.kill());
 
+// 画面の配置（サイドバーの開閉）はサーバーから読み込む。読み込み終わってから操作する
+const workspaceLoaded = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/workspace" && r.request().method() === "GET");
 await page.goto("http://127.0.0.1:5297/");
+await workspaceLoaded;
 
 await step("サーバーの保存先で開く", async () => {
+  await openLeft();
   await page.getByText("論文はまだありません").waitFor();
-  const crumb = await page.locator(".crumb").textContent();
+  const crumb = await page.locator(".sidebar-vault-name").textContent();
   if (!crumb.includes(path.basename(data))) throw new Error(`保存先の名前が出ていない: ${crumb}`);
+  const bar = await page.locator(".status-bar").textContent();
+  if (!bar.includes(path.basename(data))) throw new Error(`状態表示に保存先の名前が出ていない: ${bar}`);
+  // サーバー版の追加ボタンはメニュー（PDF ファイル / URL）を開く
+  const add = page.getByRole("button", { name: "論文を追加", exact: true });
+  if ((await add.getAttribute("aria-haspopup")) !== "menu") throw new Error("「論文を追加」がメニューを開くボタンでない");
+  await add.click();
+  await page.getByRole("menuitem", { name: "PDF ファイルを選ぶ" }).waitFor();
+  await page.getByRole("menuitem", { name: "URL から追加" }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByRole("menu", { name: "論文を追加" }).waitFor({ state: "detached" });
 });
 
 await step("PDF を取り込む", async () => {
@@ -67,7 +101,7 @@ await step("画面でマーカーと記録を入れる", async () => {
   });
   await page.getByRole("button", { name: "緑色のマーカーを引く" }).click();
   await page.locator(".mk.green").first().waitFor();
-  await page.getByRole("tab", { name: "記録" }).click();
+  await rightTab("記録").click();
   await page.getByLabel("一言でいうと").fill("画面から書いた要約。");
   await page.waitForTimeout(1200);
   const md = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");
@@ -109,18 +143,18 @@ await step("画面に、読み直さずに反映される", async () => {
   });
   await page.getByLabel("読む目的").and(page.locator("textarea")).waitFor();
   await page.waitForFunction(() => document.querySelector("#f-purpose")?.value === "エージェントが書いた読む目的。", null, { timeout: 5000 });
-  await page.locator(".paper-item .tag", { hasText: "精読" }).waitFor({ timeout: 5000 });
+  await page.locator(".nav-file-title .tag", { hasText: "精読" }).waitFor({ timeout: 5000 });
   if ((await page.locator("#f-summary").inputValue()) !== "画面から書いた要約。") throw new Error("画面で書いた記録が消えた");
   if ((await page.locator(".mk.green").count()) === 0) throw new Error("画面で引いたマーカーが消えた");
-  await page.getByRole("tab", { name: /訳/ }).click();
+  await rightTab("訳").click();
   await page.getByText("Transformer は長い学術文書を読むのが苦手である。").waitFor();
   await page.screenshot({ path: `${shotDir}/11-mcp-live.png` });
-  await page.getByRole("tab", { name: /用語/ }).click();
+  await rightTab("用語").click();
   await page.getByText("各トークンが近くの窓の中だけに").waitFor();
 });
 
 await step("画面の変更をエージェントが読める", async () => {
-  await page.getByRole("tab", { name: /訳/ }).click();
+  await rightTab("訳").click();
   await page.locator(".card", { hasText: "We propose" }).locator("textarea.trans").fill("画面で付けた訳。");
   await page.waitForTimeout(1200);
   const p = JSON.parse(await call("get_paper", { paper: id }));
@@ -128,14 +162,72 @@ await step("画面の変更をエージェントが読める", async () => {
   if (p.annotations.highlights.length !== 2) throw new Error(`マーカーの数が違う: ${p.annotations.highlights.length}`);
 });
 
+await step("対訳タブを開く", async () => {
+  await rightTab("対訳").click();
+  const panel = page.locator("#panel-sentences");
+  await panel.waitFor();
+  // 解析が終わるか、状態（解析中・失敗）の表示が出るまで待つ
+  await page.waitForFunction(() => {
+    const el = document.querySelector("#panel-sentences");
+    return el && el.textContent.trim().length > 0 && !el.querySelector("[aria-busy='true']");
+  }, null, { timeout: 15000 });
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: `${shotDir}/16-sentences.png` });
+  await rightTab("訳").click();
+});
+
 await step("設定画面に MCP の登録方法が出る", async () => {
-  await page.getByRole("button", { name: "設定", exact: true }).click();
+  await ribbon("設定").click();
+  await page.getByRole("dialog", { name: "設定" }).waitFor();
   await page.getByRole("heading", { name: "AI エージェント（MCP）" }).waitFor();
   const cmd = await page.getByLabel("Claude Code のコマンド").textContent();
   if (!cmd.startsWith("claude mcp add paperlens") || !cmd.includes("dist-server/mcp.js")) throw new Error(`コマンドが違う: ${cmd}`);
   await page.locator("section", { has: page.getByRole("heading", { name: "AI エージェント（MCP）" }) }).screenshot({ path: `${shotDir}/12-settings-mcp.png` });
   await page.getByLabel("読み取りだけを許可する").check();
   if (!(await page.getByLabel("Claude Code のコマンド").textContent()).includes("PAPERLENS_MCP_READONLY=1")) throw new Error("読み取り専用の設定にならない");
+});
+
+await step("読み直すと、前回の位置から表示する", async () => {
+  // 設定のモーダルを閉じて論文に戻る
+  await page.getByRole("dialog", { name: "設定" }).getByRole("button", { name: "閉じる" }).click();
+  await page.getByRole("dialog", { name: "設定" }).waitFor({ state: "detached" });
+  const input = page.getByLabel("ページ番号");
+  await input.fill("2");
+  await input.press("Enter");
+  await page.waitForTimeout(1500); // 位置の保存は 1 秒に 1 回
+  await page.reload();
+  await page.locator(".snackbar", { hasText: "前回の位置（p.2）から表示しています" }).waitFor();
+  const visible = await page.evaluate(() => {
+    const box = document.querySelector(".pdf-scroll").getBoundingClientRect();
+    const r = document.querySelector('[data-page="2"]').getBoundingClientRect();
+    return r.top < box.bottom && r.bottom > box.top + box.height / 3;
+  });
+  if (!visible) throw new Error("2 ページ目が表示されていない");
+  await page.screenshot({ path: `${shotDir}/13-restore.png` });
+  await page.getByRole("button", { name: "先頭に戻る" }).click();
+  await page.waitForFunction(() => document.querySelector(".pdf-scroll").scrollTop <= 50);
+});
+
+await step("URL から取り込む（新しい論文は書誌情報の欄を開き、同じ URL は既存を開く）", async () => {
+  const url = `http://127.0.0.1:5297/api/papers/${encodeURIComponent(id)}/pdf`;
+  const count = () => readdirSync(path.join(data, "papers")).length;
+  const before = count();
+  const add = async () => {
+    await openLeft();
+    await page.getByRole("button", { name: "論文を追加", exact: true }).click();
+    await page.getByRole("menuitem", { name: "URL から追加" }).click();
+    await page.getByLabel("PDF の URL か arXiv の番号").fill(url);
+  };
+  await add();
+  await page.screenshot({ path: `${shotDir}/14-url-dialog.png` });
+  await page.getByRole("button", { name: "取り込む" }).click();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  await page.locator(".biblio[open]").waitFor();
+  if (count() !== before + 1) throw new Error(`論文が増えていない: ${count()}`);
+  await add();
+  await page.getByRole("button", { name: "取り込む" }).click();
+  await page.locator(".snackbar", { hasText: "この論文は既に取り込んでいます。開きました。" }).waitFor();
+  if (count() !== before + 1) throw new Error("同じ URL で論文が増えた");
 });
 
 const md = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");

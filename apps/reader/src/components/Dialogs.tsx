@@ -30,7 +30,7 @@ export function SettingsDialog({ value, onSave, onClose }: { value: AiSettings; 
       <form method="dialog" onSubmit={(e) => { e.preventDefault(); onSave({ apiKey: key.trim(), model: model.trim() || DEFAULT_MODEL }); }}>
         <div className="dlg-body">
           <h2 id="settings-title">Claude の設定</h2>
-          <p style={{ marginTop: 0, fontSize: 14, color: "var(--text-sub)" }}>
+          <p style={{ marginTop: 0, fontSize: 14, color: "var(--md-sys-color-on-surface-variant)" }}>
             訳・用語の説明・数式の書き起こしに Claude を使います。API キーは Anthropic Console で発行できます。
           </p>
           <div className="record-field">
@@ -68,7 +68,7 @@ export function TemplateDialog({ backend, onClose }: { backend: Backend; onClose
     <dialog ref={ref} className="wide" aria-labelledby="tpl-title">
       <div className="dlg-body">
         <h2 id="tpl-title">読解ノートのテンプレート</h2>
-        <p style={{ marginTop: 0, fontSize: 14, color: "var(--text-sub)" }}>
+        <p style={{ marginTop: 0, fontSize: 14, color: "var(--md-sys-color-on-surface-variant)" }}>
           保管庫の <code>{TEMPLATE_PATH}</code> を編集します。変更は、これから取り込む論文のノートに使われます。
           入力欄は <code>&lt;!-- field: ID | 見出し | 説明 --&gt;</code> と <code>&lt;!-- /field --&gt;</code> で囲みます。
           直前の <code>##</code> 見出しが、記録タブでのまとまりになります。
@@ -96,3 +96,60 @@ export function TemplateDialog({ backend, onClose }: { backend: Backend; onClose
     </dialog>
   );
 }
+
+/** URL か arXiv の番号から論文を取り込む。失敗したときは閉じずに、サーバーの文言を欄の下に出す。 */
+export function UrlImportDialog({ onClose, onImport }: { onClose: () => void; onImport: (url: string) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  // 取り込み中は Esc で閉じない
+  const ref = useModal(busy ? noop : onClose);
+  const [url, setUrl] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const arxiv = /arxiv|^\d{4}\.\d{4,5}|^[a-z-]+(\.[A-Z]{2})?\/\d{7}/i.test(url.trim());
+  const submit = async () => {
+    if (!url.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onImport(url.trim());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <dialog ref={ref} aria-labelledby="url-title">
+      <form method="dialog" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
+        <div className="dlg-body">
+          <h2 id="url-title">URL から論文を追加</h2>
+          <div className="record-field">
+            <label className="field-label" htmlFor="import-url">PDF の URL か arXiv の番号</label>
+            <span className="field-hint" id="import-url-hint">
+              arXiv の論文は、題名・著者・年も自動で入ります。取り込んだ PDF は保存先フォルダに保存されます。保存先フォルダを公開の Git リポジトリで共有する場合は、PDF を含めないでください。
+            </span>
+            <input
+              id="import-url"
+              className="input"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://arxiv.org/abs/2410.12345"
+              disabled={busy}
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+              aria-invalid={!!error}
+              aria-describedby={error ? "import-url-hint import-url-err" : "import-url-hint"}
+            />
+            {busy && arxiv && <p className="field-hint" style={{ marginTop: 6 }}>arXiv の間隔の決まりのため、数秒かかることがあります</p>}
+            {error && <p className="err-msg" id="import-url-err" role="alert">{error}</p>}
+          </div>
+        </div>
+        <div className="dlg-foot">
+          <button type="button" className="btn text" onClick={onClose} disabled={busy}>やめる</button>
+          <button type="submit" className="btn primary" disabled={busy || !url.trim()}>{busy ? "取り込んでいます" : "取り込む"}</button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
+const noop = () => undefined;

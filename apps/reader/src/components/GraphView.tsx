@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PaperSummary } from "../lib/papers.ts";
+import { EmptyState } from "./EmptyState.tsx";
 
 interface Node {
   id: string;
@@ -105,7 +106,7 @@ export function GraphView({
     <div className="graph" ref={ref}>
       <div className="graph-legend">● 論文　○ 用語　論文を選ぶと開きます</div>
       {nodes.length === 0 ? (
-        <p className="empty" style={{ paddingTop: 56 }}>論文を取り込み、用語を調べるとグラフに表示されます。</p>
+        <div style={{ paddingTop: 40 }}><EmptyState title="表示する論文がありません">論文を取り込み、用語を調べると表示されます。</EmptyState></div>
       ) : (
         <svg role="img" aria-label="論文と用語のつながり">
           <g transform={`translate(${cx},${cy})`}>

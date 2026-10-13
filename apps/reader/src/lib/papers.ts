@@ -17,15 +17,8 @@ import {
   renderHighlights,
   renderTerms,
 } from "./model.ts";
-import {
-  type FieldDef,
-  fillPlaceholders,
-  getFrontmatter,
-  parseFields,
-  setField,
-  setFrontmatter,
-  setList,
-} from "./template.ts";
+import { type FmValue, fmText, readFrontmatter, setFrontmatterValue } from "./frontmatter.ts";
+import { type FieldDef, fillPlaceholders, parseFields, setField, setList } from "./template.ts";
 import type { Vault } from "./vault.ts";
 
 export const TEMPLATE_PATH = "_templates/reading-note.md";
@@ -36,6 +29,23 @@ export interface PaperSummary {
   title: string;
   status: string;
   year: string;
+  /** 著者。frontmatter が文字列のとき（古いノート）は 1 要素の配列 */
+  authors: string[];
+  /** arXiv の ID（版の番号を除く）。無ければ "" */
+  arxiv: string;
+}
+
+/** frontmatter から一覧に出す項目を取り出す。 */
+function summaryOf(id: string, fm: Record<string, FmValue>): PaperSummary {
+  const a = fm.authors;
+  return {
+    id,
+    title: fmText(fm.title) || id,
+    status: fmText(fm.status) || "未読",
+    year: fmText(fm.year),
+    authors: Array.isArray(a) ? a : a?.trim() ? [a.trim()] : [],
+    arxiv: fmText(fm.arxiv),
+  };
 }
 
 export const notePath = (id: string) => `${PAPERS_DIR}/${id}/note.md`;
@@ -60,13 +70,7 @@ export async function listPapers(vault: Vault): Promise<PaperSummary[]> {
   const out: PaperSummary[] = [];
   for (const d of dirs) {
     try {
-      const fm = getFrontmatter(await vault.readText(notePath(d.name)));
-      out.push({
-        id: d.name,
-        title: fm.title || d.name,
-        status: fm.status || "未読",
-        year: fm.year || "",
-      });
+      out.push(summaryOf(d.name, readFrontmatter(await vault.readText(notePath(d.name)))));
     } catch {
       // note.md が無いフォルダは論文として扱わない
     }
@@ -86,15 +90,24 @@ export function slugify(name: string) {
   return `${ymd}-${base || "paper"}`;
 }
 
+export interface ImportOptions {
+  /** フォルダ名をファイル名ではなく、この文字列（題名）から作る。URL からの取り込みだけで使う */
+  slugFrom?: string;
+  /** ノートを最初に書く前に frontmatter に入れる項目（arXiv の書誌情報など） */
+  meta?: Record<string, FmValue>;
+}
+
 export async function importPaper(
   vault: Vault,
   fileName: string,
   data: ArrayBuffer,
   title: string,
+  opts: ImportOptions = {},
 ): Promise<string> {
-  let id = slugify(fileName);
+  const base = slugify(opts.slugFrom?.trim() || fileName);
+  let id = base;
   for (let i = 2; await vault.exists(`${PAPERS_DIR}/${id}`); i++) {
-    id = `${slugify(fileName)}-${i}`;
+    id = `${base}-${i}`;
   }
   await ensureLayout(vault);
   const template = await vault.readText(TEMPLATE_PATH);
@@ -105,9 +118,15 @@ export async function importPaper(
     id,
   });
   // コロンなどを含む題名でも YAML として読めるように、frontmatter は引用符付きで入れ直す
-  const note = /^---\n[\s\S]*?^title:/m.test(filled)
-    ? setFrontmatter(filled, "title", title.replace(/\n/g, " "))
-    : filled;
+  let note = "title" in readFrontmatter(filled) ? setFrontmatterValue(filled, "title", title.replace(/\n/g, " ")) : filled;
+  // 書誌情報は、ノートを書く前に入れる（書き込みは 1 回で済み、本文の見出しも正しい題名で埋まる）。テンプレートに無い項目は末尾に足す
+  for (const [k, v] of Object.entries(opts.meta ?? {})) {
+    try {
+      note = setFrontmatterValue(note, k, v);
+    } catch {
+      // テンプレートで複数行の値にしてある項目は、入れずに残す
+    }
+  }
   await vault.writeBinary(pdfPath(id), data);
   await vault.writeText(notePath(id), note);
   await vault.writeText(dataPath(id), JSON.stringify(emptyAnnotations(), null, 2));
@@ -164,10 +183,11 @@ export const writeField = (vault: Vault, id: string, field: string, value: strin
   updateNote(vault, id, (md) => setField(md, field, value));
 
 export const writeStatus = (vault: Vault, id: string, status: string) =>
-  updateNote(vault, id, (md) => setFrontmatter(md, "status", status));
+  updateNote(vault, id, (md) => setFrontmatterValue(md, "status", status));
 
-export const writeMeta = (vault: Vault, id: string, key: string, value: string) =>
-  updateNote(vault, id, (md) => setFrontmatter(md, key, value));
+/** frontmatter の1項目を書く。一覧の項目は配列で渡す。複数行の値の項目は FrontmatterError になる。 */
+export const writeMeta = (vault: Vault, id: string, key: string, value: FmValue) =>
+  updateNote(vault, id, (md) => setFrontmatterValue(md, key, value));
 
 const renderLists = (md: string, a: Annotations) => {
   let out = setList(md, "highlights", renderHighlights(a.highlights), "マーカーと訳");
@@ -206,7 +226,8 @@ export async function writeTemplate(vault: Vault, text: string) {
 }
 
 export interface PaperDetail extends PaperSummary {
-  frontmatter: Record<string, string>;
+  /** 一覧の項目（authors・tags など）は配列のまま返す */
+  frontmatter: Record<string, FmValue>;
   fields: FieldDef[];
   annotations: Annotations;
 }
@@ -214,34 +235,66 @@ export interface PaperDetail extends PaperSummary {
 /** 論文1本の記録をまとめて返す。AI エージェント向け。 */
 export async function paperDetail(vault: Vault, id: string): Promise<PaperDetail> {
   const note = await loadNote(vault, checkId(id));
-  const fm = getFrontmatter(note);
+  const fm = readFrontmatter(note);
   return {
-    id,
-    title: fm.title || id,
-    status: fm.status || "未読",
-    year: fm.year || "",
+    ...summaryOf(id, fm),
     frontmatter: fm,
     fields: parseFields(note),
     annotations: await loadAnnotations(vault, id),
   };
 }
 
+/** 当たった場所。field=記録欄、list:*=アプリが書き出す一覧、body=それ以外の本文 */
+export type HitRegion = "frontmatter" | "field" | "list:highlights" | "list:terms" | "list:equations" | "body";
+
 export interface SearchHit {
   paper: string;
   file: string;
   line: number;
   text: string;
+  region: HitRegion;
+  /** region が field のときの記録欄の ID */
+  field?: string;
 }
 
-/** すべての読解ノートから語句を含む行を探す。大文字と小文字は区別しない。 */
+const LISTS = new Set(["highlights", "terms", "equations"]);
+const fold = (s: string) => s.normalize("NFKC").toLowerCase();
+
+/**
+ * すべての読解ノートから語句を含む行を探す。大文字と小文字、全角と半角は区別しない。
+ * HTML コメントの行（記録欄や一覧の目印）は当たりに含めない。
+ */
 export async function searchNotes(vault: Vault, query: string, limit = 50): Promise<SearchHit[]> {
-  const needle = query.toLowerCase();
+  const needle = fold(query.trim());
+  if (!needle) return [];
   const hits: SearchHit[] = [];
   for (const p of await listPapers(vault)) {
-    const lines = (await loadNote(vault, p.id)).split("\n");
+    const lines = (await loadNote(vault, p.id)).split(/\r?\n/);
+    let region: HitRegion = "body";
+    let field: string | undefined;
     for (let i = 0; i < lines.length && hits.length < limit; i++) {
-      if (lines[i].toLowerCase().includes(needle)) {
-        hits.push({ paper: p.id, file: notePath(p.id), line: i + 1, text: lines[i].trim().slice(0, 300) });
+      const line = lines[i];
+      const t = line.trim();
+      // 今どの範囲にいるかを数える
+      if (i === 0 && t === "---") {
+        region = "frontmatter";
+        continue;
+      }
+      if (region === "frontmatter") {
+        if (t === "---") {
+          region = "body";
+          continue;
+        }
+      } else if (t.startsWith("<!--")) {
+        const f = t.match(/^<!--\s*field:\s*([\w-]+)/);
+        const l = t.match(/^<!--\s*list:\s*([\w-]+)/);
+        if (f) [region, field] = ["field", f[1]];
+        else if (l) [region, field] = [LISTS.has(l[1]) ? (`list:${l[1]}` as HitRegion) : "body", undefined];
+        else if (/^<!--\s*\/(field|list)\s*-->/.test(t)) [region, field] = ["body", undefined];
+        continue;
+      }
+      if (fold(line).includes(needle)) {
+        hits.push({ paper: p.id, file: notePath(p.id), line: i + 1, text: t.slice(0, 300), region, ...(region === "field" ? { field } : {}) });
       }
     }
     if (hits.length >= limit) break;
