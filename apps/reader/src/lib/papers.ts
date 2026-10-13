@@ -227,22 +227,57 @@ export async function paperDetail(vault: Vault, id: string): Promise<PaperDetail
   };
 }
 
+/** 当たった場所。field=記録欄、list:*=アプリが書き出す一覧、body=それ以外の本文 */
+export type HitRegion = "frontmatter" | "field" | "list:highlights" | "list:terms" | "list:equations" | "body";
+
 export interface SearchHit {
   paper: string;
   file: string;
   line: number;
   text: string;
+  region: HitRegion;
+  /** region が field のときの記録欄の ID */
+  field?: string;
 }
 
-/** すべての読解ノートから語句を含む行を探す。大文字と小文字は区別しない。 */
+const LISTS = new Set(["highlights", "terms", "equations"]);
+const fold = (s: string) => s.normalize("NFKC").toLowerCase();
+
+/**
+ * すべての読解ノートから語句を含む行を探す。大文字と小文字、全角と半角は区別しない。
+ * HTML コメントの行（記録欄や一覧の目印）は当たりに含めない。
+ */
 export async function searchNotes(vault: Vault, query: string, limit = 50): Promise<SearchHit[]> {
-  const needle = query.toLowerCase();
+  const needle = fold(query.trim());
+  if (!needle) return [];
   const hits: SearchHit[] = [];
   for (const p of await listPapers(vault)) {
-    const lines = (await loadNote(vault, p.id)).split("\n");
+    const lines = (await loadNote(vault, p.id)).split(/\r?\n/);
+    let region: HitRegion = "body";
+    let field: string | undefined;
     for (let i = 0; i < lines.length && hits.length < limit; i++) {
-      if (lines[i].toLowerCase().includes(needle)) {
-        hits.push({ paper: p.id, file: notePath(p.id), line: i + 1, text: lines[i].trim().slice(0, 300) });
+      const line = lines[i];
+      const t = line.trim();
+      // 今どの範囲にいるかを数える
+      if (i === 0 && t === "---") {
+        region = "frontmatter";
+        continue;
+      }
+      if (region === "frontmatter") {
+        if (t === "---") {
+          region = "body";
+          continue;
+        }
+      } else if (t.startsWith("<!--")) {
+        const f = t.match(/^<!--\s*field:\s*([\w-]+)/);
+        const l = t.match(/^<!--\s*list:\s*([\w-]+)/);
+        if (f) [region, field] = ["field", f[1]];
+        else if (l) [region, field] = [LISTS.has(l[1]) ? (`list:${l[1]}` as HitRegion) : "body", undefined];
+        else if (/^<!--\s*\/(field|list)\s*-->/.test(t)) [region, field] = ["body", undefined];
+        continue;
+      }
+      if (fold(line).includes(needle)) {
+        hits.push({ paper: p.id, file: notePath(p.id), line: i + 1, text: t.slice(0, 300), region, ...(region === "field" ? { field } : {}) });
       }
     }
     if (hits.length >= limit) break;

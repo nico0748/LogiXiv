@@ -8,6 +8,7 @@ import type { FmValue } from "./frontmatter.ts";
 import type { AnnotationOp, Annotations } from "./model.ts";
 import {
   type PaperSummary,
+  type SearchHit,
   changeAnnotations,
   collectGraph,
   ensureLayout,
@@ -17,6 +18,7 @@ import {
   loadNote,
   loadPdf,
   readTemplate,
+  searchNotes,
   writeField,
   writeMeta,
   writeTemplate,
@@ -56,6 +58,8 @@ export interface Backend {
   readTemplate(): Promise<string>;
   writeTemplate(text: string): Promise<void>;
   graph(): Promise<Link[]>;
+  /** すべての読解ノートから語句を探す */
+  search(q: string): Promise<SearchHit[]>;
   /** 変更の通知を受け取る。戻り値を呼ぶと止まる。 */
   subscribe(fn: (e: ChangeEvent) => void): () => void;
 }
@@ -107,6 +111,9 @@ export class VaultBackend implements Backend {
   }
   async graph() {
     return collectGraph(this.vault, await listPapers(this.vault));
+  }
+  search(q: string) {
+    return searchNotes(this.vault, q);
   }
   subscribe() {
     return () => undefined;
@@ -218,6 +225,9 @@ export class ServerBackend implements Backend {
   }
   graph() {
     return call<Link[]>("/api/graph");
+  }
+  search(q: string) {
+    return call<SearchHit[]>(`/api/search?q=${enc(q)}`);
   }
   subscribe(fn: (e: ChangeEvent) => void) {
     const es = new EventSource("/api/events");

@@ -199,7 +199,8 @@ const READ: Tool[] = [
     name: "search_notes",
     config: {
       title: "ノートを横断検索",
-      description: "すべての読解ノートから語句を含む行を探します。過去に読んだ論文の記録を参照するときに使います。",
+      description:
+        "すべての読解ノートから語句を含む行を探します。過去に読んだ論文の記録を参照するときに使います。region は当たった場所です（frontmatter=書誌情報、field=記録欄（field に欄の ID）、list:highlights=マーカーと訳、list:terms=用語、list:equations=数式、body=それ以外の本文）。",
       inputSchema: { query: z.string().min(1).describe("探す語句") },
       annotations: { readOnlyHint: true },
     },
