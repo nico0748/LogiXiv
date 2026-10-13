@@ -44,11 +44,13 @@ interface Props {
   /** 記録タブを開いたあとにフォーカスを移す記録欄（検索の当たりから開いたとき） */
   focusField?: { id: string; n: number } | null;
   onFocused?: () => void;
+  /** 対訳タブを出すか。対訳は保存先のサーバーがあるときだけ使える */
+  sentences?: boolean;
 }
 
 export function RightPanel(p: Props) {
   const tabs: { id: Tab; label: string; count?: number }[] = [
-    { id: "sentences", label: "対訳" },
+    ...(p.sentences === false ? [] : [{ id: "sentences" as const, label: "対訳" }]),
     { id: "translate", label: "訳", count: p.ann.highlights.length },
     { id: "terms", label: "用語", count: p.ann.terms.length },
     { id: "math", label: "数式", count: p.ann.equations.length },

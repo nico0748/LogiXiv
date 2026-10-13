@@ -28,6 +28,24 @@ await page.route("https://api.anthropic.com/**", async (route) => {
 });
 
 const step = async (name, fn) => { await fn(); console.log("✓", name); };
+// 左端のリボンのボタン（論文一覧・検索・リスト・グラフ・設定・ヘルプ）
+const ribbon = (name) => page.getByRole("navigation", { name: "主要メニュー" }).getByRole("button", { name, exact: true });
+const leftOpen = async () => (await page.locator("aside.sidebar.left").getAttribute("aria-hidden")) !== "true";
+// 左サイドバーは最初は閉じている。⌘/Ctrl+\ で開く
+const openLeft = async () => {
+  if (await leftOpen()) return;
+  // 配置（/api/workspace）の読み込みが終わる前に押すと、読み込んだ配置で閉じ直されることがあるので、開くまで押し直す
+  await page.getByRole("navigation", { name: "主要メニュー" }).waitFor();
+  for (let i = 0; ; i++) {
+    await page.keyboard.press("Control+Backslash");
+    const ok = await page.waitForFunction(() => document.querySelector("aside.sidebar.left")?.getAttribute("aria-hidden") !== "true", null, { timeout: 2000 }).then(() => true, () => false);
+    if (ok) await page.waitForTimeout(300);
+    if (ok && (await page.locator("aside.sidebar.left").getAttribute("aria-hidden")) !== "true") return;
+    if (i >= 4) throw new Error("⌘/Ctrl+\\ で左サイドバーが開かない");
+  }
+};
+// 右サイドバーのタブ。「訳」は「対訳」と区別するため先頭で合わせる
+const rightTab = (name) => page.getByRole("tablist", { name: "補足情報" }).getByRole("tab", { name: new RegExp(`^${name}`) });
 
 await page.goto("http://localhost:4321/#debug");
 await step("最初の画面", async () => { await page.getByRole("heading", { name: "PaperLens" }).waitFor(); await page.screenshot({ path: `${shotDir}/01-welcome.png` }); });
@@ -38,8 +56,19 @@ await step("サンプルで開く", async () => {
 });
 
 await step("1 ファイル版は「PDF を追加」だけで、URL からの取り込みは出さない", async () => {
-  await page.getByRole("button", { name: "PDF を追加" }).waitFor();
-  if (await page.locator('button[aria-haspopup="menu"]', { hasText: "追加" }).count()) throw new Error("1 ファイル版に「追加」のメニューがある");
+  if (await leftOpen()) throw new Error("左サイドバーが最初から開いている");
+  await openLeft();
+  const side = page.getByRole("complementary", { name: "左サイドバー" });
+  await side.getByRole("button", { name: "PDF を追加", exact: true }).waitFor();
+  if (await side.locator('button[aria-haspopup="menu"]').count()) throw new Error("1 ファイル版に「論文を追加」のメニューがある");
+  if (await page.getByRole("button", { name: "論文を追加" }).count()) throw new Error("1 ファイル版に「論文を追加」のボタンがある");
+  // 一覧の検索欄と段階の絞り込みが出ている
+  await side.getByPlaceholder("題名・著者・ノートを検索").waitFor();
+  await side.getByRole("radiogroup", { name: "段階で絞り込む" }).waitFor();
+  await page.screenshot({ path: `${shotDir}/15-left-sidebar.png` });
+  // 閉じて、論文を広く見せる（リボンの「論文一覧」でも開閉できる）
+  await ribbon("論文一覧").click();
+  await page.waitForFunction(() => document.querySelector("aside.sidebar.left")?.getAttribute("aria-hidden") === "true");
 });
 
 const select = async (needle, endNeedle) => page.evaluate(([needle, endNeedle]) => {
@@ -65,9 +94,17 @@ await step("API キー未設定でマーカーを引く", async () => {
 });
 
 await step("API キーを設定", async () => {
-  await page.getByRole("button", { name: "Claude の設定" }).click();
+  // 設定のモーダルから Claude の設定を開く
+  await ribbon("設定").click();
+  const modal = page.getByRole("dialog", { name: "設定" });
+  await modal.getByRole("button", { name: "API キーとモデルを設定する" }).click();
+  await page.getByRole("heading", { name: "Claude の設定" }).waitFor();
   await page.getByLabel("API キー").fill("sk-ant-test");
   await page.getByRole("button", { name: "保存する" }).click();
+  await page.getByRole("heading", { name: "Claude の設定" }).waitFor({ state: "detached" });
+  await modal.getByText("API キーは設定済みです。").waitFor();
+  await modal.getByRole("button", { name: "閉じる" }).click();
+  await modal.waitFor({ state: "detached" });
 });
 
 await step("訳す", async () => {
@@ -94,7 +131,7 @@ await step("数式にする（画像を送る）", async () => {
 });
 
 await step("記録を入力", async () => {
-  await page.getByRole("tab", { name: "記録" }).click();
+  await rightTab("記録").click();
   await page.getByLabel("一言でいうと").fill("窓付きの疎な注意で、長い論文を少ないメモリで読めるようにした。");
   await page.getByRole("radio", { name: "精読", exact: true }).click();
   await page.waitForTimeout(900);
@@ -143,11 +180,12 @@ await step("note.md に反映されている", async () => {
 });
 
 await step("検索の当たりから記録欄を開く", async () => {
+  await openLeft();
   await page.getByLabel("論文とノートを検索").fill("窓付き");
   const hit = page.locator(".hit-item", { hasText: "一言でいうと" });
   await hit.waitFor();
   await page.screenshot({ path: `${shotDir}/09-search.png` });
-  await page.getByRole("tab", { name: /訳/ }).click();
+  await rightTab("訳").click();
   await hit.click();
   await page.waitForFunction(() => document.activeElement?.id === "f-summary");
   await page.getByRole("button", { name: "検索を消す" }).click();
@@ -175,14 +213,14 @@ await step("ページ番号を入れて移る", async () => {
 });
 
 await step("訳タブとマーカー連動", async () => {
-  await page.getByRole("tab", { name: /訳/ }).click();
+  await rightTab("訳").click();
   await page.locator(".pdf-page button[aria-label^='p.1 のマーカー']").first().click();
   await page.locator(".card.active").waitFor();
   await page.screenshot({ path: `${shotDir}/05-translate.png` });
 });
 
 await step("グラフ", async () => {
-  await page.getByRole("button", { name: "グラフで見る" }).click();
+  await ribbon("グラフ").click();
   await page.locator(".graph svg .n-term").first().waitFor();
   await page.waitForTimeout(1500);
   await page.screenshot({ path: `${shotDir}/06-graph.png` });
@@ -222,7 +260,8 @@ const measure = async (label) => {
 };
 
 await step("暗い表示", async () => {
-  await page.getByRole("button", { name: "論文の表示に戻る" }).click();
+  // リボンの「グラフ」をもう一度押すと論文の表示に戻る
+  await ribbon("グラフ").click();
   await page.locator(".pdf-page[data-page='1'] .textLayer span").first().waitFor();
   await page.waitForTimeout(400);
   // 残りの 3 色のマーカーを引き、明暗の両方で文字が隠れないことを確かめる
@@ -256,7 +295,8 @@ await step("暗い表示", async () => {
     return { primary, pageNo: getComputedStyle(document.querySelector(".page-no")).color };
   });
   if (resolved.primary !== "rgb(84, 90, 146)") throw new Error(`ページの中の primary が明るい表示の値でない: ${resolved.primary}`);
-  if (resolved.pageNo !== "rgb(199, 197, 208)") throw new Error(`ページ番号の色が暗い表示の値でない: ${resolved.pageNo}`);
+  // ページ番号は --text-faint（M3 の outline）。暗い表示では #91909a、明るい表示なら #777680 になる
+  if (resolved.pageNo !== "rgb(145, 144, 154)") throw new Error(`ページ番号の色が暗い表示の値でない: ${resolved.pageNo}`);
   await page.screenshot({ path: `${shotDir}/07-dark.png` });
   // ページの上のマーカーの点のフォーカス: 明るい表示の secondary の輪と、白い縁
   await page.keyboard.press("Shift");

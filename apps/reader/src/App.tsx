@@ -607,7 +607,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
               onAction={onAction}
               onHighlightClick={(id) => { setActiveId(id); setTab("translate"); setRightOpen(true); }}
               jumpTo={jumpTo}
-              paperId={current}
+              // 対訳（文の枠）はサーバー版だけ。1 ファイル版で渡すと /api/events への接続を試みてしまう
+              paperId={backend.kind === "server" ? current : null}
               scrollToPage={scrollToPage}
               initialPos={initialPos}
               onRestored={(page) =>
@@ -659,6 +660,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
               notify={notify}
               focusField={focusField && focusField.paper === loaded ? focusField : null}
               onFocused={() => setFocusField(null)}
+              sentences={backend.kind === "server"}
             />
           ) : (
             <p className="empty">論文を開くと、訳・用語・数式・記録が表示されます。</p>
