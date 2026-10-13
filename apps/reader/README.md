@@ -80,7 +80,10 @@ npm run build:single
    - 用語を調べる: 選んだ語の説明を作る
    - 数式にする: 選んだ数式を TeX に書き起こす
 3. 右側の「記録」タブに読解メモを入力します。入力は note.md に自動で保存されます。
-4. 左端の「グラフ」で、論文と用語のつながりを見られます。
+   タブの最上部の「書誌情報」で題名・著者・年・掲載先・DOI を直せます。「BibTeX をコピー」で BibTeX をコピーできます。
+4. 左の検索欄で、題名・著者・年と、ノートの中を探せます。段階のチップで一覧を絞り込めます。
+5. PDF の上のページ番号の欄に数字を入れて Enter を押すと、そのページへ移ります。論文を開き直すと、前回の位置から表示します。
+6. 左端の「グラフ」で、論文と用語のつながりを見られます。
 
 Obsidian で保存先フォルダを開いてノートを書き換えても、PaperLens の画面にすぐ反映されます。
 
@@ -131,7 +134,7 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 | `read_paper_text` / `find_in_paper` | PDF の本文をページごとに読む、本文の中を探す |
 | `search_notes` / `get_graph` | すべてのノートの横断検索、論文と用語のつながり |
 | `import_paper` | 端末の PDF や URL（arXiv など）から取り込む |
-| `set_fields` / `set_status` / `set_meta` | 記録欄、読解の段階、書誌情報（著者・年など）を書く |
+| `set_fields` / `set_status` / `set_meta` | 記録欄、読解の段階、書誌情報（著者・年など）を書く。著者など一覧の項目は配列で渡す |
 | `add_highlight` / `update_highlight` | 本文の文にマーカーと訳を付ける。PDF の該当位置にも色が付く |
 | `add_term` / `update_term` / `add_equation` / `update_equation` | 用語と数式を登録する |
 | `remove_annotation` | マーカー・用語・数式を消す |
@@ -181,7 +184,7 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 
 | コマンド | 内容 |
 | --- | --- |
-| `npm test` | 単体テスト（テンプレート、注釈の差分、サーバーの API、MCP のツール） |
+| `npm test` | 単体テスト（テンプレート、frontmatter、BibTeX、検索、前回の位置、URL 取得の安全策、注釈の差分、サーバーの API、MCP のツール） |
 | `npx tsc --noEmit` | 型を検査する。最上位の `npm run typecheck` にも含まれます |
 | `npm run e2e` | ヘッドレス Chromium で操作を確認する。先に `npm run build:single` と `npm run build` を実行してください |
 | `npm run sample` | お試し用のサンプル PDF（`src/demo/sample.pdf`）を作り直す |
@@ -204,6 +207,8 @@ src/         画面（React）。src/lib/ の論文フォルダの処理はサ�
 | エージェントが別のフォルダを見ている | 設定画面に表示される登録方法で登録し直してください。保存先を `PAPERLENS_DATA` で固定している場合は、その値がアプリとそろっているか確かめてください |
 | 訳を頼むと「API キーが正しくありません」と表示される | 設定画面でキーを入れ直してください |
 | PDF の文を選択できない | 画像だけの PDF（スキャンした PDF）は文字情報が無いため選択できません。OCR をかけてから取り込んでください |
+| 大学や会社のネットワークで、URL から取り込めない | プロキシの内側では URL から取得できません。ブラウザで PDF を保存し、「PDF を追加」で取り込んでください |
+| 構内だけで公開されている機関リポジトリの URL が「ローカルネットワークの URL は使えません」と断られる | 環境変数 `PAPERLENS_ALLOW_PRIVATE_URLS=1` を付けてサーバー（`npm start`）か MCP サーバーを起動してください。端末内やローカルネットワークの URL も取得するようになるため、必要なときだけ付けてください |
 
 ## ライセンス
 
