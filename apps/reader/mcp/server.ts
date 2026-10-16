@@ -20,6 +20,7 @@ const INSTRUCTIONS = `PaperLens は、論文を読みながら訳・用語・数
 - マーカー（add_highlight）は PDF の文字どおりに指定すると、画面の PDF 上にも色が付きます。
 - 書く日本語は、です・ます調ではなく、ノートらしい簡潔な常体（〜である、〜する）にそろえます。専門用語は初出で原語を括弧書きにします。
 - 全文を 1 文ずつ訳すときは get_sentence_outline → get_translation_batch → set_translations を、remainingUnique が 0 になるまで繰り返します（プロンプト translate_paper に手順があります）。文の指定は hash で行います。訳す対象でない文は skip_sentences、区切りの誤りは fix_sentence_boundary、訳語の統一は update_glossary を使います。sentences.json がまだ無い論文では parse_sentences を呼びます。
+- 論文に発表スライド（slides.pdf）があれば、利用者がスライドを四角で囲んだ部分（グループ。名前は Markup-03.02 = 3 ページ目の 2 個目）を get_slide_markups で読めます。各グループが論文のどの文章・図・数式に当たるかを link_slide_markup でつなぐと、画面ではスライドと論文が線で結ばれます。
 - アプリを開いている場合、ここでの変更は画面にすぐ反映されます。`;
 
 export function createServer(opts: { readOnly?: boolean } = {}) {

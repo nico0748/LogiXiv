@@ -100,6 +100,8 @@ Claude も同じフォルダに付いてくる。アプリを開いていれば�
 | `remove_annotation` | マーカー・用語・数式を消す |
 | `get_template` / `set_template` / `reset_template` | テンプレートを読む、書き換える、初期状態に戻す |
 | `set_data_root` | 保管庫を変える |
+| `get_slide_markups` | 発表スライド（`slides.pdf`）で囲んだグループの一覧。名前（Markup-03.02）、四角の中の文字、論文へのリンク |
+| `link_slide_markup` / `unlink_slide_markup` / `set_slide_markup_memo` | グループを論文の文章（`text` で探す）・図・数式（`page` と `rect`）につなぐ、外す、メモを書く |
 
 読解ノートは `paperlens://papers/<論文ID>/note.md` の資料（resource）としても読める。
 

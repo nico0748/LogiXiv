@@ -38,6 +38,7 @@ import {
 } from "../server/service.ts";
 import { parseSentences } from "../server/sentences.ts";
 import { SENTENCE_READ_TOOLS, SENTENCE_WRITE_TOOLS, sentenceProgress } from "./sentenceTools.ts";
+import { SLIDE_READ_TOOLS, SLIDE_WRITE_TOOLS } from "./slideTools.ts";
 
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 // 引数の型は inputSchema（zod）で検査済み
@@ -487,8 +488,8 @@ function clean(o: Record<string, unknown>) {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 }
 
-export const READ_TOOLS = [...READ, ...SENTENCE_READ_TOOLS];
-export const WRITE_TOOLS = [...WRITE, ...SENTENCE_WRITE_TOOLS];
+export const READ_TOOLS = [...READ, ...SENTENCE_READ_TOOLS, ...SLIDE_READ_TOOLS];
+export const WRITE_TOOLS = [...WRITE, ...SENTENCE_WRITE_TOOLS, ...SLIDE_WRITE_TOOLS];
 /** 対訳（sentences.json）を扱うツールの名前。設定画面で分けて見せる。 */
 export const SENTENCE_TOOL_NAMES = new Set([...SENTENCE_READ_TOOLS, ...SENTENCE_WRITE_TOOLS].map((t) => t.name));
 export const TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
