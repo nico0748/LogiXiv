@@ -86,6 +86,7 @@ PaperLens は目的を「論文を読みながら、読解の記録を Markdown 
 | テンプレートを編集 | `get_template`、`set_template`、`reset_template` |
 | グラフ | `get_graph`、`search_notes` |
 | 設定（保存先） | `get_settings`、`set_data_root` |
+| 発表スライドと論文の対応 | `get_slide_markups`、`link_slide_markup`、`unlink_slide_markup`、`set_slide_markup_memo`（スライドを囲むのは画面だけ） |
 | 対訳タブ | `get_sentence_outline`、`get_sentences`、`get_translation_batch`、`search_sentences`、`parse_sentences`、`set_translations`、`add_sentence_note`、`update_glossary`、`skip_sentences`、`fix_sentence_boundary` |
 
 対訳のツールは旧 LogiXiv の MCP（`packages/mcp`）の 11 ツールを、論文 ID（`paper`）で使えるように移したもの（`list_documents` は `list_papers` にまとめた）。設計は [../../../docs/mcp.md](../../../docs/mcp.md) にある。
@@ -173,7 +174,20 @@ Obsidian の画面の形にそろえた。
     paperlens.json              マーカー・用語・数式（位置などの補助データ）
     sentences.json              1 文ずつの対訳（packages/core の PaperDocument）
     sentences.status.json       解析の進み具合
+    slides.pdf                  発表スライド（PPTX は取り込むときに PDF へ変換する）
+    slides.pptx                 PPTX から取り込んだときの元のファイル
+    slides.json                 スライドを囲んだグループと、論文へのリンク
 ```
+
+### 発表スライドと論文の対応
+
+- 中央を 2 つに分け、左にスライド、右に論文を並べる。間の溝にグループの色の線を引く（SVG を重ねる）。線はスクロールのたびに DOM の位置から測り直す。
+- グループの名前は `Markup-ページ.番号`。番号は作ったときに決め、消しても使い直さない（`slides.json` の `used` にページごとの最大の番号を残す）。ノートや会話で使った名前が別の部分を指さないようにするため。
+- 保存は注釈と同じく操作で送る。リンクは 1 本ずつの操作（`addLink` / `removeLink` / `updateLink`）にした。配列ごと置き換えると、画面とエージェントが同時に足したリンクの片方が消えるため。
+  送られた操作は書く前にすべて検証し、1 つでも正しくなければ何も書かない。
+- 画面の側は、保存を 1 つずつ順に送り、保存か取り込みが終わるたびに世代を進める。読み直しの途中で世代が変わったら読み直す（古い内容で自分の変更を消さないため）。
+- PPTX の変換は LibreOffice、無ければ macOS の Keynote（AppleScript）。PowerPoint の自動操作は、開いた文書を確実に指せず、利用者が開いている別のプレゼンを閉じるおそれがあるため使わない。
+- グループの色は、色覚の型が違っても隣り合う色を見分けやすい 8 色を固定の順で使う。名前の札を必ず添え、色だけで見分けさせない。
 
 データベースは使わない。アプリを使わなくなっても、ノートと PDF はそのまま残る。
 Obsidian の保管庫にしているフォルダを選べば、Obsidian からも同じノートを開ける。

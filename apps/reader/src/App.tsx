@@ -1,4 +1,4 @@
-import { ExternalLink, FileText, PanelLeft, PanelRight, Waypoints } from "lucide-react";
+import { ExternalLink, FileText, PanelLeft, PanelRight, Presentation, Waypoints } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GraphView } from "./components/GraphView.tsx";
 import { ListModal } from "./components/ListModal";
@@ -12,6 +12,9 @@ import { ResizeHandle } from "./components/shell/ResizeHandle.tsx";
 import { Ribbon, type RibbonItem } from "./components/shell/Ribbon.tsx";
 import { SentenceStatus } from "./components/shell/SentenceStatus.tsx";
 import { SettingsModal } from "./components/shell/SettingsModal.tsx";
+import { MarkupPanel } from "./components/slides/MarkupPanel.tsx";
+import { type SlideFocus, SlidesView } from "./components/slides/SlidesView.tsx";
+import { useSlides } from "./components/slides/useSlides.ts";
 import { StatusBar } from "./components/shell/StatusBar.tsx";
 import { ThemeToggle } from "./components/shell/ThemeToggle.tsx";
 import { useWorkspace } from "./components/shell/useWorkspace.ts";
@@ -47,7 +50,7 @@ export function App() {
   return <Workspace key={backend.name} backend={backend} onClose={backend.kind === "browser" ? () => setBackend(null) : undefined} />;
 }
 
-type View = "paper" | "graph";
+type View = "paper" | "graph" | "slides";
 /** 中央の上に重ねて開く画面 */
 type Overlay = "settings" | "help" | "lists" | null;
 
@@ -96,6 +99,23 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const contexts = useRef(new Map<string, string>());
 
   const aiReady = !!ai.apiKey;
+
+  // 発表スライドとの対応（中央の「スライド」画面と、右サイドバーのグループ一覧で共有する）
+  const slides = useSlides(backend, current, {
+    active: view === "slides",
+    onNote: (md) => applyNote(md),
+    onSave: (st) => setSave(st === "saving" ? { kind: "saving" } : st === "saved" ? { kind: "saved" } : { kind: "error", msg: st.error }),
+  });
+  const [markupActive, setMarkupActive] = useState<string | null>(null);
+  const [markupHover, setMarkupHover] = useState<string | null>(null);
+  const [slideFocus, setSlideFocus] = useState<SlideFocus | null>(null);
+  const [isolateLines, setIsolateLines] = useState(false);
+  const [slideCount, setSlideCount] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    setMarkupActive(null);
+    setMarkupHover(null);
+    setSlideCount(undefined);
+  }, [current]);
 
   // 動作確認用。URL に #debug を付けたときだけ保管庫を参照できるようにする
   useEffect(() => {
@@ -450,7 +470,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const jump = (page: number, y: number) => setJumpTo({ page, y, n: Date.now() });
 
   const openPaper = (id: string) => {
-    setView("paper");
+    // スライドの画面では、その論文のスライドに切り替える（続けて対応づけられるように）
+    setView((v) => (v === "slides" ? "slides" : "paper"));
     setCurrent(id);
     // リストから来たページへの移動は、別の開き方では使わない
     setScrollToPage(undefined);
@@ -499,6 +520,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const onRibbon = (id: RibbonItem) => {
     if (id === "files" || id === "search") toggleLeft(id);
     else if (id === "graph") setView((v) => (v === "graph" ? "paper" : "graph"));
+    else if (id === "slides") setView((v) => (v === "slides" ? "paper" : "slides"));
     else setOverlay((o) => (o === id ? null : id));
   };
 
@@ -513,6 +535,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       e.preventDefault();
       setOverlay("lists");
     } else if (e.key === "Escape" && overlay && !document.querySelector("dialog[open]")) {
+      // 閉じた Esc を、ほかの画面（スライドの道具など）に渡さない
+      e.preventDefault();
       setOverlay(null);
     }
   };
@@ -529,13 +553,13 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const rightOpen = ws.rightOpen;
   const cls = ["app", leftOpen ? "show-left" : "left-closed", rightOpen ? "show-right" : "right-closed", resizing ? "is-resizing" : ""].join(" ");
   const style = { "--left-w": `${ws.leftWidth}px`, "--right-w": `${ws.rightWidth}px` } as CSSProperties;
-  const tabTitle = view === "graph" ? "グラフ" : title || (current ? "読み込んでいます" : "新しいタブ");
+  const tabTitle = view === "graph" ? "グラフ" : view === "slides" ? `スライドと論文: ${title || current || ""}` : title || (current ? "読み込んでいます" : "新しいタブ");
   const highlightCount = ann.highlights.length;
 
   return (
     <div className={cls} style={style}>
       <Ribbon
-        active={{ files: leftOpen && ws.leftTab === "files", search: leftOpen && ws.leftTab === "search", graph: view === "graph", lists: overlay === "lists", settings: overlay === "settings", help: overlay === "help" }}
+        active={{ files: leftOpen && ws.leftTab === "files", search: leftOpen && ws.leftTab === "search", graph: view === "graph", slides: view === "slides", lists: overlay === "lists", settings: overlay === "settings", help: overlay === "help" }}
         onItem={onRibbon}
       />
 
@@ -566,7 +590,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
             <PanelLeft size={16} aria-hidden="true" />
           </button>
           <div className="workspace-tab is-active" title={tabTitle}>
-            {view === "graph" ? <Waypoints size={14} aria-hidden="true" /> : <FileText size={14} aria-hidden="true" />}
+            {view === "graph" ? <Waypoints size={14} aria-hidden="true" /> : view === "slides" ? <Presentation size={14} aria-hidden="true" /> : <FileText size={14} aria-hidden="true" />}
             <span className="workspace-tab-title">{tabTitle}</span>
           </div>
           <span className="spacer" />
@@ -599,6 +623,24 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
         >
           {view === "graph" ? (
             <GraphView papers={papers} links={links} onOpen={openPaper} />
+          ) : view === "slides" && current ? (
+            <SlidesView
+              slides={slides}
+              paperPdf={pdf}
+              active={markupActive}
+              setActive={setMarkupActive}
+              hover={markupHover}
+              setHover={setMarkupHover}
+              focus={slideFocus}
+              notify={notify}
+              isolate={isolateLines}
+              setIsolate={setIsolateLines}
+              onSlideCount={(n) => {
+                setSlideCount(n);
+                const lost = slides.state.kind === "ready" ? slides.state.deck.markups.filter((m) => m.page > n) : [];
+                if (lost.length) notify(`スライドは ${n} ページです。それより後ろのページのグループが ${lost.length} 個あります（右の一覧に印を付けました）`);
+              }}
+            />
           ) : pdf ? (
             <PdfView
               data={pdf}
@@ -636,7 +678,16 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       <aside className="sidebar right" aria-label="右サイドバー（補足情報）" aria-hidden={!rightOpen} inert={!rightOpen}>
         {rightOpen && <ResizeHandle side="right" width={ws.rightWidth} onResize={(w) => patch({ rightWidth: w })} onDragging={setResizing} label="右サイドバーの幅" />}
         <div className="sidebar-inner">
-          {current ? (
+          {current && view === "slides" ? (
+            <MarkupPanel
+              slides={slides}
+              active={markupActive}
+              setActive={setMarkupActive}
+              setHover={setMarkupHover}
+              reveal={(f) => setSlideFocus({ ...f, nonce: Date.now() })}
+              slideCount={slideCount}
+            />
+          ) : current ? (
             <RightPanel
               paperId={current}
               tab={tab}
@@ -674,6 +725,13 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
           // 対訳は保存先のサーバーがあるときだけ使える
           { key: "sentences", node: backend.kind === "server" && view === "paper" && current ? <SentenceStatus key={current} paperId={current} /> : null },
           { key: "marks", node: view === "paper" && current ? `マーカー ${highlightCount}` : null },
+          {
+            key: "markups",
+            node:
+              view === "slides" && slides.state.kind === "ready"
+                ? `グループ ${slides.state.deck.markups.length}・リンク ${slides.state.deck.markups.reduce((n, m) => n + m.links.length, 0)}`
+                : null,
+          },
           { key: "papers", node: `論文 ${papers.length}`, title: "保管庫にある論文の数" },
           { key: "vault", node: backend.name, title: backend.persistent ? "保存先" : "メモリ上の保管庫（閉じると消えます）" },
         ]}

@@ -49,6 +49,8 @@ import {
   upsertGlossary,
 } from "./sentences.ts";
 import { VERSION } from "./version.ts";
+import { SlidesInputError, changeMarkups, loadDeck, slidesPdfPath } from "../src/lib/slides.ts";
+import { SlidesConvertError, converters, importSlides } from "./slides.ts";
 
 export { VERSION };
 
@@ -67,7 +69,7 @@ export function setHostBridge(b: HostBridge | null) {
 // 保存先フォルダを見張り、MCP サーバーや Obsidian が書き換えたときも画面へ知らせる。
 // このサーバー自身が書いたファイルには、書き込みを頼んだ画面の ID を添える（その画面は通知を無視する）。
 
-type Change = { kind: "papers" | "note" | "annotations" | "sentences" | "template" | "config"; paper?: string; origin?: string };
+type Change = { kind: "papers" | "note" | "annotations" | "sentences" | "slides" | "template" | "config"; paper?: string; origin?: string };
 
 const clients = new Set<http.ServerResponse>();
 /** このサーバーが最後に書いたときの更新時刻。同じなら自分の書き込み、違えば別のプロセスの書き込み。 */
@@ -95,6 +97,7 @@ function classify(rel: string): Change | null {
   if (parts[2] === "note.md") return { kind: "note", paper };
   if (parts[2] === "paperlens.json") return { kind: "annotations", paper };
   if (parts[2] === "sentences.json" || parts[2] === "sentences.status.json") return { kind: "sentences", paper };
+  if (parts[2] === "slides.json" || parts[2] === "slides.pdf") return { kind: "slides", paper };
   if (parts.length === 2 || parts[2] === "paper.pdf") return { kind: "papers", paper };
   return null;
 }
@@ -114,6 +117,8 @@ function watchDir(rel: string) {
       dirWatchers.delete(rel);
     });
     dirWatchers.set(rel, w);
+    // papers/ と論文フォルダが続けて作られると、論文フォルダの作成の通知が来る前に見張り始める。中にあるものも見張る
+    if (rel === PAPERS_DIR) for (const d of fs.readdirSync(path.join(watchedRoot, rel))) watchDir(`${PAPERS_DIR}/${d}`);
   } catch {
     // まだ無いフォルダは、作られたときに見張り始める
   }
@@ -306,6 +311,42 @@ route("GET", "/api/papers/:id/text", async (r) => {
   const v = vaultFor(r.origin);
   await requirePaper(v, r.params[0]);
   return paperText(v, r.params[0], Number(r.query.get("from") || 1), r.query.get("to") ? Number(r.query.get("to")) : undefined);
+});
+
+// --- 発表スライド（papers/<id>/slides.pdf と slides.json） ---
+
+route("GET", "/api/slides/converters", async () => ({ converters: await converters() }));
+route("GET", "/api/papers/:id/slides", async (r) => {
+  const v = vaultFor(r.origin);
+  await requirePaper(v, r.params[0]);
+  return { deck: await loadDeck(v, r.params[0]) };
+});
+route("GET", "/api/papers/:id/slides/pdf", async (r) => {
+  const v = vaultFor(r.origin);
+  await requirePaper(v, r.params[0]);
+  return new Raw("application/pdf", await fs.promises.readFile(v.resolve(slidesPdfPath(r.params[0]))));
+});
+// 本文は PDF か PPTX のファイルそのもの。PPTX は PDF に変換して置く
+route("POST", "/api/papers/:id/slides", async (r) => {
+  const data = await r.body();
+  try {
+    const deck = await importSlides(vaultFor(r.origin), r.params[0], r.query.get("name") || "slides.pdf", data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer);
+    return { deck };
+  } catch (e) {
+    if (e instanceof SlidesConvertError) throw new HttpError(422, e.message);
+    throw e;
+  }
+});
+route("PATCH", "/api/papers/:id/slides/markups", async (r) => {
+  const { ops } = await jsonBody<{ ops?: unknown }>(r);
+  const v = vaultFor(r.origin);
+  await requirePaper(v, r.params[0]);
+  try {
+    return await changeMarkups(v, r.params[0], ops);
+  } catch (e) {
+    if (e instanceof SlidesInputError) throw new HttpError(400, e.message);
+    throw e;
+  }
 });
 
 // --- 1 文ずつの対訳（papers/<id>/sentences.json） ---

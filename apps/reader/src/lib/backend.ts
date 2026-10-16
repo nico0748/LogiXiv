@@ -23,13 +23,15 @@ import {
   writeMeta,
   writeTemplate,
 } from "./papers.ts";
+import { type MarkupOp, type SlideDeck, changeMarkups, loadDeck, loadSlidesPdf, putSlides } from "./slides.ts";
+import { openPdf } from "./pdf.ts";
 import type { Vault } from "./vault.ts";
 
 export type Link = { paper: string; term: string };
 
 /** 保存先で起きた変更。paper が無いものは論文一覧やテンプレートの変更。 */
 export interface ChangeEvent {
-  kind: "papers" | "note" | "annotations" | "sentences" | "template" | "config";
+  kind: "papers" | "note" | "annotations" | "sentences" | "slides" | "template" | "config";
   paper?: string;
 }
 
@@ -62,6 +64,12 @@ export interface Backend {
   graph(): Promise<Link[]>;
   /** すべての読解ノートから語句を探す */
   search(q: string): Promise<SearchHit[]>;
+  /** 論文に付けた発表スライド。無ければ null */
+  loadSlides(id: string): Promise<SlideDeck | null>;
+  loadSlidesPdf(id: string): Promise<ArrayBuffer>;
+  /** PDF か PPTX のスライドを取り込む。PPTX はサーバー版だけ（PDF に変換するため） */
+  importSlides(id: string, fileName: string, data: ArrayBuffer): Promise<SlideDeck>;
+  changeMarkups(id: string, ops: MarkupOp[]): Promise<{ deck: SlideDeck; note: string }>;
   /** 変更の通知を受け取る。戻り値を呼ぶと止まる。 */
   subscribe(fn: (e: ChangeEvent) => void): () => void;
 }
@@ -116,6 +124,26 @@ export class VaultBackend implements Backend {
   }
   search(q: string) {
     return searchNotes(this.vault, q);
+  }
+  loadSlides(id: string) {
+    return loadDeck(this.vault, id);
+  }
+  loadSlidesPdf(id: string) {
+    return loadSlidesPdf(this.vault, id);
+  }
+  async importSlides(id: string, fileName: string, data: ArrayBuffer) {
+    if (/\.pptx?$/i.test(fileName)) {
+      throw new Error("1 ファイル版では PPTX を変換できません。PowerPoint などで PDF に書き出してから取り込んでください。");
+    }
+    // 中身が壊れた PDF で、今のスライドを上書きしない
+    const doc = await openPdf(data).promise.catch((e: unknown) => {
+      throw new Error(`スライドの PDF を開けませんでした（${e instanceof Error ? e.message : String(e)}）。今のスライドはそのまま残しています。`);
+    });
+    void doc.destroy();
+    return putSlides(this.vault, id, fileName, data);
+  }
+  changeMarkups(id: string, ops: MarkupOp[]) {
+    return changeMarkups(this.vault, id, ops);
   }
   subscribe() {
     return () => undefined;
@@ -233,6 +261,23 @@ export class ServerBackend implements Backend {
   }
   search(q: string) {
     return call<SearchHit[]>(`/api/search?q=${enc(q)}`);
+  }
+  async loadSlides(id: string) {
+    return (await call<{ deck: SlideDeck | null }>(`/api/papers/${enc(id)}/slides`)).deck;
+  }
+  loadSlidesPdf(id: string) {
+    return call<ArrayBuffer>(`/api/papers/${enc(id)}/slides/pdf`);
+  }
+  async importSlides(id: string, fileName: string, data: ArrayBuffer) {
+    const r = await call<{ deck: SlideDeck }>(`/api/papers/${enc(id)}/slides?name=${enc(fileName)}`, {
+      method: "POST",
+      body: data,
+      headers: { "content-type": "application/octet-stream" },
+    });
+    return r.deck;
+  }
+  changeMarkups(id: string, ops: MarkupOp[]) {
+    return call<{ deck: SlideDeck; note: string }>(`/api/papers/${enc(id)}/slides/markups`, { method: "PATCH", body: json({ ops }) });
   }
   subscribe(fn: (e: ChangeEvent) => void) {
     const es = new EventSource("/api/events");

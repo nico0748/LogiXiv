@@ -102,6 +102,12 @@ npm run build:single
 7. PDF の上のページ番号の欄に数字を入れて Enter を押すと、そのページへ移ります。論文を開き直すと、前回の位置から表示します。
 8. 左端の「リスト」（`⌘/Ctrl + Shift + L`）で、すべての論文の用語（対訳の用語集を含む）と数式を、単語帳と数式帳として引けます。
 9. 左端の「グラフ」で、論文と用語のつながりを見られます。
+10. 左端の「発表スライドと論文の対応」で、論文発表会のスライド（PDF か PPTX）を論文の左に並べられます。
+    - スライドをドロップするか「スライドを追加」で取り込みます。PPTX は PDF に変換して表示します（LibreOffice か Keynote が必要です。無ければ PowerPoint などで PDF に書き出してから取り込んでください）。
+    - 「囲む」（`R`）でスライドの一部をドラッグして囲むと、グループができます。名前は「Markup-ページ.番号」です（3 ページ目で 2 個目に囲んだ部分は Markup-03.02）。番号は、途中のグループを消してもずれません。
+    - グループを選んでいる間に、論文の文をドラッグで選んで「文章としてリンク」を押すか、「図」（`F`）・「数式」（`E`）で論文の範囲を囲むと、リンクできます。1 つのグループから何か所にでもリンクできます。
+    - グループと論文の該当箇所は、グループの色の線でつながります。片方が画面の外にあるときは、端まで点線で引きます。「選んだ線だけ」で、選んでいるグループの線だけを出せます。
+    - 右側にグループの一覧が出ます。メモ、色、リンクの種類を直したり、リンクやグループを消したりできます。対応はノートの「発表スライドとの対応」にも書き出します。
 
 サイドバーの開閉と幅は、保存先の `.paperlens/workspace.json` に保存します。キーボード操作の一覧は、左端の「ヘルプ」にあります。
 
@@ -164,6 +170,8 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 | `get_translation_batch` / `set_translations` | 全文翻訳の窓を受け取り、訳をまとめて書き戻す |
 | `parse_sentences` | PDF を 1 文ずつに分ける・分け直す（訳とメモは引き継ぎます） |
 | `add_sentence_note` / `update_glossary` / `skip_sentences` / `fix_sentence_boundary` | 文のメモ、訳語の統一、訳さない記録、区切りの直し |
+| `get_slide_markups` | 発表スライドで囲んだグループの一覧（名前、四角の中の文字、論文へのリンク） |
+| `link_slide_markup` / `unlink_slide_markup` / `set_slide_markup_memo` | グループを論文の文章・図・数式につなぐ、リンクを外す、メモを書く |
 
 ほかに、段階を追って論文を読む `read_paper`、1 文ずつ全文を訳す `translate_paper`、読んだ論文をふり返る `review_notes` のプロンプトがあります。対訳のツールの詳しい設計は [../../docs/mcp.md](../../docs/mcp.md) にあります。読解ノートは `paperlens://papers/<論文ID>/note.md` の資料としても読めます。
 
@@ -222,7 +230,7 @@ papers/*/paper.pdf
 | --- | --- |
 | `npm test` | 単体テスト（テンプレート、frontmatter、BibTeX、検索、前回の位置、URL 取得の安全策、注釈の差分、サーバーの API、対訳の保存と解析、MCP のツール、画面の配置、リスト） |
 | `npx tsc --noEmit` | 型を検査する。最上位の `npm run typecheck` にも含まれます |
-| `npm run e2e` | ヘッドレス Chromium で操作を確認する。先に `npm run build:single` と `npm run build` を実行してください |
+| `npm run e2e` | ヘッドレス Chromium で操作を確認する。先に `npm run build:single` と `npm run build` を実行してください。発表スライドの画面は `e2e/slides.mjs` |
 | `npm run sample` | お試し用のサンプル PDF（`src/demo/sample.pdf`）を作り直す |
 
 `npm run e2e` を初めて実行する前に、`npx playwright install chromium` でブラウザを入れてください。
@@ -248,6 +256,7 @@ src/         画面（React）。src/components/shell/ に Obsidian 風の枠（
 | 構内だけで公開されている機関リポジトリの URL が「ローカルネットワークの URL は使えません」と断られる | 環境変数 `PAPERLENS_ALLOW_PRIVATE_URLS=1` を付けてサーバー（`npm start`）か MCP サーバーを起動してください。端末内やローカルネットワークの URL も取得するようになるため、必要なときだけ付けてください |
 | 対訳が「簡易解析」になる | GROBID に届いていません。`docker compose -f docker/grobid.yml up -d` で起動してから、対訳タブの「解析し直す」で GROBID を選んでください |
 | 対訳の文が途中で切れている、2 段組の左右が混ざっている | 簡易解析の限界です。GROBID で解析し直してください。リポジトリの最上位の README の「簡易解析で何が起きうるか」に詳しく書いています |
+| PPTX のスライドを取り込むと「変換できませんでした」と出る | LibreOffice か Keynote が必要です。どちらも無ければ、PowerPoint などで PDF に書き出してから取り込んでください。LibreOffice の場所は環境変数 `PAPERLENS_SOFFICE` でも指定できます。Keynote は初回に「オートメーション」の許可を求めます |
 | 対訳を単一の HTML に書き出したい | まだ PaperLens 本体にはありません。旧 LogiXiv の Web 画面（`apps/web`。リポジトリの最上位で `npm start`）で行えます |
 
 ## ライセンス
