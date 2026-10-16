@@ -238,6 +238,7 @@ function Ready({ paperId, doc, act, flash }: { paperId: string; doc: PaperDocume
 
       {flash}
 
+
       {caveats.some((c) => c.level === "danger") && (
         <div className="sl-caveat">
           {caveats.filter((c) => c.level === "danger").map((c) => <p key={c.label}><strong>{c.label}</strong>: {c.detail}</p>)}

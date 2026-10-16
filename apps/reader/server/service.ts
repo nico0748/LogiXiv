@@ -176,7 +176,8 @@ export interface HighlightInput {
 /** 本文の文を探してマーカーを引く。PDF 上で見つかれば、その位置に色が付く。 */
 export async function addHighlight(vault: NodeVault, id: string, input: HighlightInput) {
   await requirePaper(vault, id);
-  const pages = await readPages(pdfFile(vault, id));
+  // マーカーの端を文字にぴったり合わせるため、各文字の実際の位置も読む
+  const pages = await readPages(pdfFile(vault, id), { glyphs: true });
   const m = findText(pages, input.text, input.page);
   if (!m && !input.page) {
     throw new Error("本文の中にその文が見つかりませんでした。PDF の文字どおりに指定するか、page を指定してください。");

@@ -1,8 +1,12 @@
 import * as pdfjs from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { attachGlyphs, type FontLike, layoutGlyphs } from "../lib/glyphs.ts";
 import type { Highlight, MarkerColor, Rect } from "../lib/model.ts";
+import { fromDisplay, type LaidItem, layoutItems, mergeLineRects, segmentRects, type Segment, type TextItemLike, textRotation, toDisplay } from "../lib/pageText.ts";
 import { openPdf } from "../lib/pdf.ts";
+import { type Pt, segmentText, snapSegments } from "../lib/selection.ts";
+import { attachEndOfContent } from "../lib/textSelection.ts";
 import type { Pos } from "../lib/position.ts";
 import { setSentenceFocus, setSentenceMarksVisible, useSentenceFocus, useSentenceMarksVisible } from "../lib/sentenceFocus.ts";
 import { type SentenceMark, hitTest, marksByPage, sentenceAnchor } from "../lib/sentencesView.ts";
@@ -238,40 +242,177 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
     [doc],
   );
 
-  const onMouseUp = useCallback(async () => {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !scrollRef.current) return setMenu(null);
-    const text = sel.toString().replace(/-\n/g, "").replace(/\s+/g, " ").trim();
-    if (!text) return setMenu(null);
-    const range = sel.getRangeAt(0);
-    const startEl = (range.startContainer.parentElement ?? null)?.closest<HTMLElement>(".pdf-page");
-    if (!startEl) return setMenu(null);
+  // 押した位置・今の位置（client 座標）。選択の端をグリフで決め直すのに使う（src/lib/selection.ts）
+  const pointer = useRef<{ down: { x: number; y: number } | null; cur: { x: number; y: number }; dragging: boolean } | null>(null);
+  const onPointerDown = (e: React.PointerEvent) => {
+    // 押したのがページの文字の上でなければ（選択メニューのボタンなど）、選択の端とは関係ない
+    if (e.button !== 0 || !(e.target as HTMLElement).closest?.(".textLayer")) {
+      pointer.current = null;
+      return;
+    }
+    // Shift+クリック（選択の延長）は、押した位置が選択の端ではない
+    const down = e.shiftKey ? null : { x: e.clientX, y: e.clientY };
+    pointer.current = { down, cur: { x: e.clientX, y: e.clientY }, dragging: true };
+  };
+  // 位置は PointerEvent から取る（MouseEvent の clientX は整数 px に丸められ、細い字では半文字ずれる）
+  const onPointerMove = (e: React.PointerEvent) => {
+    const p = pointer.current;
+    if (p?.dragging && e.buttons & 1) p.cur = { x: e.clientX, y: e.clientY };
+  };
+  const onPointerUp = (e: React.PointerEvent) => {
+    const p = pointer.current;
+    if (!p?.dragging) return;
+    p.cur = { x: e.clientX, y: e.clientY };
+    p.dragging = false;
+  };
+
+  /**
+   * 今の選択を、グリフに合わせた矩形にする。最初と最後の文字は、押した位置・離した位置から決め直す。
+   * そのページの文字の位置がまだ求まっていなければ null（ブラウザの選択の表示に任せる）。
+   */
+  const snappedSelection = useCallback(
+    (model: PageModel | null, startEl: HTMLElement, range: Range, forward: boolean) => {
+      const tl = startEl.querySelector<HTMLElement>(".textLayer");
+      const layer = tl ? textLayers.get(tl) : undefined;
+      if (!layer || !model || !tl) return null;
+      const native = selectionSegments(range, layer, model);
+      if (!native.length) return null;
+      const pr = startEl.getBoundingClientRect();
+      const toFrame = (p: { x: number; y: number } | null): Pt | null => {
+        if (!p || pr.width <= 0 || pr.height <= 0) return null;
+        const [x, y] = fromDisplay((p.x - pr.left) / pr.width, (p.y - pr.top) / pr.height, model.rotation);
+        return { x, y };
+      };
+      const p = pointer.current;
+      let segs = native;
+      // 押したまま動かしていない（ダブルクリック・トリプルクリックで語や行を選んだ）なら、ブラウザの選択のまま
+      const dragged = !p?.down || Math.hypot(p.cur.x - p.down.x, p.cur.y - p.down.y) >= 4;
+      if (p && dragged) {
+        const anchor = toFrame(p.down);
+        const focus = toFrame(p.cur);
+        // 終わりが別のページ（のテキスト層の外）なら、そちらの端は決め直さない
+        const endHere = tl.contains(range.endContainer);
+        const start = forward ? anchor : focus;
+        const end = forward ? focus : anchor;
+        segs = snapSegments(model.items, native, start, endHere ? end : null);
+      }
+      const rects = segmentRects(model.items, segs).map((r) => toDisplay(r, model.rotation));
+      return { segs, native, rects, layer, forward };
+    },
+    [],
+  );
+
+  // 選んでいる間の表示: ブラウザの選択の色はテキスト層（グリフからずれている）に付くので消し、
+  // グリフに合わせた矩形を描く（ページの .sel-preview に直接描く。ドラッグ中に React を描き直さない）
+  const previewFrame = useRef(0);
+  const updatePreview = useCallback(() => {
+    previewFrame.current = 0;
+    const box = scrollRef.current;
+    if (!box) return;
+    const clear = () => {
+      box.classList.remove("sel-snapped");
+      box.querySelectorAll(".sel-preview").forEach((el) => el.childElementCount && el.replaceChildren());
+    };
+    const cur = currentSelection(pointer.current);
+    if (!cur || !doc) return clear();
+    const { range, forward } = cur;
+    const startEl = range.startContainer.parentElement?.closest<HTMLElement>(".pdf-page");
+    if (!startEl || !box.contains(startEl)) return clear();
     const pageNo = Number(startEl.dataset.page);
-    const pr = startEl.getBoundingClientRect();
-    const rects = mergeRects(
-      [...range.getClientRects()]
-        .filter((r) => r.width > 1 && r.height > 1)
-        .filter((r) => r.top >= pr.top - 2 && r.bottom <= pr.bottom + 2)
-        .map((r) => ({
-          x: (r.left - pr.left) / pr.width,
-          y: (r.top - pr.top) / pr.height,
-          w: r.width / pr.width,
-          h: r.height / pr.height,
-        })),
-    );
-    if (!rects.length) return setMenu(null);
-    const full = await pageText(pageNo);
-    const around = surrounding(full, text);
-    const canvas = startEl.querySelector("canvas");
-    const crop = () => (canvas ? cropCanvas(canvas, rects) : null);
-    const last = range.getClientRects()[range.getClientRects().length - 1] ?? range.getBoundingClientRect();
-    const sr = scrollRef.current.getBoundingClientRect();
-    setMenu({
-      x: Math.min(last.right - sr.left, sr.width - 360),
-      y: last.bottom - sr.top + scrollRef.current.scrollTop + 6,
-      sel: { page: pageNo, rects, text, around, crop },
+    const s = snappedSelection(readyModel(doc, pageNo), startEl, range, forward);
+    if (!s) return clear();
+    box.querySelectorAll<HTMLElement>(".sel-preview").forEach((el) => {
+      if (el.parentElement !== startEl) {
+        if (el.childElementCount) el.replaceChildren();
+        return;
+      }
+      el.replaceChildren(
+        ...s.rects.map((r) => {
+          const d = document.createElement("div");
+          d.style.cssText = `left:${r.x * 100}%;top:${r.y * 100}%;width:${r.w * 100}%;height:${r.h * 100}%`;
+          return d;
+        }),
+      );
     });
-  }, [pageText]);
+    box.classList.add("sel-snapped");
+  }, [doc, snappedSelection]);
+  useEffect(() => {
+    const onChange = () => {
+      if (!previewFrame.current) previewFrame.current = requestAnimationFrame(updatePreview);
+    };
+    // キーで選択を変えたら、押した位置はもう選択の端ではない
+    const onKey = (e: KeyboardEvent) => e.shiftKey && pointer.current && (pointer.current = null);
+    document.addEventListener("selectionchange", onChange);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("selectionchange", onChange);
+      document.removeEventListener("keydown", onKey);
+      cancelAnimationFrame(previewFrame.current);
+      previewFrame.current = 0;
+    };
+  }, [updatePreview]);
+
+  const onMouseUp = useCallback(
+    async () => {
+      const sel = window.getSelection();
+      const cur = currentSelection(pointer.current);
+      if (!sel || !cur || !scrollRef.current) return setMenu(null);
+      const { range, forward } = cur;
+      const startEl = (range.startContainer.parentElement ?? null)?.closest<HTMLElement>(".pdf-page");
+      if (!startEl) return setMenu(null);
+      const pageNo = Number(startEl.dataset.page);
+      // 横位置は描画命令から求めたグリフの位置、縦は行の帯（テキスト層の代わりのフォントでは文頭・文末も高さもずれる）
+      const model = doc ? await pageModel(doc, pageNo) : null;
+      const pr = startEl.getBoundingClientRect();
+      const snapped = snappedSelection(model, startEl, range, forward);
+      let text = sel.isCollapsed ? range.toString() : sel.toString();
+      if (snapped && model) {
+        const { segs, native, layer } = snapped;
+        const changed = segs.length !== native.length || segs.some((s, i) => s.k !== native[i].k || s.a !== native[i].a || s.b !== native[i].b);
+        if (changed || sel.isCollapsed) {
+          // ブラウザの選択も合わせる（コピーした文字列と、テキスト層の選択の端がマーカーと一致する）
+          const first = layer.textDivs[segs[0].k]?.firstChild;
+          const last = layer.textDivs[segs[segs.length - 1].k]?.firstChild;
+          const end = segs[segs.length - 1].b;
+          // 向きは保つ（後ろから選んだときは、押した側が後ろの端のまま）
+          if (first && last) {
+            if (forward) sel.setBaseAndExtent(first, segs[0].a, last, end);
+            else sel.setBaseAndExtent(last, end, first, segs[0].a);
+          }
+          text = segmentText(model.items, segs);
+        }
+      }
+      // ドラッグが選択にならなかったとき（currentSelection）は、作った範囲をブラウザの選択にする
+      if (sel.isCollapsed) sel.setBaseAndExtent(range.startContainer, range.startOffset, range.endContainer, range.endOffset);
+      text = text.replace(/-\n/g, "").replace(/\s+/g, " ").trim();
+      if (!text) return setMenu(null);
+      const rects = snapped
+        ? snapped.rects
+        : mergeLineRects(
+            [...range.getClientRects()]
+              .filter((r) => r.width > 1 && r.height > 1)
+              .filter((r) => r.top >= pr.top - 2 && r.bottom <= pr.bottom + 2)
+              .map((r) => toFraction(r, pr))
+              .sort((a, b) => a.y - b.y || a.x - b.x),
+          );
+      if (!rects.length) return setMenu(null);
+      const full = await pageText(pageNo);
+      const around = surrounding(full, text);
+      const canvas = startEl.querySelector("canvas");
+      const crop = () => (canvas ? cropCanvas(canvas, rects) : null);
+      const sr = scrollRef.current.getBoundingClientRect();
+      // メニューは選択の最後の行の下に出す
+      const lastRect = rects[rects.length - 1];
+      const right = pr.left + (lastRect.x + lastRect.w) * pr.width;
+      const bottom = pr.top + (lastRect.y + lastRect.h) * pr.height;
+      setMenu({
+        x: Math.min(right - sr.left, sr.width - 360),
+        y: bottom - sr.top + scrollRef.current.scrollTop + 6,
+        sel: { page: pageNo, rects, text, around, crop },
+      });
+    },
+    [pageText, doc, snappedSelection],
+  );
 
   const run = (a: SelectionAction) => {
     if (!menu) return;
@@ -327,6 +468,9 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
       <div
         className="pdf-scroll"
         ref={scrollRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
         onMouseUp={onMouseUp}
         onScroll={onScroll}
         style={{ position: "relative" }}
@@ -464,9 +608,28 @@ function PageView({
     const tl = textRef.current;
     tl.replaceChildren();
     const layer = new pdfjs.TextLayer({ textContentSource: page.streamTextContent(), container: tl, viewport: vp });
-    void layer.render().catch(() => undefined);
+    textLayers.set(tl, layer);
+    // pdf.js はテキスト層を回転前の向き・大きさで組み、styles.css の [data-main-rotation] で層ごと回す。
+    // 大きさの式（round(down, …, var(--scale-round-x))）はビューアの変数が無いと効かないので、ここで決める
+    const turned = vp.rotation % 180 !== 0;
+    tl.style.width = `${turned ? vp.height : vp.width}px`;
+    tl.style.height = `${turned ? vp.width : vp.height}px`;
+    let detach: (() => void) | null = null;
+    let cancelled = false;
+    void layer.render().then(
+      () => {
+        if (cancelled) return;
+        // 文字の無いところへ指が出ても選択が飛ばないように（src/lib/textSelection.ts）
+        detach = attachEndOfContent(tl);
+        // 選んだときに待たないよう、グリフの位置を先に求めておく
+        void pageModel(doc, n);
+      },
+      () => undefined,
+    );
     task.promise.catch(() => undefined);
     return () => {
+      cancelled = true;
+      detach?.();
       task.cancel();
       layer.cancel();
     };
@@ -500,6 +663,8 @@ function PageView({
         )}
       </div>
       {marks.length > 0 && <SentenceMarkLayer marks={marks} activeId={pageActive} hoverId={hover} />}
+      {/* 選んでいる範囲（グリフに合わせた矩形）。中身は PdfView の updatePreview が直接描く */}
+      <div className="sel-preview" aria-hidden="true" />
       <div className="textLayer" ref={textRef} />
       {highlights.length > 0 && (
         <div style={{ position: "absolute", inset: 0, zIndex: 3, pointerEvents: "none" }}>
@@ -507,6 +672,9 @@ function PageView({
             const r = hl.rects[0];
             // 位置が分からないマーカー（AI エージェントが本文から見つけられなかったもの）は、訳タブにだけ出す
             if (!r) return null;
+            // 印は本文に重ねない: マーカーの最初の行の高さで、近い側のページの余白に置く
+            // （以前は行末の 2px 右に置いていて、文の途中で終わるマーカーでは次の語を隠していた）
+            const nearLeft = r.x + r.w / 2 < 0.5;
             return (
               <button
                 key={hl.id}
@@ -514,7 +682,7 @@ function PageView({
                 title="マーカーを開く"
                 onClick={() => onHighlightClick(hl.id)}
                 style={{
-                  position: "absolute", left: `calc(${(r.x + r.w) * 100}% + 2px)`, top: `${r.y * 100}%`,
+                  position: "absolute", ...(nearLeft ? { left: 4 } : { right: 4 }), top: `calc(${(r.y + r.h / 2) * 100}% - 5px)`,
                   width: 10, height: 10, borderRadius: 5, padding: 0, border: "1px solid rgba(0,0,0,.35)",
                   background: `var(--mk-${hl.color})`, pointerEvents: "auto", cursor: "pointer",
                 }}
@@ -528,21 +696,134 @@ function PageView({
   );
 }
 
-/** 同じ行に並ぶ矩形をまとめる。テキスト層は単語ごとに分かれているため。 */
-function mergeRects(rs: Rect[]): Rect[] {
-  const sorted = [...rs].sort((a, b) => a.y - b.y || a.x - b.x);
-  const out: Rect[] = [];
-  for (const r of sorted) {
-    const last = out[out.length - 1];
-    if (last && Math.abs(last.y - r.y) < r.h * 0.5 && r.x <= last.x + last.w + 0.02) {
-      const x2 = Math.max(last.x + last.w, r.x + r.w);
-      const y2 = Math.max(last.y + last.h, r.y + r.h);
-      last.x = Math.min(last.x, r.x);
-      last.y = Math.min(last.y, r.y);
-      last.w = x2 - last.x;
-      last.h = y2 - last.y;
-    } else out.push({ ...r });
+/** テキスト層の要素から、その TextLayer（textDivs と元の文字列を持つ）を引く。 */
+const textLayers = new WeakMap<HTMLElement, pdfjs.TextLayer>();
+
+/**
+ * ページの文字の並び（src/lib/pageText.ts）。項目の矩形（縦は行の帯）と各文字の横位置（src/lib/glyphs.ts）を持つ。
+ * 値はフレーム（文字が横に流れる向き）での割合で、rotation はフレームから表示の向きまでの角度。
+ * AI エージェントのマーカー（server/pdftext.ts の readPages）と同じ関数で作るので、同じ文なら同じ矩形になる。
+ */
+interface PageModel {
+  items: LaidItem[];
+  rotation: number;
+}
+
+/** 文書ごと・ページごとの PageModel。 */
+const modelCache = new WeakMap<PDFDocumentProxy, Map<number, Promise<PageModel | null>>>();
+/** 求め終えた PageModel（選択中の表示は待たずに描きたいので、同期で引けるようにする）。 */
+const modelReady = new WeakMap<PDFDocumentProxy, Map<number, PageModel | null>>();
+
+function readyModel(doc: PDFDocumentProxy, n: number): PageModel | null {
+  return modelReady.get(doc)?.get(n) ?? null;
+}
+
+function pageModel(doc: PDFDocumentProxy, n: number): Promise<PageModel | null> {
+  let byPage = modelCache.get(doc);
+  if (!byPage) modelCache.set(doc, (byPage = new Map()));
+  let hit = byPage.get(n);
+  if (!hit) {
+    hit = (async () => {
+      const page = await doc.getPage(n);
+      const vp = page.getViewport({ scale: 1 });
+      const tc = await page.getTextContent();
+      const raws = tc.items.filter((i): i is typeof i & TextItemLike => "str" in i);
+      const frameRotation = textRotation(raws, vp.rotation, (rotation) => page.getViewport({ scale: 1, rotation }));
+      const fvp = frameRotation === vp.rotation ? vp : page.getViewport({ scale: 1, rotation: frameRotation });
+      const items = layoutItems(raws, tc.styles, fvp);
+      try {
+        const ops = await page.getOperatorList({ annotationMode: pdfjs.AnnotationMode.DISABLE });
+        const getFont = (name: string) => {
+          try {
+            return page.commonObjs.has(name) ? (page.commonObjs.get(name) as FontLike) : null;
+          } catch {
+            return null;
+          }
+        };
+        const xs = attachGlyphs(items.map((it) => it.str), layoutGlyphs(pdfjs.OPS, ops.fnArray, ops.argsArray, getFont, fvp.transform), fvp.width);
+        if (xs) items.forEach((it, i) => (it.xs = xs[i]));
+      } catch {
+        // 描画命令が読めなくても、文字数での按分にはできる
+      }
+      return { items, rotation: (vp.rotation - frameRotation + 360) % 360 };
+    })().catch(() => null);
+    void hit.then((m) => {
+      let ready = modelReady.get(doc);
+      if (!ready) modelReady.set(doc, (ready = new Map()));
+      ready.set(n, m);
+    });
+    byPage.set(n, hit);
   }
+  return hit;
+}
+
+/** 画面上の点にある文字の位置（テキスト層の文字の中だけ）。 */
+function caretAt(x: number, y: number): { node: Node; offset: number } | null {
+  const d = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  let hit: { node: Node; offset: number } | null = null;
+  if (d.caretPositionFromPoint) {
+    const p = d.caretPositionFromPoint(x, y);
+    if (p) hit = { node: p.offsetNode, offset: p.offset };
+  } else if (d.caretRangeFromPoint) {
+    const r = d.caretRangeFromPoint(x, y);
+    if (r) hit = { node: r.startContainer, offset: r.startOffset };
+  }
+  return hit && hit.node.nodeType === Node.TEXT_NODE && hit.node.parentElement?.closest(".textLayer") ? hit : null;
+}
+
+/**
+ * 今の選択の範囲と向き。
+ * Chromium は、文字の境目ちょうど（±0.25px）で押したドラッグを選択にせず、カーソルを動かすだけになる
+ * （素の pdf.js でも起きる。実測でドラッグの 8%）。そのときは押した位置と今の位置から範囲を作る。
+ */
+function currentSelection(p: { down: { x: number; y: number } | null; cur: { x: number; y: number } } | null): { range: Range; forward: boolean } | null {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return null;
+  if (!sel.isCollapsed) {
+    const range = sel.getRangeAt(0);
+    // 選択の向き: anchor（押した側）が範囲の先頭なら前向き
+    return { range, forward: sel.anchorNode === range.startContainer && sel.anchorOffset === range.startOffset };
+  }
+  if (!p?.down || Math.hypot(p.cur.x - p.down.x, p.cur.y - p.down.y) < 4) return null;
+  const a = caretAt(p.down.x, p.down.y);
+  const b = caretAt(p.cur.x, p.cur.y);
+  if (!a || !b) return null;
+  const range = document.createRange();
+  range.setStart(a.node, a.offset);
+  const forward = range.comparePoint(b.node, b.offset) >= 0;
+  if (forward) range.setEnd(b.node, b.offset);
+  else {
+    range.setStart(b.node, b.offset);
+    range.setEnd(a.node, a.offset);
+  }
+  return range.collapsed ? null : { range, forward };
+}
+
+function toFraction(r: DOMRect, pr: DOMRect): Rect {
+  return { x: (r.left - pr.left) / pr.width, y: (r.top - pr.top) / pr.height, w: r.width / pr.width, h: r.height / pr.height };
+}
+
+/**
+ * 選択範囲を、テキスト層の各項目の「実際に選ばれた文字」の範囲にする（b は含まない）。
+ * 行末の余白まで引きずった選択や、要素の境目で終わる選択でも、選ばれていない文字は含めない。
+ * テキスト層の文字列が PageModel と食い違う項目（読み込みの途中など）は飛ばす。
+ */
+function selectionSegments(range: Range, layer: pdfjs.TextLayer, model: PageModel): Segment[] {
+  const out: Segment[] = [];
+  layer.textDivs.forEach((div, k) => {
+    const t = div.firstChild;
+    if (!t || t.nodeType !== Node.TEXT_NODE || !range.intersectsNode(t)) return;
+    const str = t.textContent ?? "";
+    if (model.items[k]?.str !== str) return;
+    let a = t === range.startContainer ? range.startOffset : 0;
+    let b = t === range.endContainer ? range.endOffset : str.length;
+    while (a < b && /\s/.test(str[a])) a++;
+    while (b > a && /\s/.test(str[b - 1])) b--;
+    if (a < b) out.push({ k, a, b });
+  });
   return out;
 }
 

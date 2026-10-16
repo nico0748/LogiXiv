@@ -5,7 +5,10 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./band": { "types": "./dist/band.d.ts", "default": "./dist/band.js" }
+  },
   "scripts": {
     "build": "tsc -b",
     "test": "node --test --experimental-strip-types test/*.test.ts"

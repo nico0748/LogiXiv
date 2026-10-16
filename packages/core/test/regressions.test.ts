@@ -887,3 +887,12 @@ test('検索は本文として扱わなかった行も拾い、本文と見分�
     '付物だけが後ろにまとめられている（紙面のどこにあるか分からなくなる）',
   );
 });
+
+test('文の枠の端の印（rectEdges）は読み直しても残り、知らない値は捨てる', () => {
+  const read = (rectEdges: unknown) =>
+    sanitizeDocument({ structure: { sentences: [], rectEdges }, annotations: null }, { id: 'doc_x' }).document.structure.rectEdges;
+  assert.equal(read('glyph'), 'glyph');
+  assert.equal(read('estimate'), 'estimate');
+  assert.equal(read('pixels'), undefined);
+  assert.equal(read(undefined), undefined);
+});
