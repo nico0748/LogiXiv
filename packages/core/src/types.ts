@@ -238,6 +238,12 @@ export interface DocumentStructure {
    * 枠の座標だけの話で、本文・ハッシュは変わらない（STRUCTURE_VERSION は上げない）。
    */
   rectEdges?: 'glyph' | 'estimate';
+  /**
+   * 文の枠の縦の帯（上端・下端）を、どの版の規則で決めたか（band.ts の RECT_BAND_VERSION）。
+   * 無い文書は「ベースライン − 字高 〜 ベースライン」の古い式で、字より 0.25em ほど上にずれている。
+   * 座標だけの印で、本文・ハッシュは変わらない。
+   */
+  rectBand?: number;
 }
 
 export type TranslationSource = 'claude' | 'human' | 'import';

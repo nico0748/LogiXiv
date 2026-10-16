@@ -23,6 +23,13 @@
  *      行に枠が 1 つも無ければ「行ごと欠落」。
  * 文頭が行の途中にある文（＝同じ行に前の文が居る）だけを抜き出した数も出す。
  * 崩れが起きるのはほぼそこなので、全体の割合だけだと薄まって見えない。
+ *
+ * 続けて「全行・4 辺」の検査をする（こちらは基準を満たさなければ終了コード 1）:
+ *   - 対象: 文の枠（解析 → グリフに合わせた後。アプリと同じ）と、AI エージェントのマーカー
+ *     （MCP の add_highlight と同じ findText。画面で選んだマーカーも同じ関数で矩形を作る）。
+ *   - すべての行の矩形について、左右の端が字を 0.5pt より多く割らない（中の字を欠かない・外の字にかからない）、
+ *     上下の端が字の帯（MuPDF の字の箱の中央値）から ±0.05em 以内。
+ *   - 回転したページ（/Rotate 90）と切り抜いたページ（CropBox）も、実物の 2 段組から作って測る。
  */
 
 import { spawnSync } from 'node:child_process';
@@ -33,8 +40,10 @@ import { fileURLToPath } from 'node:url';
 import type { Rect, Sentence } from '../packages/core/src/index.ts';
 import { parseWithPdfJs } from '../packages/server/src/fallback.ts';
 import { makePaperPdf, type PaperSpec } from './make-paper-pdf.ts';
-import { readPages } from '../apps/reader/server/pdftext.ts';
+import { degrees, PDFDocument } from 'pdf-lib';
+import { findText, readPages } from '../apps/reader/server/pdftext.ts';
 import { glyphPagesFromText, refineStructureRects } from '../apps/reader/server/refineRects.ts';
+import { fromDisplay } from '../apps/reader/src/lib/pageText.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const verbose = process.argv.includes('--verbose');
@@ -48,10 +57,14 @@ interface Glyph {
   y1: number;
 }
 
+/** ページごとの /Rotate（glyph-truth.py の座標は回転前の向き）。glyphs() が埋める。 */
+const truthRotation = new Map<string, Map<number, number>>();
+
 function glyphs(pdfPath: string): Map<number, Glyph[]> | null {
   const run = spawnSync('python3', [join(here, 'glyph-truth.py'), pdfPath], { encoding: 'utf8', maxBuffer: 1 << 28 });
   if (run.status !== 0) return null;
-  const pages = JSON.parse(run.stdout) as { page: number; chars: [string, number, number, number, number][] }[];
+  const pages = JSON.parse(run.stdout) as { page: number; rotation?: number; chars: [string, number, number, number, number][] }[];
+  truthRotation.set(pdfPath, new Map(pages.map((p) => [p.page, p.rotation ?? 0])));
   return new Map(pages.map((p) => [p.page, p.chars.map(([c, x0, y0, x1, y1]) => ({ c, x0, y0, x1, y1 }))]));
 }
 
@@ -261,13 +274,14 @@ interface Row {
 const refinedRows: Row[] = [];
 const timings: { label: string; glyphMs: number; refineMs: number; pages: number; sentences: number; snapped: number; kept: number }[] = [];
 
-async function run(label: string, pdf: Uint8Array): Promise<Row | null> {
+async function run(label: string, pdf: Uint8Array, queriesFrom?: Sentence[], noY = false): Promise<Row | null> {
   const dir = mkdtempSync(join(tmpdir(), 'paperlens-edges-'));
   const path = join(dir, 'paper.pdf');
   writeFileSync(path, pdf);
   const truth = glyphs(path);
   if (!truth) return null;
   const structure = await parseWithPdfJs(pdf);
+  await fourEdges(label, path, structure, truth, queriesFrom, noY);
   if (refine) {
     const t0 = performance.now();
     const pages = glyphPagesFromText(await readPages(path, { glyphs: true }), structure.pageSizes);
@@ -281,6 +295,135 @@ async function run(label: string, pdf: Uint8Array): Promise<Row | null> {
     refinedRows.push({ label, ...measureEdges(refined.sentences, truth, `${label} / glyph`) });
   }
   return { label, ...measureEdges(structure.sentences, truth, label) };
+}
+
+// --- 全行・4 辺 --------------------------------------------------------------------
+
+/** 左右の端の許容（pt）と、上下の端の許容（em）。 */
+const X_TOL = 0.5;
+const Y_TOL_EM = 0.05;
+
+interface FourEdge {
+  label: string;
+  kind: '文の枠' | 'MCP';
+  rects: number;
+  /** 左右の端が字を 0.5pt より多く割った矩形 */
+  xBad: number;
+  /** 上下の端が帯から 0.05em より外れた矩形 */
+  yBad: number;
+  /** 測れなかった（行に字が無い）矩形 */
+  skipped: number;
+  /** 上下を測らない（正解の字の箱が書体の実際の帯と違う。下の synthetic を参照） */
+  noY?: boolean;
+  worstX: number;
+  worstYEm: number;
+}
+const fourEdgeRows: FourEdge[] = [];
+const fourEdgeExamples: string[] = [];
+
+function checkRect(r: { x: number; y: number; w: number; h: number }, list: readonly Glyph[], row: FourEdge, what: () => string): void {
+  const line = list.filter((g) => {
+    const overlap = Math.min(r.y + r.h, g.y1) - Math.max(r.y, g.y0);
+    return overlap > 0.5 * Math.min(r.h, g.y1 - g.y0);
+  });
+  const inside = line.filter((g) => (g.x0 + g.x1) / 2 >= r.x && (g.x0 + g.x1) / 2 <= r.x + r.w);
+  if (inside.length === 0) {
+    row.skipped++;
+    return;
+  }
+  row.rects++;
+  // 左右: 中の字を欠く量・外の字にかかる量
+  let dx = 0;
+  for (const g of inside) dx = Math.max(dx, r.x - g.x0, g.x1 - (r.x + r.w));
+  const overlap = (a: Glyph, x0: number, x1: number) => Math.max(0, Math.min(a.x1, x1) - Math.max(a.x0, x0));
+  for (const g of line) {
+    if (inside.includes(g)) continue;
+    // 和文の約物の詰め（「。」の箱に次の字の箱が重なる）のように、字の箱どうしが元から重なっている分は数えない
+    const inherent = Math.max(0, ...inside.map((h) => overlap(g, h.x0, h.x1)));
+    dx = Math.max(dx, overlap(g, r.x, r.x + r.w) - inherent);
+  }
+  // 上下: 文の枠は字の箱の中央値（上付き・下付きに引っ張られない帯）、
+  // マーカーは中の字の箱の外接（行の項目をまとめるとき外接矩形にするので、添字の字まで覆う）
+  const mid = (vs: number[]) => [...vs].sort((a, b) => a - b)[vs.length >> 1]!;
+  const union = row.kind === 'MCP';
+  const y0 = union ? Math.min(...inside.map((g) => g.y0)) : mid(inside.map((g) => g.y0));
+  const y1 = union ? Math.max(...inside.map((g) => g.y1)) : mid(inside.map((g) => g.y1));
+  const em = mid(inside.map((g) => g.y1 - g.y0));
+  let dyEm = Math.max(Math.abs(r.y - y0), Math.abs(r.y + r.h - y1)) / em;
+  if (row.noY) dyEm = 0;
+  row.worstX = Math.max(row.worstX, dx);
+  row.worstYEm = Math.max(row.worstYEm, dyEm);
+  if (dx > X_TOL) row.xBad++;
+  if (dyEm > Y_TOL_EM) row.yBad++;
+  if ((dx > X_TOL || dyEm > Y_TOL_EM) && fourEdgeExamples.length < 60) {
+    fourEdgeExamples.push(`  [${row.label} / ${row.kind}] 左右 ${dx.toFixed(2)}pt 上下 ${dyEm.toFixed(3)}em: ${what()}`);
+  }
+}
+
+/**
+ * 文の枠（グリフに合わせた後）と MCP のマーカーを、全行・4 辺で測る。
+ * queriesFrom を渡すと、MCP の検索語はその文（回転・切り抜き前の PDF の解析結果）から取る。
+ */
+async function fourEdges(
+  label: string,
+  path: string,
+  structure: Awaited<ReturnType<typeof parseWithPdfJs>>,
+  truth: Map<number, Glyph[]>,
+  queriesFrom?: Sentence[],
+  noY = false,
+): Promise<void> {
+  const pages = await readPages(path, { glyphs: true });
+  const rotation = truthRotation.get(path) ?? new Map<number, number>();
+  const empty = (kind: FourEdge['kind']): FourEdge => ({ label, kind, rects: 0, xBad: 0, yBad: 0, skipped: 0, worstX: 0, worstYEm: 0, noY });
+
+  // 文の枠: アプリのサーバーと同じく、解析のあとグリフに合わせる。回転したページは対象外（枠を描く座標系が違う）
+  const box = empty('文の枠');
+  const refined = refineStructureRects(structure, glyphPagesFromText(pages, structure.pageSizes)).structure;
+  for (const s of refined.sentences) {
+    for (const r of s.rects) {
+      if ((rotation.get(r.page) ?? 0) !== 0) continue;
+      checkRect(r, truth.get(r.page) ?? [], box, () => s.text.slice(0, 60));
+    }
+  }
+  if (box.rects + box.skipped > 0) fourEdgeRows.push(box);
+
+  // MCP: 文ごとに findText。矩形は表示の向きのページに対する割合なので、回転前の pt に戻して比べる
+  const mcp = empty('MCP');
+  for (const s of queriesFrom ?? structure.sentences) {
+    const m = findText(pages, s.text, s.page);
+    if (!m) continue;
+    const p = pages[m.page - 1]!;
+    const rot = rotation.get(m.page) ?? 0;
+    // glyph-truth.py の座標は /Rotate を掛ける前。pdftext.ts の rotation（フレームから表示）が同じ角度のときだけ測れる
+    if ((p.rotation ?? 0) !== rot) continue;
+    const turned = rot % 180 !== 0;
+    const fw = turned ? p.height : p.width;
+    const fh = turned ? p.width : p.height;
+    for (const r of m.rects) {
+      const [ax, ay] = fromDisplay(r.x, r.y, rot);
+      const [bx, by] = fromDisplay(r.x + r.w, r.y + r.h, rot);
+      const fr = { x: Math.min(ax, bx) * fw, y: Math.min(ay, by) * fh, w: Math.abs(bx - ax) * fw, h: Math.abs(by - ay) * fh };
+      checkRect(fr, truth.get(m.page) ?? [], mcp, () => s.text.slice(0, 60));
+    }
+  }
+  fourEdgeRows.push(mcp);
+}
+
+function printFourEdges(): boolean {
+  console.log(`\n全行・4 辺（左右: 字を ${X_TOL}pt より多く割らない、上下: 字の帯から ±${Y_TOL_EM}em 以内）`);
+  console.log('対象                          種類     矩形   左右NG   上下NG  測れず  左右最大pt  上下最大em');
+  let ok = true;
+  for (const r of fourEdgeRows) {
+    // 基準: 左右・上下とも、外れる矩形が 1% 以下
+    const bad = r.xBad / Math.max(1, r.rects) > 0.01 || r.yBad / Math.max(1, r.rects) > 0.01;
+    if (bad) ok = false;
+    console.log(
+      `${r.label.padEnd(28)} ${r.kind.padEnd(6)} ${String(r.rects).padStart(6)} ${pct(r.xBad, r.rects)} ${pct(r.yBad, r.rects)} ${String(r.skipped).padStart(6)}` +
+        `  ${r.worstX.toFixed(2).padStart(9)}  ${r.noY ? '        -' : r.worstYEm.toFixed(3).padStart(9)}${bad ? '  ← 基準外' : ''}`,
+    );
+  }
+  if (verbose || !ok) console.log(fourEdgeExamples.join('\n'));
+  return ok;
 }
 
 const pct = (n: number, d: number): string => (d === 0 ? '   -' : `${((n / d) * 100).toFixed(1)}%`.padStart(6));
@@ -318,13 +461,34 @@ const synthetic: [string, PaperSpec][] = [
   ['合成 / 2 段組 両端揃え', { pages: 4, columns: 2, justified: true }],
 ];
 for (const [label, spec] of synthetic) {
-  const row = await run(label, makePaperPdf(spec).pdf);
+  // 合成 PDF は埋め込まない標準書体（Times / Helvetica）で組む。MuPDF はその字の箱を代わりの書体の
+  // ascender（約 1.05em）で作るので、描いた字の帯（−0.76〜+0.24em）と比べられない。上下は測らない
+  const row = await run(label, makePaperPdf(spec).pdf, undefined, true);
   if (row) rows.push(row);
 }
 const realDir = join(here, 'real-papers');
 for (const name of readdirSync(realDir).filter((n) => n.endsWith('.pdf')).sort()) {
   const row = await run(`実物 / ${name.replace(/\.pdf$/, '')}`, new Uint8Array(readFileSync(join(realDir, name))));
   if (row) rows.push(row);
+}
+
+// 回転・切り抜きしたページ: 実物の 2 段組から作る（検索語は元の PDF の文）
+{
+  const source = readFileSync(join(realDir, 'twocolumn.pdf'));
+  const queries = (await parseWithPdfJs(new Uint8Array(source))).sentences;
+  const variant = async (edit: (page: ReturnType<PDFDocument['getPage']>) => void) => {
+    const doc = await PDFDocument.load(source);
+    for (const page of doc.getPages()) edit(page);
+    return doc.save();
+  };
+  for (const [label, edit] of [
+    ['実物 / twocolumn /Rotate 90', (p) => p.setRotation(degrees(90))],
+    ['実物 / twocolumn /Rotate 270', (p) => p.setRotation(degrees(270))],
+    // 左 40pt・上 60pt を切り落とす（PDF の座標は下から）
+    ['実物 / twocolumn CropBox', (p) => p.setCropBox(40, 30, p.getWidth() - 60, p.getHeight() - 90)],
+  ] as [string, (page: ReturnType<PDFDocument['getPage']>) => void][]) {
+    await run(label, await variant(edit), queries);
+  }
 }
 
 function withTotal(list: Row[]): Row[] {
@@ -339,6 +503,7 @@ function withTotal(list: Row[]): Row[] {
   }
   return [...list, total];
 }
+const fourEdgesOk = printFourEdges();
 if (refine) console.log('\n== 見積もりのみ（packages/core） ==');
 print(withTotal(rows));
 if (refine) {
@@ -348,4 +513,8 @@ if (refine) {
   for (const t of timings) {
     console.log(`${t.label.padEnd(30)} ${String(t.sentences).padStart(4)} 文  グリフ可 ${t.pages} ページ  読み取り ${t.glyphMs.toFixed(0).padStart(5)}ms  合わせ込み ${t.refineMs.toFixed(1).padStart(6)}ms  端 ${t.snapped} 合わせた / ${t.kept} そのまま`);
   }
+}
+if (!fourEdgesOk) {
+  console.log('\n全行・4 辺の基準を満たしていません。');
+  process.exit(1);
 }

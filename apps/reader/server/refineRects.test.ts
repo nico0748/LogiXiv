@@ -1,7 +1,7 @@
 // 文の枠の端をグリフに合わせる処理（refineRects.ts）の単体テスト。グリフは合成する。
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DocumentStructure, Rect, Sentence } from "@paperlens/core";
+import { type DocumentStructure, RECT_BAND_VERSION, type Rect, type Sentence } from "@paperlens/core";
 import { type GlyphBox, type GlyphPage, glyphPagesFromText, refineSentenceRects, refineStructureRects } from "./refineRects.ts";
 
 /** 1 行を左から並べる。width(ch) で字幅、空白は space の幅（両端揃えなら広い）。 */
@@ -120,4 +120,35 @@ test("構造全体: 本文と nonBody の端を合わせ、rectEdges を glyph �
   close(structure.sentences[0].rects[0].x + structure.sentences[0].rects[0].w, at(glyphs, line, ".", 0).x1, "本文の文末");
   close(structure.nonBody![0].rects[0].x, f.x0, "nonBody の文頭");
   assert.equal(stats.startSnapped + stats.endSnapped, 2);
+});
+
+test("枠の縦を、その行のグリフの帯に合わせる（古い式の 0.25em 上ずれを直す）。何行にもまたがる枠は潰さない", () => {
+  const line = "Every block keeps its top scoring keys.";
+  // グリフの帯は y=100〜110。古い解析の枠は 2.4pt 上にずれている
+  const glyphs = layLine(line, 72, 100, latin, 3);
+  const last = glyphs[glyphs.length - 1];
+  const s = sentence(line, [{ x: 72, y: 97.6, w: last.x1 - 72, h: 10 }]);
+  const { structure, stats } = refineStructureRects(structureOf([s]), [{ page: 1, glyphs }]);
+  const r = structure.sentences[0].rects[0];
+  close(r.y, 100, "上端");
+  close(r.h, 10, "高さ");
+  assert.equal(stats.bandSnapped, 1);
+  assert.equal(structure.rectBand, RECT_BAND_VERSION);
+
+  // 図の中の文字をまとめた背の高い枠（付物）は、1 行の帯にしない
+  const tall = sentence(line, [{ x: 72, y: 90, w: last.x1 - 72, h: 40 }]);
+  assert.equal(refineSentenceRects(tall, pages(glyphs)).rects[0].h, 40);
+});
+
+test("行の途中の端（文頭・文末ではない行末）が字を割っていたら、その字の端へ寄せる", () => {
+  const l1 = layLine("The first line of a long sentence", 72, 100, latin, 3);
+  const l2 = layLine("ends on the second line.", 72, 112, latin, 3);
+  const end1 = l1[l1.length - 1];
+  const s = sentence("The first line of a long sentence ends on the second line.", [
+    // 1 行目の右端が最後の字の 8 割のところで止まっている（両端揃えの行末の見積もり）
+    { x: 72, y: 100, w: end1.x0 + (end1.x1 - end1.x0) * 0.8 - 72, h: 10 },
+    { x: 72, y: 112, w: l2[l2.length - 1].x1 - 72, h: 10 },
+  ]);
+  const out = refineSentenceRects(s, pages([...l1, ...l2]));
+  close(out.rects[0].x + out.rects[0].w, end1.x1, "1 行目の右端");
 });

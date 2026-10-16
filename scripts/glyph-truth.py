@@ -6,8 +6,11 @@ pdf.js とは別の実装（MuPDF / PyMuPDF）で取るのが要点。解析器�
 
   python3 scripts/glyph-truth.py paper.pdf > glyphs.json
 
-出力: [{"page": 1, "chars": [[c, x0, y0, x1, y1], ...]}, ...]
+出力: [{"page": 1, "rotation": 0, "chars": [[c, x0, y0, x1, y1], ...]}, ...]
 座標は左上原点・pt（pdf.js の viewport scale=1 と同じ向き）。合字は展開する（ﬁ → f, i）。
+CropBox で切り抜いたページは、切り抜いた紙面の左上が原点。
+/Rotate を立てたページは**回転前の向き**（MuPDF の rawdict のまま）。rotation にその角度を入れるので、
+比べる側（measure-edges.ts）は表示の向きの矩形を回転前へ戻してから比べる。
 """
 
 import json
@@ -35,5 +38,5 @@ for index, page in enumerate(doc):
                         continue
                     x0, y0, x1, y1 = ch["bbox"]
                     chars.append([c, round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)])
-    out.append({"page": index + 1, "chars": chars})
+    out.append({"page": index + 1, "rotation": page.rotation, "chars": chars})
 json.dump(out, sys.stdout, ensure_ascii=False)

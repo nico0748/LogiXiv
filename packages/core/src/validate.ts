@@ -270,6 +270,7 @@ export function sanitizeStructure(value: unknown, report: SanitizeReport, remap?
     quality: sanitizeQuality(source['quality']),
     // 枠の端の決め方。座標だけの印なので、知らない値は捨てる（無い＝古い解析として扱われる）。
     ...(source['rectEdges'] === 'glyph' || source['rectEdges'] === 'estimate' ? { rectEdges: source['rectEdges'] } : {}),
+    ...(typeof source['rectBand'] === 'number' && Number.isInteger(source['rectBand']) && source['rectBand'] > 0 ? { rectBand: source['rectBand'] } : {}),
   };
 }
 

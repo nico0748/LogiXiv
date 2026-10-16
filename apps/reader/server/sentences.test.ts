@@ -12,6 +12,7 @@ process.env.PAPERLENS_GROBID_URL = "http://127.0.0.1:9";
 const { importPaper } = await import("../src/lib/papers.ts");
 const { NodeVault } = await import("./nodeVault.ts");
 const S = await import("./sentences.ts");
+const { RECT_BAND_VERSION } = await import("@paperlens/core");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "paperlens-sentences-"));
 const vault = new NodeVault(root);
@@ -43,7 +44,7 @@ test("解析前は none、解析中は parsing、終わると ready", async () =
   assert.equal(doc.structure.parser, "fallback");
   assert.ok(doc.structure.sentences.length > 5, `${doc.structure.sentences.length}`);
   assert.ok(fs.existsSync(file()));
-  // 文の枠の端は実際のグリフに合わせてあり、その印が保存される（画面は印が無い文書に再解析を案内する）
+  // 文の枠の端は実際のグリフに合わせてあり、その印が保存される（印が無い古い文書は読み込むときに直す）
   assert.equal(doc.structure.rectEdges, "glyph");
   // GROBID が使えなかったことは warning で伝わる
   assert.match((await S.sentencesState(vault, id) as { warning?: string }).warning ?? "", /GROBID/);
@@ -114,6 +115,36 @@ test("解析し直しても、訳と区切りの直しは残る", async () => {
   // 読み直しても中身が変わらない（sanitize が何も落とさない）
   const raw = JSON.parse(fs.readFileSync(file(), "utf8"));
   assert.deepEqual(doc.structure, raw.structure);
+});
+
+test("枠の端・帯を合わせる前に解析した文書は、読み込むときに直して書き戻す（訳はそのまま）", async () => {
+  const fresh = await ready();
+  assert.equal(fresh.structure.rectBand, RECT_BAND_VERSION);
+  const t = fresh.structure.sentences[2];
+  await S.setTranslation(vault, id, t.hash, "古い文書の訳", "human");
+  // 古い解析の文書を作る: 印が無く、枠は「ベースライン − 字高 〜 ベースライン」（帯より上にずれている）
+  const raw = JSON.parse(fs.readFileSync(file(), "utf8"));
+  const want = raw.structure.sentences.map((x: { rects: { y: number; h: number }[] }) => x.rects.map((r) => [r.y, r.h]));
+  delete raw.structure.rectEdges;
+  delete raw.structure.rectBand;
+  for (const x of raw.structure.sentences) for (const r of x.rects) r.y -= 2.4;
+  fs.writeFileSync(file(), JSON.stringify(raw));
+  assert.ok(S.needsRectUpgrade(raw));
+
+  const doc = await ready();
+  assert.equal(doc.structure.rectEdges, "glyph");
+  assert.equal(doc.structure.rectBand, RECT_BAND_VERSION);
+  assert.equal(doc.annotations.translations[t.hash].text, "古い文書の訳");
+  doc.structure.sentences.forEach((x, i) =>
+    x.rects.forEach((r, j) => {
+      assert.ok(Math.abs(r.y - want[i][j][0]) < 0.01, `文 ${i} の ${j} 行目の上端: ${r.y} != ${want[i][j][0]}`);
+      assert.ok(Math.abs(r.h - want[i][j][1]) < 0.01, `文 ${i} の ${j} 行目の高さ`);
+    }),
+  );
+  // 書き戻してあるので、次からは直さない
+  const saved = JSON.parse(fs.readFileSync(file(), "utf8"));
+  assert.equal(saved.structure.rectBand, RECT_BAND_VERSION);
+  assert.equal(S.needsRectUpgrade(saved), false);
 });
 
 test("壊れたファイルは failed で伝え、解析し直すと退避して作り直す", async () => {

@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { parentPort, workerData } from 'node:worker_threads';
 import {
+  bandMetrics,
   buildSentencesFromChunks,
   guessTitleFromChunks,
   type FallbackResult,
@@ -65,6 +66,9 @@ interface PlacedItem {
   angle: number;
   /** 等幅書体か（文の枠を文字片の途中で割るときの幅の見積もりに使う）。 */
   mono: boolean;
+  /** ベースラインから字の帯の上端・下端まで（em）。書体の ascent / descent から（@paperlens/core の bandMetrics）。 */
+  ascent: number;
+  descent: number;
 }
 
 /** 15 度。これより小さい傾きは、同じ向きの組版の誤差とみなす。 */
@@ -194,7 +198,7 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
       pageSizes.push({ page: pageNumber, width: viewport.width, height: viewport.height });
 
       const content = await page.getTextContent();
-      const styles = content.styles as Record<string, { fontFamily?: string } | undefined>;
+      const styles = content.styles as Record<string, { fontFamily?: string; ascent?: number; descent?: number } | undefined>;
       const pageItems: PlacedItem[] = [];
       for (const raw of content.items as unknown[]) {
         const item = raw as PdfJsTextItem;
@@ -218,8 +222,12 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
         const width = item.width;
         // 等幅かどうかは pdf.js が書体の情報（FixedPitch など）から決めた代替書体名で分かる。
         // セリフ／サンセリフの方は当てにならない（Computer Modern が sans-serif と出る）ので使わない。
-        const mono = styles[item.fontName ?? '']?.fontFamily === 'monospace';
-        pageItems.push({ text: item.str, x: tx[4] ?? 0, y: tx[5] ?? 0, width, height, angle, mono });
+        const style = styles[item.fontName ?? ''];
+        const mono = style?.fontFamily === 'monospace';
+        // 縦の帯は書体の ascent / descent から決める（画面のマーカー・MCP のマーカーと同じ lineBand の規則）。
+        // 以前は「ベースライン − 字高 〜 ベースライン」で、文の枠が字より 0.25em ほど上にずれていた。
+        const { ascent, descent } = bandMetrics(style?.ascent, style?.descent);
+        pageItems.push({ text: item.str, x: tx[4] ?? 0, y: tx[5] ?? 0, width, height, angle, mono, ascent, descent });
       }
 
       // 向きは**ページ単位で**決める。
@@ -269,28 +277,41 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
         const relative = normalizeAngle(entry.angle - dominant);
         if (Math.abs(relative) < UPRIGHT_TOLERANCE) {
           // 多数派の向き＝このページの「横書き」。その軸に合わせて読み直す。
-          const [x, y] = rotatePoint(entry.x, entry.y - entry.height, -dominant);
+          // ベースラインを先に回してから、回したあとの座標系で上下に帯を取る
+          // （回す前に y から引くと、回ったページでは帯が横向きに付く）。
+          const [x, baseline] = rotatePoint(entry.x, entry.y, -dominant);
           chunks.push({
             page: pageNumber,
             text: entry.text,
             x: x + offsetX,
-            y: y + offsetY,
+            y: baseline - entry.ascent * entry.height + offsetY,
             w: entry.width,
-            h: entry.height,
+            h: (entry.ascent + entry.descent) * entry.height,
             ...(entry.mono ? { mono: true } : {}),
           });
           continue;
         }
-        // 多数派から外れた向き＝図のラベルなどの付物。外接矩形をその向きで作る。
-        const dx = Math.cos(entry.angle) * entry.width;
-        const dy = Math.sin(entry.angle) * entry.width;
+        // 多数派から外れた向き＝図のラベルなどの付物。字の進む向き u と上向き n で帯の四隅を取り、
+        // その外接矩形にする。
+        const ux = Math.cos(entry.angle);
+        const uy = Math.sin(entry.angle);
+        const xs: number[] = [];
+        const ys: number[] = [];
+        for (const t of [0, entry.width]) {
+          for (const up of [entry.ascent * entry.height, -entry.descent * entry.height]) {
+            xs.push(entry.x + ux * t + uy * up);
+            ys.push(entry.y + uy * t - ux * up);
+          }
+        }
+        const x0 = Math.min(...xs);
+        const y0 = Math.min(...ys);
         chunks.push({
           page: pageNumber,
           text: entry.text,
-          x: Math.min(entry.x, entry.x + dx),
-          y: Math.min(entry.y - entry.height, entry.y - entry.height + dy),
-          w: Math.max(entry.height, Math.abs(dx)),
-          h: Math.max(entry.height, Math.abs(dy)),
+          x: x0,
+          y: y0,
+          w: Math.max(...xs) - x0,
+          h: Math.max(...ys) - y0,
           rotated: true,
         });
       }

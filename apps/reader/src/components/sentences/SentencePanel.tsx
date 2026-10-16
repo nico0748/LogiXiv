@@ -132,9 +132,6 @@ function Ready({ paperId, doc, act, flash }: { paperId: string; doc: PaperDocume
   const [view, setView] = useState<View>("sentences");
   const [query, setQuery] = useState("");
   const [onlyUntranslated, setOnlyUntranslated] = useState(false);
-  // 枠の端をグリフに合わせる前（rectEdges の印が無い）に解析した文書への案内。閉じたらこの論文では出さない
-  const [edgeHintClosed, setEdgeHintClosed] = useState(false);
-  const [reparsing, setReparsing] = useState(false);
   const focus = useSentenceFocus();
   const marks = useSentenceMarksVisible();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -241,24 +238,6 @@ function Ready({ paperId, doc, act, flash }: { paperId: string; doc: PaperDocume
 
       {flash}
 
-      {!edgeHintClosed && !doc.structure.rectEdges && (
-        <p className="sl-flash sl-reparse-hint" role="note">
-          <span>この論文は以前の方法で解析されています。再解析すると PDF 上の文の枠が正確になります（訳は残ります）</span>
-          <button
-            type="button"
-            className="sl-btn"
-            disabled={reparsing}
-            onClick={() => {
-              setReparsing(true);
-              // 前と同じ方法で。GROBID が今は動いていなくても、簡易解析に落ちて枠は直る
-              void act(() => sentencesApi.parse(paperId, doc.structure.parser === "grobid" ? "auto" : "fallback")).finally(() => setReparsing(false));
-            }}
-          >
-            再解析
-          </button>
-          <button type="button" className="sl-icon" aria-label="閉じる" onClick={() => setEdgeHintClosed(true)}>×</button>
-        </p>
-      )}
 
       {caveats.some((c) => c.level === "danger") && (
         <div className="sl-caveat">

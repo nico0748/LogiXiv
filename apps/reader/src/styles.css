@@ -478,8 +478,18 @@ mark { background: var(--text-highlight-bg); color: inherit; border-radius: 2px;
 .pdf-page .textLayer .markedContent { display: contents; }
 .pdf-page .textLayer ::selection { background: color-mix(in srgb, var(--md-sys-color-primary) 40%, transparent); }
 .pdf-page .textLayer br::selection { background: transparent; }
+/* 文字の無いところへ指が出ても、選択の終わりをこの層に留める（src/lib/textSelection.ts が付け外しする） */
 .pdf-page .textLayer .endOfContent { display: block; position: absolute; inset: 100% 0 0; z-index: 0; cursor: default; user-select: none; }
 .pdf-page .textLayer.selecting .endOfContent { top: 0; }
+/* 回転したページ（/Rotate）: pdf.js はテキスト層を回転前の向きで組むので、層ごと回す（pdf.js のビューアと同じ） */
+.pdf-page .textLayer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.pdf-page .textLayer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.pdf-page .textLayer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
+/* 選んでいる範囲は、グリフに合わせた矩形（.sel-preview）で見せる。テキスト層の選択の色は
+   代わりのフォントの位置（グリフから数 pt ずれる）に付くので、その間は消す */
+.pdf-scroll.sel-snapped .textLayer ::selection { background: transparent; }
+.sel-preview { position: absolute; inset: 0; z-index: 1; pointer-events: none; mix-blend-mode: multiply; }
+.sel-preview > div { position: absolute; border-radius: 2px; background: color-mix(in srgb, var(--md-sys-color-primary) 32%, #fff); }
 /* マーカー: 不透明の色を、層ごと multiply で紙に重ねる（黒い文字は黒のまま残る） */
 .mk-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; mix-blend-mode: multiply; }
 .mk { position: absolute; border-radius: 2px; background: var(--mk); }

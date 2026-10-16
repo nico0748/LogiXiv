@@ -2,26 +2,29 @@
 // 指定された文の位置（マーカーを引く場所）を探すときに使う。
 
 import fs from "node:fs/promises";
-import { AnnotationMode, getDocument, OPS, Util } from "pdfjs-dist/legacy/build/pdf.mjs";
-import { attachGlyphs, charSpan, type FontLike, layoutGlyphs } from "../src/lib/glyphs.ts";
+import { AnnotationMode, getDocument, OPS } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { attachGlyphs, type FontLike, layoutGlyphs } from "../src/lib/glyphs.ts";
 import type { Rect } from "../src/lib/model.ts";
+import { type LaidItem, layoutItems, mergeLineRects, segmentRects, type Segment, type TextItemLike, textRotation, toDisplay } from "../src/lib/pageText.ts";
 
-interface Item {
-  str: string;
-  /** 0〜1 に正規化した文字列全体の矩形 */
-  rect: Rect;
-  /**
-   * 各文字の左端・右端（ページ幅に対する割合）。描画命令から求めた実際のグリフの位置（src/lib/glyphs.ts）。
-   * 対応が取れなかった文字は NaN、無いときは rect を文字数で按分する。
-   */
-  xs?: Float64Array;
-}
+/**
+ * 項目（src/lib/pageText.ts）。rect は 0〜1 に正規化した文字列全体の矩形で、縦は行の帯（lineBand）。
+ * xs は各文字の左端・右端（ページ幅に対する割合）。描画命令から求めた実際のグリフの位置（src/lib/glyphs.ts）。
+ * 対応が取れなかった文字は NaN、無いときは rect を文字数で按分する。
+ * どちらも「フレーム」（文字が横に流れる向き）での値。回転したページでは表示の向きと違う（rotation）。
+ */
+type Item = LaidItem;
 
 export interface PageText {
   page: number;
-  /** ページの幅・高さ（pt、viewport の scale 1）。items の矩形はこれに対する割合。 */
+  /** ページの幅・高さ（pt、viewport の scale 1、表示の向き）。 */
   width: number;
   height: number;
+  /**
+   * フレームから表示の向きまでの時計回りの角度（0/90/180/270）。普通のページは 0。
+   * items の矩形はフレームでの割合なので、表示の向きへは toDisplay で回す。
+   */
+  rotation: number;
   text: string;
   items: Item[];
 }
@@ -45,18 +48,12 @@ export async function readPages(file: string, opts: { glyphs?: boolean } = {}): 
       const page = await doc.getPage(n);
       const vp = page.getViewport({ scale: 1 });
       const content = await page.getTextContent();
-      const items: Item[] = [];
-      let text = "";
-      for (const raw of content.items) {
-        if (!("str" in raw)) continue;
-        const tx = Util.transform(vp.transform, raw.transform);
-        const h = Math.hypot(tx[2], tx[3]);
-        items.push({
-          str: raw.str,
-          rect: { x: tx[4] / vp.width, y: (tx[5] - h) / vp.height, w: (raw.width * vp.scale) / vp.width, h: (h * 1.15) / vp.height },
-        });
-        text += raw.str + (raw.hasEOL ? "\n" : "");
-      }
+      const raws = content.items.filter((i): i is typeof i & TextItemLike => "str" in i);
+      // 文字が横に流れる向きで並べる（/Rotate だけ立てた PDF では表示の向きと違う）
+      const frameRotation = textRotation(raws, vp.rotation, (rotation) => page.getViewport({ scale: 1, rotation }));
+      const fvp = frameRotation === vp.rotation ? vp : page.getViewport({ scale: 1, rotation: frameRotation });
+      const items: Item[] = layoutItems(raws, content.styles, fvp);
+      const text = raws.map((raw) => raw.str + (raw.hasEOL ? "\n" : "")).join("");
       if (opts.glyphs) {
         try {
           const ops = await page.getOperatorList({ annotationMode: AnnotationMode.DISABLE });
@@ -67,14 +64,14 @@ export async function readPages(file: string, opts: { glyphs?: boolean } = {}): 
               return null;
             }
           };
-          const glyphs = layoutGlyphs(OPS, ops.fnArray, ops.argsArray, getFont, vp.transform);
-          const xs = attachGlyphs(items.map((it) => it.str), glyphs, vp.width);
+          const glyphs = layoutGlyphs(OPS, ops.fnArray, ops.argsArray, getFont, fvp.transform);
+          const xs = attachGlyphs(items.map((it) => it.str), glyphs, fvp.width);
           if (xs) items.forEach((it, i) => (it.xs = xs[i]));
         } catch {
           // 描画命令が読めなくても、文字数での按分にはできる
         }
       }
-      pages.push({ page: n, width: vp.width, height: vp.height, text, items });
+      pages.push({ page: n, width: vp.width, height: vp.height, rotation: (vp.rotation - frameRotation + 360) % 360, text, items });
       page.cleanup();
     }
   } finally {
@@ -133,7 +130,7 @@ export function findText(pages: PageText[], query: string, page?: number): Match
       if (at < 0) continue;
       const [si, sc] = map[at];
       const [ei, ec] = map[at + q.length - 1];
-      const rects: Rect[] = [];
+      const segs: Segment[] = [];
       let text = "";
       for (let i = si; i <= ei; i++) {
         const it = p.items[i];
@@ -141,31 +138,21 @@ export function findText(pages: PageText[], query: string, page?: number): Match
         const to = i === ei ? ec + 1 : it.str.length;
         if (!it.str.length || to <= from) continue;
         text += it.str.slice(from, to) + (i < ei ? " " : "");
-        const s = charSpan(it.str, it.xs, it.rect, from, to);
-        if (!s) continue;
-        rects.push({ x: s[0], y: it.rect.y, w: s[1] - s[0], h: it.rect.h });
+        segs.push({ k: i, a: from, b: to });
       }
+      // 画面で選んだマーカーと同じ関数で矩形にし、表示の向きへ回す
+      const rects = segmentRects(p.items, segs).map((r) => toDisplay(r, p.rotation ?? 0));
       const flatText = p.text.replace(/\s+/g, " ");
       const words = text.replace(/\s+/g, " ").trim();
       const idx = flatText.indexOf(words.slice(0, 40));
       const around = idx >= 0 ? flatText.slice(Math.max(0, idx - 300), idx + words.length + 300) : words;
-      return { page: p.page, rects: mergeLines(rects), text: words, around };
+      return { page: p.page, rects, text: words, around };
     }
   }
   return null;
 }
 
-/** 同じ行に並ぶ矩形を1つにまとめる。 */
-export function mergeLines(rects: Rect[]) {
-  const out: Rect[] = [];
-  for (const r of rects) {
-    const last = out[out.length - 1];
-    if (last && Math.abs(last.y - r.y) < r.h * 0.5 && r.x - (last.x + last.w) < 0.02 && r.x + r.w > last.x - 0.02) {
-      const x2 = Math.max(last.x + last.w, r.x + r.w);
-      last.x = Math.min(last.x, r.x);
-      last.w = x2 - last.x;
-      last.h = Math.max(last.h, r.h);
-    } else out.push({ ...r });
-  }
-  return out;
+/** 同じ行に並ぶ矩形を1つにまとめる（縦横とも外接矩形。画面の選択と同じ src/lib/pageText.ts の関数）。 */
+export function mergeLines(rects: Rect[]): Rect[] {
+  return mergeLineRects(rects);
 }

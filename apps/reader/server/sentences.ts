@@ -17,6 +17,7 @@ import {
   editSentenceBoundary as coreEditBoundary,
   FutureStructureError,
   migrateDocument,
+  RECT_BAND_VERSION,
   removeGlossaryEntry,
   sanitizeDocument,
   setTranslation as coreSetTranslation,
@@ -212,6 +213,7 @@ export async function sentencesState(vault: NodeVault, id: string): Promise<Sent
     if (st?.status === "failed") return { status: "failed", error: st.error, code: st.code };
     return { status: "none" };
   }
+  if (needsRectUpgrade(doc)) doc = await upgradeRects(vault, id, doc);
   const warning =
     st?.status === "failed"
       ? `解析し直せなかったため、前回の結果を表示しています: ${st.error}`
@@ -240,6 +242,49 @@ const withGlyphEdges = (doc: PaperDocument, pages: readonly GlyphPage[]): PaperD
   ...doc,
   structure: refineStructureRects(doc.structure, pages).structure,
 });
+
+/**
+ * 文の枠をいまの規則で作り直す必要があるか。
+ * - rectEdges が無い: 端をグリフに合わせる前に解析した文書（文頭・文末が 1 文字ずれうる）。
+ * - rectBand が古い: 縦の帯が古い式（ベースライン − 字高 〜 ベースライン）のまま。
+ * どちらも枠の座標だけの話なので、再解析せずに読み込むときに直せる。
+ */
+export const needsRectUpgrade = (doc: PaperDocument) =>
+  !doc.structure.rectEdges || (doc.structure.rectEdges === "glyph" && (doc.structure.rectBand ?? 0) < RECT_BAND_VERSION);
+
+/** 同じ文書を同時に何度も直さない。 */
+const upgrading = new Map<string, Promise<PaperDocument>>();
+
+/**
+ * 古い文書の枠を、PDF のグリフに合わせ直して書き戻す（文の分け方・本文・ハッシュ・訳は変えない）。
+ * グリフが読めない PDF は「見積もり」の印だけ付けて、次からは試さない。失敗しても元の文書を返す。
+ */
+function upgradeRects(vault: NodeVault, id: string, doc: PaperDocument): Promise<PaperDocument> {
+  const key = runKey(vault, id);
+  const hit = upgrading.get(key);
+  if (hit) return hit;
+  const task = (async () => {
+    try {
+      // グリフの読み取り（数秒）は列の外で済ませ、書くときだけ最新を読み直す
+      const pages = await glyphPages(vault, id, doc.structure);
+      return await withLock(vault, id, async () => {
+        const current = await readDocument(vault, id);
+        if (!current || !needsRectUpgrade(current)) return current ?? doc;
+        const next: PaperDocument = pages.length
+          ? withGlyphEdges(current, pages)
+          : { ...current, structure: { ...current.structure, rectEdges: current.structure.rectEdges ?? "estimate" } };
+        await writeDocument(vault, next);
+        return next;
+      });
+    } catch {
+      return doc;
+    } finally {
+      upgrading.delete(key);
+    }
+  })();
+  upgrading.set(key, task);
+  return task;
+}
 
 // --- 解析 ------------------------------------------------------------------------
 

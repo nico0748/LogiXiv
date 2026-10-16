@@ -146,8 +146,6 @@
   border: 1px solid var(--background-modifier-border);
   color: var(--text-normal);
 }
-.sl-reparse-hint { align-items: center; }
-.sl-reparse-hint > span { flex: 1; }
 .sl-caveat {
   padding: 8px 10px;
   border-radius: var(--radius-m);
