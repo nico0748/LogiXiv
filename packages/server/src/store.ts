@@ -164,6 +164,8 @@ export class DocumentStore {
     const documents: PaperDocument[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      // 書きかけの置き場（create の staging）は、完成するまで無いものとして扱う
+      if (entry.name.startsWith('.')) continue;
       try {
         documents.push(await this.read(entry.name));
       } catch (error) {
@@ -238,6 +240,39 @@ export class DocumentStore {
       await rm(temporary, { force: true }).catch(() => undefined);
       throw error;
     }
+  }
+
+  /**
+   * 新規文書を PDF ごと置く。**置き場が一覧に見えるのは、両方を書き終えた後だけ。**
+   *
+   * 以前は writePdf → write の順に直接 documents/<id>/ に書いていたので、その間
+   * （source.pdf はあるが document.json はまだ無い数十 ms）に一覧を読むと
+   * 「開けません」の行として現れた。取り込みを諦めた直後に一覧を見張るテストが
+   * この窓を踏んで、CI でだけ落ちていた。
+   *
+   * documents/.staging-<id>/ に書き切ってから rename で置くので、一覧には
+   * 完成した置き場しか見えない（`.` で始まる名前は list が読まない）。
+   * `beforeCommit` は rename の直前に呼ぶ。投げれば置かずに staging を消して、その失敗を返す。
+   */
+  async create(
+    document: PaperDocument,
+    pdf: Uint8Array,
+    beforeCommit?: () => void,
+  ): Promise<void> {
+    await withLock(document.id, async () => {
+      const staging = join(documentsDir(this.config), `.staging-${document.id}`);
+      await rm(staging, { recursive: true, force: true });
+      await mkdir(staging, { recursive: true });
+      try {
+        await this.writeAtomic(staging, PDF_FILE, pdf);
+        await this.writeAtomic(staging, DOCUMENT_FILE, `${JSON.stringify(document, null, 2)}\n`);
+        beforeCommit?.();
+        await rename(staging, this.dir(document.id));
+      } catch (error) {
+        await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+    });
   }
 
   async write(document: PaperDocument): Promise<void> {
