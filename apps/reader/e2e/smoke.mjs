@@ -198,6 +198,16 @@ await step("段階で絞り込み、すべて表示で戻す", async () => {
   await page.locator(".filter-band").waitFor({ state: "detached" });
 });
 
+await step("タグを押すとそのタグで絞り込み、検索を消すと戻る", async () => {
+  // サンプルのテンプレートは tags: [paper] なので、行に #paper が出る
+  await page.getByRole("button", { name: "タグ paper で絞り込む" }).click();
+  await page.locator(".filter-band", { hasText: "『#paper』で絞り込み中" }).waitFor();
+  if ((await page.getByLabel("論文とノートを検索").inputValue()) !== "#paper") throw new Error("検索欄にタグが入っていない");
+  await page.locator(".paper-tag.is-active").waitFor();
+  await page.getByRole("button", { name: "検索を消す" }).click();
+  await page.locator(".filter-band").waitFor({ state: "detached" });
+});
+
 await step("一覧の BibTeX を .bib に書き出す", async () => {
   const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "すべての BibTeX を書き出す" }).click()]);
   if (download.suggestedFilename() !== "paperlens.bib") throw new Error(`ファイル名が違う: ${download.suggestedFilename()}`);
