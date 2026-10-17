@@ -364,6 +364,14 @@ mark { background: var(--text-highlight-bg); color: inherit; border-radius: 2px;
 .sort-select:hover { background: var(--background-modifier-hover); }
 .sort-select:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; }
 .bib-export { margin: 6px 4px 0; }
+/* 論文一覧の行のタグ。押すとそのタグで絞り込む */
+.nav-file-tags { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 6px; }
+.paper-tag {
+  font: inherit; font-size: var(--font-ui-smaller); color: var(--text-muted); cursor: pointer;
+  border: 0; border-radius: 999px; padding: 1px 8px; background: var(--md-sys-color-surface-container-high);
+}
+.paper-tag:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+.paper-tag.is-active { color: var(--md-sys-color-on-primary); background: var(--interactive-accent); }
 .nav-files { list-style: none; margin: 0; padding: 0; }
 .nav-file-title {
   width: 100%; text-align: left; border: 0; background: transparent; cursor: pointer; color: var(--text-muted);

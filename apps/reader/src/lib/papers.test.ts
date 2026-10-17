@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { before, test } from "node:test";
 import { emptyAnnotations } from "./model.ts";
-import { importPaper, loadNote, saveAnnotations, searchNotes, writeField } from "./papers.ts";
+import { importPaper, listPapers, loadNote, saveAnnotations, searchNotes, writeField } from "./papers.ts";
 import { MemoryVault } from "./vault.ts";
 
 const v = new MemoryVault();
@@ -48,4 +48,13 @@ test("5. 記録欄の外の自由記述は body。空白だけの語は空の配
   const hits = await searchNotes(v, "窓の幅");
   assert.deepEqual(hits.map((h) => h.region), ["body"]);
   assert.deepEqual(await searchNotes(v, "   "), []);
+});
+
+test("一覧の tags は配列にそろえ、空の項目は除く", async () => {
+  const v = new MemoryVault();
+  await v.writeText("papers/a/note.md", "---\ntitle: A\ntags: [ml, '', nlp]\n---\n");
+  await v.writeText("papers/b/note.md", "---\ntitle: B\ntags: single\n---\n");
+  await v.writeText("papers/c/note.md", "---\ntitle: C\n---\n");
+  const list = await listPapers(v);
+  assert.deepEqual(Object.fromEntries(list.map((p) => [p.id, p.tags])), { a: ["ml", "nlp"], b: ["single"], c: [] });
 });

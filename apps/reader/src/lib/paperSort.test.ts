@@ -4,7 +4,7 @@ import { sortPapers } from "./paperSort.ts";
 import type { PaperSummary } from "./papers.ts";
 
 const p = (id: string, o: Partial<PaperSummary> = {}): PaperSummary => ({
-  id, title: id, status: "未読", year: "", authors: [], arxiv: "", created: "", ...o,
+  id, title: id, status: "未読", year: "", authors: [], arxiv: "", created: "", tags: [], ...o,
 });
 
 const ids = (list: PaperSummary[]) => list.map((x) => x.id);
