@@ -4,6 +4,8 @@
 // 2. 画面で「囲む」を選び、スライドの 2 ページ目を囲む → Markup-02.01 ができる
 // 3. 論文の文を選んで「文章としてリンク」、図を囲んでリンクする → 線が 2 本引かれる
 // 4. slides.json と note.md に残ること、MCP の書き込みで線が増えることを確かめる
+// 5. 全画面（発表のとき）: ボタンと P キーで入る・出る、見出しが隠れる、線がずれない、帯が上の端で出る、使えないときはウィンドウいっぱい
+// 6. 名前の札はカーソルを乗せたときだけ出ること、スライド側・論文側・Delete キーのどれで消してもグループごと消え、元に戻せることを確かめる
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,7 +72,7 @@ try {
     await page.mouse.down();
     await page.mouse.move(b.x + b.width * 0.5, b.y + b.height * 0.25, { steps: 6 });
     await page.mouse.up();
-    await page.locator('.mu-box[aria-pressed="true"]', { hasText: "Markup-02.01" }).waitFor();
+    await page.locator('.mu-box[aria-pressed="true"][aria-label^="Markup-02.01"]').waitFor();
     await page.locator(".mp-item.is-active .mp-name", { hasText: "Markup-02.01" }).waitFor();
   });
 
@@ -113,6 +115,104 @@ try {
   });
 
   await page.screenshot({ path: path.join(shotDir, "slides-split.png") });
+
+  // --- 名前の札と、グループを消す・元に戻す ---------------------------------
+  const savedDeck = async (ok) => {
+    let deck;
+    for (let i = 0; i < 40; i++) {
+      deck = JSON.parse(readFileSync(path.join(data, "papers", id, "slides.json"), "utf8"));
+      if (ok(deck)) return deck;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return fail(`slides.json: ${JSON.stringify(deck)}`);
+  };
+  const visible = (sel) => page.evaluate((q) => [...document.querySelectorAll(q)].filter((e) => e.getClientRects().length > 0).length, sel);
+  const gone = () =>
+    page.waitForFunction(() =>
+      [".mu-box", ".mu-tag", ".ln-anchor", ".ln-fill", ".ln-frame", ".ln-pin", ".sv-lines path.sv-line"].every((q) => !document.querySelector(q)),
+    );
+  const restoredAll = async () => {
+    await page.locator('.mu-box[aria-label^="Markup-02.01"]').waitFor();
+    await page.waitForFunction(() => document.querySelectorAll(".sv-lines path.sv-line").length === 2 && document.querySelectorAll(".ln-pin").length === 2);
+    await savedDeck((d) => d.markups.length === 1 && d.markups[0].index === 1 && d.markups[0].links.length === 2);
+  };
+
+  await step("名前の札はふだん出ず、グループにカーソルを乗せると両側に出る（四角から札へ動かしても消えない）", async () => {
+    await page.mouse.move(5, 5);
+    if (await visible(".mu-tag")) fail("スライドの札がふだんから出ています");
+    if (await visible(".ln-pin .ln-name")) fail("論文の札がふだんから出ています");
+    if ((await visible(".ln-pin")) !== 2) fail("論文側の色の点がありません");
+    // 点は小さく、文字をほとんど隠さない
+    const dot = await page.locator(".ln-pin").first().boundingBox();
+    if (dot.width > 14 || dot.height > 14) fail(`論文側の点が大きすぎます: ${JSON.stringify(dot)}`);
+    await page.locator(".mu-box").hover();
+    await page.locator(".mu-tag").waitFor({ state: "visible" });
+    await page.waitForFunction(() => document.querySelectorAll(".ln-pin.is-hover .ln-name").length === 2);
+    // 四角から札の消すボタンへ、少しずつ動かす
+    const box = await page.locator(".mu-box").boundingBox();
+    const del = await page.locator(".mu-tag .mu-del").boundingBox();
+    await page.mouse.move(box.x + 20, box.y + 6);
+    await page.mouse.move(del.x + del.width / 2, del.y + del.height / 2, { steps: 8 });
+    if (!(await visible(".mu-tag .mu-del"))) fail("四角から札へ動かすと、札が消えました");
+    await page.screenshot({ path: path.join(shotDir, "delete-hover.png") });
+    // 論文側の点に乗ると、その場で札に広がる
+    await page.mouse.move(5, 5);
+    await page.waitForFunction(() => !document.querySelector(".ln-pin.is-hover"));
+    await page.locator(".ln-pin").first().hover();
+    await page.locator(".ln-pin").first().locator(".ln-name").waitFor({ state: "visible" });
+    await page.locator(".mu-tag").waitFor({ state: "visible" });
+    await page.mouse.move(5, 5);
+  });
+
+  await step("スライドの札の消すボタンで、四角・論文のリンク・線が消え、slides.json からもなくなる", async () => {
+    await page.locator(".mu-box").hover();
+    await page.getByRole("button", { name: "Markup-02.01 を消す（論文のリンク 2 件も消えます）" }).first().click();
+    await gone();
+    await page.locator(".sv-snack", { hasText: "Markup-02.01 を消しました（リンク 2 件も）" }).waitFor();
+    if (await page.locator(".mp-item").count()) fail("右サイドバーにグループが残っています");
+    await savedDeck((d) => d.markups.length === 0);
+    const note = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");
+    if (/### Markup-02\.01/.test(note)) fail(`note.md に残っています:\n${note}`);
+  });
+
+  await step("「元に戻す」で、同じ名前・同じリンクのまま戻る（消したのを保存したあとでも）", async () => {
+    await page.locator(".sv-snack").getByRole("button", { name: "元に戻す" }).click();
+    await restoredAll();
+    await page.locator(".mp-item.is-active .mp-name", { hasText: "Markup-02.01" }).waitFor();
+    if (await page.locator(".sv-snack").count()) fail("戻したあとも知らせが残っています");
+    const note = await (async () => {
+      for (let i = 0; i < 30; i++) {
+        const n = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");
+        if (/### Markup-02\.01/.test(n)) return n;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return "";
+    })();
+    if (!note) fail("note.md に戻っていません");
+  });
+
+  await step("論文側の点から消しても、スライドの四角ごと消える。すぐ ⌘Z（Ctrl+Z）で戻せる", async () => {
+    await page.mouse.move(5, 5);
+    await page.locator(".ln-pin").first().hover();
+    await page.locator(".ln-pin").first().getByRole("button", { name: /^Markup-02\.01 を消す/ }).click();
+    await gone();
+    // 保存を待たずに戻す（消す → 戻すが保存の前に済む）
+    await page.keyboard.press("ControlOrMeta+z");
+    await restoredAll();
+  });
+
+  await step("グループを選んで Delete を押すと消える", async () => {
+    await page.mouse.move(5, 5);
+    const pressed = await page.locator(".mu-box").getAttribute("aria-pressed");
+    if (pressed !== "true") await page.locator(".mu-box").click();
+    await page.locator('.mu-box[aria-pressed="true"]').waitFor();
+    await page.keyboard.press("Delete");
+    await gone();
+    await savedDeck((d) => d.markups.length === 0);
+    await page.locator(".sv-snack").getByRole("button", { name: "元に戻す" }).click();
+    await restoredAll();
+    await page.mouse.move(5, 5);
+  });
 
   await step("右サイドバーのリンクを外すと、線が 1 本になる", async () => {
     await page.getByRole("button", { name: /p\.1 のリンクを外す/ }).last().click();
@@ -197,8 +297,8 @@ try {
   });
 
   await step("最後の番号のグループを消して足し直しても、同じ名前にならない", async () => {
+    // 右サイドバーの消すボタンは 1 回押しで消す（元に戻せるため）
     await page.locator(".mp-item.is-active .mp-delete").click();
-    await page.locator(".mp-item.is-active .mp-delete.is-confirm").click();
     await page.waitForFunction(() => !document.querySelector(".mu-box"));
     await page.keyboard.press("r");
     const slide2 = await page.locator(".sv-slides .pp-page").nth(1).boundingBox();
@@ -206,7 +306,7 @@ try {
     await page.mouse.down();
     await page.mouse.move(slide2.x + slide2.width * 0.4, slide2.y + slide2.height * 0.7, { steps: 5 });
     await page.mouse.up();
-    await page.locator(".mu-box", { hasText: "Markup-02.02" }).waitFor();
+    await page.locator('.mu-box[aria-label^="Markup-02.02"]').waitFor();
   });
 
   await step("メモを打ってすぐ別の論文を開いても、メモは保存される", async () => {
@@ -242,8 +342,180 @@ try {
     if (head.length < 200) fail("スライドが上書きされました");
   });
 
+  // --- 全画面（発表のとき）-----------------------------------------------------
+  // スライドと論文を並べた画面ごと全画面にする。見出しは隠れ、道具の帯は上の端にマウスを近づけたときだけ出る。
+  const fsState = () =>
+    page.evaluate(() => {
+      const v = document.querySelector(".slides-view");
+      const bar = document.querySelector(".sv-toolbar");
+      return {
+        native: document.fullscreenElement === v,
+        fill: v.classList.contains("is-fill"),
+        on: v.classList.contains("is-fullscreen"),
+        heads: [...document.querySelectorAll(".sv-pane-head")].map((h) => getComputedStyle(h).display),
+        bar: Number(getComputedStyle(bar).opacity),
+      };
+    });
+  const waitBar = (shown) => page.waitForFunction((s) => Number(getComputedStyle(document.querySelector(".sv-toolbar")).opacity) === (s ? 1 : 0), shown);
+  // 線の端（丸）が、どれかの四角とどれかのリンク先に付いているか。最後の段階では四角が 2 個になるので、上の linesAttached とは別に確かめる
+  const linesOk = async () => {
+    await page.waitForTimeout(500);
+    const ok = await page.evaluate(() => {
+      const svg = document.querySelector(".sv-lines").getBoundingClientRect();
+      const near = (p, r) => p.x >= r.left - 3 && p.x <= r.right + 3 && p.y >= r.top - 3 && p.y <= r.bottom + 3;
+      const boxes = [...document.querySelectorAll(".mu-box")].map((e) => e.getBoundingClientRect());
+      const targets = [...document.querySelectorAll(".ln-anchor")].map((e) => e.getBoundingClientRect());
+      return [...document.querySelectorAll(".sv-lines g")].flatMap((g) => {
+        const cs = [...g.querySelectorAll("circle")].map((c) => ({ x: svg.left + +c.getAttribute("cx"), y: svg.top + +c.getAttribute("cy") }));
+        return cs.length < 2 ? [] : [boxes.some((r) => near(cs[0], r)) && targets.some((t) => near(cs[1], t))];
+      });
+    });
+    if (!ok.length || ok.includes(false)) fail(`線の端がずれています: ${JSON.stringify(ok)}`);
+  };
+
+  await step("全画面: 元の論文のスライドの画面に戻し、線を 1 本引いておく", async () => {
+    await page.locator(".nav-file-title:not(.is-active)").first().click();
+    await page.locator(".sv-slides .pp-page").nth(1).waitFor();
+    await page.locator(".sv-paper .pp-page .textLayer span").first().waitFor();
+    const deck = (await (await fetch(`${base}/api/papers/${id}/slides`)).json()).deck;
+    const link = { id: "l-fs", kind: "figure", page: 1, rects: [{ x: 0.15, y: 0.3, w: 0.5, h: 0.1 }], text: "", createdAt: "" };
+    await fetch(`${base}/api/papers/${id}/slides/markups`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-paperlens-client": "agent" },
+      body: JSON.stringify({ ops: [{ op: "addLink", id: deck.markups[0].id, link }] }),
+    });
+    await page.waitForFunction(() => document.querySelectorAll(".sv-lines circle").length === 2, null, { timeout: 5000 });
+    await linesOk();
+  });
+
+  await step("全画面: ボタンで画面ごと全画面になり、見出しと道具の帯が隠れ、線は四角に付いたまま", async () => {
+    await page.getByRole("button", { name: "全画面", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector(".slides-view").classList.contains("is-fullscreen"));
+    const st = await fsState();
+    if (!st.native && !st.fill) fail(`全画面になっていません: ${JSON.stringify(st)}`);
+    console.log(st.native ? "  （Fullscreen API で全画面になりました）" : "  （このブラウザでは Fullscreen API が使えず、ウィンドウいっぱいの表示になりました）");
+    if (st.heads.some((d) => d !== "none")) fail(`欄の見出しが出ています: ${JSON.stringify(st)}`);
+    await page.locator(".sv-fs-hint", { hasText: "Esc で全画面を終えます" }).waitFor();
+    // 押したボタンにフォーカスが残っていても、マウスが離れれば帯は隠れる
+    await page.mouse.move(800, 600);
+    await waitBar(false);
+    await linesOk();
+    const r = await page.locator(".slides-view").boundingBox();
+    if (Math.round(r.width) !== 1600 || Math.round(r.height) !== 960) fail(`画面いっぱいになっていません: ${JSON.stringify(r)}`);
+  });
+
+  await step("全画面: 上の端にマウスを動かすと道具の帯が出て、止まると隠れる（線は動かない）", async () => {
+    const before = await page.locator(".sv-lines circle").first().getAttribute("cy");
+    await page.mouse.move(800, 10);
+    await waitBar(true);
+    if ((await page.locator(".sv-lines circle").first().getAttribute("cy")) !== before) fail("帯を出したら線が動きました");
+    await linesOk();
+    await page.screenshot({ path: path.join(shotDir, "slides-fullscreen.png") });
+    await page.mouse.move(800, 500);
+    await page.waitForTimeout(2300);
+    await waitBar(false);
+  });
+
+  await step("全画面: 「全画面を終える」で戻り、見出しが出て、線は付いたまま", async () => {
+    await page.mouse.move(800, 10);
+    await waitBar(true);
+    await page.getByRole("button", { name: "全画面を終える" }).click();
+    await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
+    const st = await fsState();
+    if (st.heads.some((d) => d === "none") || st.bar !== 1) fail(`元に戻っていません: ${JSON.stringify(st)}`);
+    await linesOk();
+  });
+
+  await step("全画面: P キーでも切り替わり、全画面の中に知らせが出る", async () => {
+    await page.mouse.move(800, 500);
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => document.querySelector(".slides-view.is-fullscreen"));
+    await linesOk();
+    // 囲むと「…を作りました」の知らせが出る。全画面の要素の中に描かれていること
+    await page.keyboard.press("r");
+    const slide1 = await page.locator(".sv-slides .pp-page").first().boundingBox();
+    await page.mouse.move(slide1.x + slide1.width * 0.1, slide1.y + slide1.height * 0.6);
+    await page.mouse.down();
+    await page.mouse.move(slide1.x + slide1.width * 0.4, slide1.y + slide1.height * 0.8, { steps: 5 });
+    await page.mouse.up();
+    await page.locator(".snackbar", { hasText: "を作りました" }).waitFor();
+    const inside = await page.evaluate(() => {
+      const host = document.fullscreenElement ?? document.querySelector(".slides-view");
+      const sn = document.querySelector(".snackbar");
+      const r = sn.getBoundingClientRect();
+      return host.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) || !document.fullscreenElement;
+    });
+    if (!inside) fail("知らせが全画面の中に見えていません");
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
+  });
+
+  await step("全画面: 全画面のままグループを消しても「元に戻す」が見え、⌘Z（Ctrl+Z）で戻る", async () => {
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => document.querySelector(".slides-view.is-fullscreen"));
+    const before = await page.locator(".mu-box").count();
+    // 押すたびに選ぶ・外すが切り替わるので、選ばれた状態にしてから Delete を押す
+    const box = page.locator(".mu-box").first();
+    if ((await box.getAttribute("aria-pressed")) !== "true") await box.click();
+    await page.waitForFunction(() => document.querySelector('.mu-box[aria-pressed="true"]'));
+    await page.keyboard.press("Delete");
+    await page.waitForFunction((n) => document.querySelectorAll(".mu-box").length === n - 1, before);
+    await page.locator(".snackbar.sv-snack", { hasText: "を消しました" }).waitFor();
+    const visible = await page.evaluate(() => {
+      const r = document.querySelector(".snackbar.sv-snack").getBoundingClientRect();
+      const host = document.fullscreenElement ?? document.querySelector(".slides-view");
+      return host.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
+    });
+    if (!visible) fail("全画面の中で「元に戻す」が見えていません");
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
+    await page.waitForFunction((n) => document.querySelectorAll(".mu-box").length === n, before);
+    if (!(await page.locator(".slides-view.is-fullscreen").count())) fail("元に戻したら全画面が終わりました");
+    await linesOk();
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
+  });
+
+  await step("全画面: 画面の外に描くモーダル（リスト）を開くと、全画面を終えて見えるようにする", async () => {
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => document.querySelector(".slides-view.is-fullscreen"));
+    await page.keyboard.press("Control+Shift+L");
+    await page.getByRole("dialog", { name: "リスト" }).waitFor();
+    await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog", { name: "リスト" }).waitFor({ state: "detached" });
+  });
+
+  await step("全画面: Fullscreen API が断られたときはウィンドウいっぱいに広げ、Esc は選択を外してから全画面を終える", async () => {
+    await page.evaluate(() => {
+      window.__rf = Element.prototype.requestFullscreen;
+      Element.prototype.requestFullscreen = () => Promise.reject(new Error("denied"));
+    });
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => document.querySelector(".slides-view.is-fill"));
+    const cover = await page.evaluate(() => {
+      const v = document.querySelector(".slides-view");
+      const r = v.getBoundingClientRect();
+      const pts = [[5, 5], [innerWidth - 5, 5], [5, innerHeight - 5], [innerWidth - 5, innerHeight - 5]];
+      return { r: [r.left, r.top, r.width, r.height], all: pts.every(([x, y]) => v.contains(document.elementFromPoint(x, y))) };
+    });
+    if (!cover.all || cover.r[0] !== 0 || cover.r[1] !== 0) fail(`ウィンドウを覆っていません: ${JSON.stringify(cover)}`);
+    await linesOk();
+    // 選んでいるグループがあるときの Esc は、まず選択を外す
+    if (!(await page.locator('.mu-box[aria-pressed="true"]').count())) fail("グループが選ばれていません");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector('.mu-box[aria-pressed="true"]'));
+    await page.waitForTimeout(100);
+    if (!(await page.locator(".slides-view.is-fill").count())) fail("選択を外す Esc で全画面まで終わりました");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector(".slides-view.is-fill, .slides-view.is-fullscreen"));
+    await page.evaluate(() => {
+      Element.prototype.requestFullscreen = window.__rf;
+    });
+    await linesOk();
+  });
+
   if (errors.length) fail(`コンソールのエラー:\n${errors.join("\n")}`);
-  console.log(`スクリーンショット: ${path.join(shotDir, "slides-split.png")}`);
+  console.log(`スクリーンショット: ${path.join(shotDir, "slides-split.png")}, ${path.join(shotDir, "slides-fullscreen.png")}`);
   console.log("papers:", readdirSync(path.join(data, "papers")).join(", "));
 } finally {
   await browser?.close();

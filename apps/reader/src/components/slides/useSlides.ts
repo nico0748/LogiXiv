@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Backend } from "../../lib/backend.ts";
-import { type SlideDeck, applyMarkupOps, diffMarkups } from "../../lib/slides.ts";
+import { type SlideDeck, type SlideMarkup, applyMarkupOps, diffMarkups, restoreMarkup } from "../../lib/slides.ts";
 
 export type SlidesState =
   | { kind: "loading" }
@@ -16,12 +16,28 @@ export type SlidesState =
   | { kind: "ready"; deck: SlideDeck; pdf: ArrayBuffer }
   | { kind: "error"; message: string };
 
+/** 最後に消したグループ。元に戻すまで（か、知らせが消えるまで）持つ */
+export interface RemovedMarkup {
+  markup: SlideMarkup;
+  /** 消す前の並びの位置 */
+  at: number;
+  /** 同じグループを続けて消し戻ししたときも、知らせを出し直すための番号 */
+  n: number;
+}
+
 export interface Slides {
   state: SlidesState;
   /** 取り込み中のファイル名 */
   importing: string | null;
   importFile(f: File): Promise<void>;
   update(fn: (d: SlideDeck) => SlideDeck): void;
+  /** グループを消す。論文側のリンク（ペア先）はグループの中にあるので、一緒に消える */
+  remove(id: string): SlideMarkup | null;
+  lastRemoved: RemovedMarkup | null;
+  /** 最後に消したグループを、同じ ID・番号・リンクのまま戻す。戻したグループを返す */
+  restore(): SlideMarkup | null;
+  /** 元に戻す知らせを閉じる */
+  dismissRemoved(): void;
 }
 
 type SaveState = "saving" | "saved" | { error: string };
@@ -47,6 +63,10 @@ export function useSlides(
   const gen = useRef(0);
   const seq = useRef(0);
   const importingRef = useRef(false);
+  const [lastRemoved, setLastRemoved] = useState<RemovedMarkup | null>(null);
+  const removedRef = useRef<RemovedMarkup | null>(null);
+  /** 元に戻したグループの ID。保存するときに「戻す」操作にして、消した番号のまま戻す（論文を替えたら空にする） */
+  const restored = useRef(new Set<string>());
 
   const show = (deck: SlideDeck) => {
     deckRef.current = deck;
@@ -63,7 +83,7 @@ export function useSlides(
     if (!id || !sent || !base) return inflight.current;
     const job = async () => {
       // 操作は何度当てても同じ結果になる形なので、前の保存と重なっていても壊れない
-      const ops = diffMarkups(base, sent);
+      const ops = diffMarkups(base, sent, restored.current);
       if (!ops.length) return optsRef.current.onSave("saved");
       try {
         const r = await backend.changeMarkups(id, ops);
@@ -73,7 +93,7 @@ export function useSlides(
         optsRef.current.onNote(r.note);
         baseRef.current = r.deck;
         // 送ったあとに画面で変えた分は、保存先の最新の上に重ねる
-        show(applyMarkupOps(r.deck, diffMarkups(sent, deckRef.current)));
+        show(applyMarkupOps(r.deck, diffMarkups(sent, deckRef.current, restored.current)));
       } catch (e) {
         optsRef.current.onSave({ error: e instanceof Error ? e.message : String(e) });
       }
@@ -103,7 +123,7 @@ export function useSlides(
         pdfRef.current = pdf;
       }
       // まだ送っていない画面の変更は、読み直した上に重ねる
-      const mine = deckRef.current && baseRef.current ? diffMarkups(baseRef.current, deckRef.current) : [];
+      const mine = deckRef.current && baseRef.current ? diffMarkups(baseRef.current, deckRef.current, restored.current) : [];
       baseRef.current = deck;
       show(applyMarkupOps(deck, mine));
     },
@@ -118,6 +138,9 @@ export function useSlides(
     void flush();
     loadedFor.current = paperId;
     deckRef.current = baseRef.current = pdfRef.current = null;
+    restored.current = new Set();
+    removedRef.current = null;
+    setLastRemoved(null);
     setState({ kind: "loading" });
     load(paperId, true).catch((e: unknown) => {
       if (paperId === paperRef.current) setState({ kind: "error", message: e instanceof Error ? e.message : String(e) });
@@ -150,6 +173,36 @@ export function useSlides(
     [flush],
   );
 
+  const remove = useCallback(
+    (id: string) => {
+      const deck = deckRef.current;
+      const at = deck?.markups.findIndex((m) => m.id === id) ?? -1;
+      if (!deck || at < 0) return null;
+      const markup = deck.markups[at];
+      update((d) => ({ ...d, markups: d.markups.filter((m) => m.id !== id) }));
+      const r = { markup, at, n: (removedRef.current?.n ?? 0) + 1 };
+      removedRef.current = r;
+      setLastRemoved(r);
+      return markup;
+    },
+    [update],
+  );
+
+  const restore = useCallback(() => {
+    const r = removedRef.current;
+    removedRef.current = null;
+    setLastRemoved(null);
+    if (!r || !deckRef.current) return null;
+    restored.current.add(r.markup.id);
+    update((d) => restoreMarkup(d, r.markup, r.at));
+    return r.markup;
+  }, [update]);
+
+  const dismissRemoved = useCallback(() => {
+    removedRef.current = null;
+    setLastRemoved(null);
+  }, []);
+
   const importFile = useCallback(
     async (f: File) => {
       const id = paperRef.current;
@@ -170,5 +223,5 @@ export function useSlides(
     [backend, flush, load],
   );
 
-  return { state, importing, importFile, update };
+  return { state, importing, importFile, update, remove, lastRemoved, restore, dismissRemoved };
 }

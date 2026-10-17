@@ -16,9 +16,11 @@ import { NodeVault } from "../server/nodeVault.ts";
 import { requirePaper } from "../server/service.ts";
 import {
   addSentenceNote,
+  clearTranslations,
   editSentenceBoundary,
   parseSentences,
   removeGlossary,
+  removeSentenceNote,
   sentencesState,
   setTranslations,
   skipSentences,
@@ -111,7 +113,7 @@ export function parseCaveat(document: PaperDocument): string | undefined {
 
 function sentenceView(document: PaperDocument, sentence: Sentence) {
   const translation = document.annotations.translations[sentence.hash];
-  const notes = document.annotations.notes.filter((n) => n.sentenceHash === sentence.hash).map((n) => n.body);
+  const notes = notesOf(document, sentence.hash);
   const view: Record<string, unknown> = { hash: sentence.hash, order: sentence.order, page: sentence.page, source: sentence.text };
   // 原文が壊れているおそれのある文。記号が落ちて文法の通る英文になることがあるので、名指しで渡す
   if (sentence.seam) {
@@ -134,8 +136,17 @@ function sentenceView(document: PaperDocument, sentence: Sentence) {
   }
   const skipped = document.annotations.skipped?.[sentence.hash];
   if (skipped) view.skipped = skipped.reason;
-  if (notes.length > 0) view.notes = notes;
+  if (notes.length > 0) {
+    view.notes = notes.map((n) => n.body);
+    // 消すとき（remove_sentence_note）に使う ID。notes は前からの形（本文だけ）のまま残す
+    view.noteItems = notes;
+  }
   return view;
+}
+
+/** 文に付いたメモ（ID と本文）。 */
+function notesOf(document: PaperDocument, hash: string) {
+  return document.annotations.notes.filter((n) => n.sentenceHash === hash).map((n) => ({ id: n.id, body: n.body }));
 }
 
 type Glossary = PaperDocument["annotations"]["glossary"];
@@ -186,7 +197,8 @@ const READ: Tool[] = [
       title: "対訳の概要",
       description:
         "1 文ずつの対訳（sentences.json）の概要を返します。解析方式・但し書き（caveat）・節構成・ページ数・用語集・翻訳の進捗が分かります。" +
-        "全文を訳す作業はここから始めます。firstUntranslatedOrder が再開位置です。まだ解析していない論文では parse_sentences を呼ぶよう案内します。",
+        "全文を訳す作業はここから始めます。firstUntranslatedOrder が再開位置です。まだ解析していない論文では parse_sentences を呼ぶよう案内します。" +
+          "boundaryEdits は区切りの直しの記録で、id を fix_sentence_boundary の undo_edit_id に渡すとその編集だけを取り消せます（detached は今の区切りに当たっていない記録）。",
       inputSchema: { paper: PAPER },
       annotations: { readOnlyHint: true },
     },
@@ -216,6 +228,17 @@ const READ: Tool[] = [
           return { id: section.id, title: section.title, firstOrder: inSection[0]?.order ?? null, sentences: inSection.length };
         }),
         glossary: document.annotations.glossary,
+        // 区切りの直しの記録。fix_sentence_boundary の undo_edit_id に id を渡すと、その編集だけを取り消せる
+        boundaryEdits: (document.annotations.sentenceEdits ?? []).map((e) => {
+          const text = (e.sourceTexts ?? []).join(" / ").replace(/\s+/g, " ").trim();
+          return {
+            id: e.id,
+            type: e.type,
+            ...(e.detached ? { detached: true } : {}),
+            createdAt: e.createdAt,
+            ...(text ? { source: text.length > 80 ? `${text.slice(0, 80)}…` : text } : {}),
+          };
+        }),
       });
     },
   },
@@ -225,7 +248,7 @@ const READ: Tool[] = [
       title: "文を取得",
       description:
         "1 文ずつの対訳を範囲指定で取得します。原文・既存の訳・メモ・訳さない理由が揃って返るので、訳の見直しや前後関係の確認に使います。" +
-        "from は文の通し番号（order）で、節やページで絞っても意味は変わりません。",
+        "from は文の通し番号（order）で、節やページで絞っても意味は変わりません。メモは noteItems に ID 付きで入ります（remove_sentence_note に渡します）。",
       inputSchema: {
         paper: PAPER,
         from: z.number().int().min(0).default(0).describe("開始する文の通し番号（order）。0 始まり"),
@@ -354,6 +377,8 @@ const READ: Tool[] = [
         untranslated,
         duplicateOf: Object.keys(duplicateOf).length > 0 ? duplicateOf : undefined,
         withNotes: withNotes.length > 0 ? withNotes : undefined,
+        // メモの ID と本文（order ごと）。消すときは remove_sentence_note に id を渡す
+        notes: withNotes.length > 0 ? Object.fromEntries(withNotes.map((o) => [o, notesOf(document, window.find((s) => s.order === o)!.hash)])) : undefined,
         damaged:
           damaged.length > 0
             ? {
@@ -404,6 +429,7 @@ const READ: Tool[] = [
           where: h.where,
           translation: h.translation ?? undefined,
           notes: h.notes.length > 0 ? h.notes : undefined,
+          noteItems: h.notes.length > 0 ? notesOf(document, h.sentence.hash) : undefined,
           isBody: h.isBody,
           nonBodyKind: h.nonBodyKind ?? undefined,
         })),
@@ -597,7 +623,7 @@ const WRITE: Tool[] = [
     config: {
       title: "訳語の対応表を更新",
       description:
-        "この論文の訳語の対応表（用語集）を更新します。既定は追記で、既存の語は消しません。mode に replace を渡したときだけ全置換になります。" +
+        "この論文の訳語の対応表（用語集）を更新します。既定は追記で、既存の語は消しません。mode に replace を渡したときだけ全置換になります。1 語だけ消すなら remove_glossary_terms を使います。" +
         "以後の翻訳ではここに載っている訳語を優先してください。既存の訳文は自動では書き換わらないので、必要なら search_sentences で探して set_translations で直します。" +
         "用語の意味・説明をノートに残すのは add_term（Obsidian でリンクされる用語集）で、こちらは訳語の統一のためのものです。",
       inputSchema: {
@@ -648,6 +674,92 @@ const WRITE: Tool[] = [
     },
   },
   {
+    name: "remove_glossary_terms",
+    config: {
+      title: "訳語の対応表から消す",
+      description:
+        "訳語の対応表（用語集）から、指定した原語の項目だけを消します（大文字と小文字は区別しません）。ほかの項目は残ります。" +
+        "全体を作り直すなら update_glossary の mode=replace を使います。既存の訳文は変わりません。",
+      inputSchema: {
+        paper: PAPER,
+        terms: z.array(z.string().min(1)).min(1).max(500).describe("消す原語（get_sentence_outline の glossary の term）"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    },
+    handler: async ({ paper, terms }) => {
+      const v = vault();
+      const before = await readyDocument(v, paper);
+      const have = new Set(before.annotations.glossary.map((g) => g.term.toLowerCase()));
+      const list = [...new Set((terms as string[]).map((t) => t.trim()).filter(Boolean))];
+      const removed = list.filter((t) => have.has(t.toLowerCase()));
+      const unknown = list.filter((t) => !have.has(t.toLowerCase()));
+      let after = before;
+      for (const t of removed) after = await removeGlossary(v, paper, t);
+      return compact({
+        removed,
+        unknownTerms: unknown,
+        total: after.annotations.glossary.length,
+        hint: unknown.length > 0 ? `${unknown.length} 件は用語集にありませんでした。get_sentence_outline の glossary で原語を確かめてください。` : undefined,
+      });
+    },
+  },
+  {
+    name: "remove_sentence_note",
+    config: {
+      title: "文のメモを消す",
+      description:
+        "add_sentence_note で付けた文のメモを 1 件消します。note_id は get_sentences・search_sentences の noteItems、get_translation_batch の notes にある id です。",
+      inputSchema: { paper: PAPER, note_id: z.string().min(1).describe("メモの ID") },
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    handler: async ({ paper, note_id }) => {
+      const v = vault();
+      const before = await readyDocument(v, paper);
+      const note = before.annotations.notes.find((n) => n.id === note_id);
+      if (!note) throw new Error(`メモが見つかりません: ${note_id}。get_sentences の noteItems で id を確かめてください。`);
+      await removeSentenceNote(v, paper, note_id);
+      return compact({ removed: note_id, sentenceHash: note.sentenceHash, body: note.body });
+    },
+  },
+  {
+    name: "clear_translations",
+    config: {
+      title: "訳を消す",
+      description:
+        "文の訳を消して未訳に戻します。訳し直す前や、訳の付いた文を skip_sentences で「訳さない」にしたいときに使います。" +
+        "人が直した訳（revisedByHuman）は、include_human=true を渡さない限り消しません（keptHuman に載って返ります）。利用者に確かめてから true にしてください。",
+      inputSchema: {
+        paper: PAPER,
+        sentence_hashes: z.array(z.string()).min(1).max(500).describe("訳を消す文の hash"),
+        include_human: z.boolean().default(false).describe("true にすると、人が直した訳も消す"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    },
+    handler: async ({ paper, sentence_hashes, include_human = false }) => {
+      const v = vault();
+      const before = await readyDocument(v, paper);
+      const hashes = [...new Set(sentence_hashes as string[])];
+      const known = new Set(before.structure.sentences.map((s) => s.hash));
+      const unknown = hashes.filter((h) => !known.has(h));
+      const untranslated = hashes.filter((h) => known.has(h) && !before.annotations.translations[h]);
+      const targets = hashes.filter((h) => known.has(h) && before.annotations.translations[h]);
+      const r = targets.length > 0 ? await clearTranslations(v, paper, targets, !include_human) : { document: before, cleared: [], keptHuman: [] };
+      const stats = progress(r.document);
+      const hints: string[] = [];
+      if (r.keptHuman.length > 0) hints.push(`${r.keptHuman.length} 件は人が直した訳なので消していません（消すなら利用者に確かめてから include_human=true）。`);
+      if (unknown.length > 0) hints.push(`${unknown.length} 件の hash がこの論文にありません。get_sentences で取り直してください。`);
+      return compact({
+        cleared: r.cleared.length,
+        keptHuman: r.keptHuman,
+        unknownHashes: unknown,
+        untranslated,
+        translated: stats.translated,
+        remainingUnique: remainingOf(r.document).remainingUnique,
+        hint: hints.length > 0 ? hints.join(" ") : undefined,
+      });
+    },
+  },
+  {
     name: "skip_sentences",
     config: {
       title: "訳さないと記録する",
@@ -686,7 +798,7 @@ const WRITE: Tool[] = [
       const hints: string[] = [];
       if (unknown.length > 0) hints.push(`${unknown.length} 件の hash がこの論文にありません。`);
       if (alreadyTranslated.length > 0) {
-        hints.push(`${alreadyTranslated.length} 件は既に訳が付いているので対象外にしませんでした（外したいなら、画面のその文で訳を消してから記録してください）。`);
+        hints.push(`${alreadyTranslated.length} 件は既に訳が付いているので対象外にしませんでした（外したいなら、clear_translations で訳を消してから記録してください）。`);
       }
       return compact({
         skipped: targets.length,

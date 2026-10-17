@@ -36,24 +36,37 @@
 
 /* --- スライドの四角（グループ） --- */
 .app .mu-layer { position: absolute; inset: 0; z-index: 3; }
+/* 四角と札を包む。z-index を付けない（札だけをほかの四角より上に出せるように） */
+.app .mu { position: absolute; transition: opacity .12s; }
+.app .mu.is-dim { opacity: .45; }
 .app .mu-box {
-  position: absolute; padding: 0; margin: 0; cursor: pointer;
+  position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; margin: 0; cursor: pointer;
   border: 2px solid var(--g); border-radius: 3px;
   background: color-mix(in srgb, var(--g) 10%, transparent);
-  transition: opacity .12s, box-shadow .12s;
+  transition: box-shadow .12s;
 }
-.app .mu-box:hover, .app .mu-box.is-active { background: color-mix(in srgb, var(--g) 18%, transparent); box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--g); }
-.app .mu-box.is-dim { opacity: .45; }
+.app .mu:hover > .mu-box, .app .mu.is-hover > .mu-box, .app .mu-box.is-active { background: color-mix(in srgb, var(--g) 18%, transparent); box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--g); }
+/* 選んでいる四角は、札が無くても分かるように輪を太くする */
+.app .mu-box.is-active { box-shadow: 0 0 0 2px #fff, 0 0 0 5px var(--g); }
 .app .mu-box:focus-visible { outline: 3px solid var(--md-sys-color-secondary); outline-offset: 4px; }
 
-/* 名前の札。文字は本文の色で書き、グループの色は横の点と枠で示す（色だけに頼らない） */
+/* 名前の札。文字は本文の色で書き、グループの色は横の点と枠で示す（色だけに頼らない）。
+ * ふだんは置かない（display: none）。文字を隠さず、押す邪魔もしない。グループにカーソルかフォーカスがあるときだけ出す */
 .app .mu-tag {
-  position: absolute; left: -2px; bottom: 100%; margin-bottom: 2px;
-  display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px 1px 4px; white-space: nowrap;
+  position: absolute; left: -2px; bottom: calc(100% - 1px); z-index: 2;
+  display: none; align-items: center; gap: 4px; padding: 1px 2px 1px 4px; white-space: nowrap;
   font: 600 11px/16px var(--font-interface, inherit); color: #1b1b21; background: #fff;
-  border: 1.5px solid var(--g); border-radius: var(--md-shape-full); pointer-events: none;
+  border: 1.5px solid var(--g); border-radius: var(--md-shape-full);
 }
+.app .mu:hover > .mu-tag, .app .mu.is-hover > .mu-tag, .app .mu:focus-within > .mu-tag { display: inline-flex; }
 .app .mu-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--g); flex: none; }
+/* 札の中の消すボタン。札はいつも白い紙の上に出すので、色は明るい配色の M3 のエラーの色に固定する */
+.app .mu-del {
+  display: inline-grid; place-items: center; width: 18px; height: 18px; margin: -1px 0; padding: 0; flex: none;
+  border: 0; border-radius: 50%; background: transparent; color: #44474e; cursor: pointer;
+}
+.app .mu-del:hover { background: #ffdad6; color: #93000a; }
+.app .mu-del:focus-visible { outline: 2px solid var(--md-sys-color-secondary); outline-offset: 1px; }
 
 /* --- 論文のリンク先 --- */
 .app .ln-layer { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
@@ -67,8 +80,30 @@
 .app .ln.ln-equation .ln-frame { border-style: solid; }
 .app .ln.is-active .ln-fill { background: color-mix(in srgb, var(--g) 34%, #fff); }
 .app .ln.is-active .ln-frame { border-width: 3px; }
-.app .ln-tag { pointer-events: auto; cursor: pointer; bottom: auto; margin: 0; translate: -2px calc(-100% - 2px); }
-.app .ln-tag:hover { background: color-mix(in srgb, var(--g) 12%, #fff); }
+/* 論文側の札。ふだんはリンクの左上の角に小さな点だけを置き、点に乗る（かフォーカスする）と名前と消すボタンの札に広がる。
+ * カーソルを受けるのはこの点（札）だけ。塗りや枠は受けない（論文の文字を選べるように） */
+.app .ln-pin {
+  position: absolute; z-index: 2; pointer-events: auto; translate: -50% -50%;
+  display: flex; align-items: center; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--g); box-shadow: 0 0 0 1.5px #fff, 0 1px 2px rgb(0 0 0 / .35);
+}
+.app .ln-go { position: absolute; inset: -3px; padding: 0; margin: 0; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
+.app .ln-go > .mu-dot, .app .ln-pin > .mu-del, .app .ln-go > .ln-name { display: none; }
+.app .ln-go:focus-visible { outline: 2px solid var(--md-sys-color-secondary); outline-offset: 1px; }
+/* 広げた札。点のあった場所を覆う位置に出す（点から札へ動かしても札が消えないように） */
+.app .ln-pin:hover, .app .ln-pin.is-hover, .app .ln-pin:focus-within {
+  width: auto; height: auto; gap: 2px; padding: 1px 2px 1px 4px; translate: -9.5px calc(-100% + 6px);
+  font: 600 11px/16px var(--font-interface, inherit); color: #1b1b21; white-space: nowrap;
+  background: #fff; border: 1.5px solid var(--g); border-radius: var(--md-shape-full); box-shadow: var(--md-elev-1);
+}
+.app .ln-pin:hover > .ln-go, .app .ln-pin.is-hover > .ln-go, .app .ln-pin:focus-within > .ln-go {
+  position: static; display: inline-flex; align-items: center; gap: 4px; padding: 0 2px 0 0; font: inherit; color: inherit;
+}
+.app .ln-pin:hover > .ln-go:hover { text-decoration: underline; }
+.app :is(.ln-pin:hover, .ln-pin.is-hover, .ln-pin:focus-within) > .ln-go > :is(.mu-dot, .ln-name) { display: inline-block; }
+.app :is(.ln-pin:hover, .ln-pin.is-hover, .ln-pin:focus-within) > .mu-del { display: inline-grid; }
+/* 選んでいるグループの点は大きくする */
+.app .ln.is-active .ln-pin:not(:hover, .is-hover, :focus-within) { width: 12px; height: 12px; box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px var(--g); }
 
 /* --- 四角を描く層 --- */
 .app .draw-layer { position: absolute; inset: 0; z-index: 6; cursor: crosshair; touch-action: none; }
@@ -117,21 +152,21 @@
 .app .mp-page { flex: none; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .app .mp-text { min-width: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .app .mp-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
-.app .btn.mp-delete.is-confirm { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
 .app .btn.mp-delete { display: inline-flex; align-items: center; gap: 4px; color: var(--text-error); }
 
 @media (forced-colors: active) {
-  .app .mu-box, .app .ln-frame, .app .ln-fill { border-color: CanvasText; }
+  .app .mu-box, .app .ln-frame, .app .ln-fill, .app .mu-tag { border-color: CanvasText; }
+  .app .ln-pin { forced-color-adjust: none; background: CanvasText; }
   .app .sv-line { stroke: CanvasText; }
 }
 
 /* ページの上端にある四角は、札を枠の内側に置く（ページの外に出て欠けないように） */
-.app .mu-box.tag-inside > .mu-tag { bottom: auto; top: 2px; left: 2px; }
-.app .ln-tag.tag-inside { translate: 2px 2px; }
+.app .mu.tag-inside > .mu-tag { bottom: auto; top: 2px; left: 2px; }
+.app :is(.ln-pin:hover, .ln-pin.is-hover, .ln-pin:focus-within).tag-inside { translate: -9.5px -6px; }
 /* 札・ページ番号・重ねた層は、文字の選択に入れない */
-.app .pp-page .page-no, .app .mu-tag, .app .ln-layer, .app .ln-fills, .app .mu-layer { user-select: none; -webkit-user-select: none; }
+.app .pp-page .page-no, .app .mu-tag, .app .ln-pin, .app .ln-layer, .app .ln-fills, .app .mu-layer { user-select: none; -webkit-user-select: none; }
 /* 選んでいる四角にフォーカスがあっても、選択の輪を残す（.pdf-page :focus-visible の白い縁に上書きされないように） */
-.app .pp-page .mu-box.is-active:focus-visible { box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--g); }
+.app .pp-page .mu-box.is-active:focus-visible { box-shadow: 0 0 0 2px #fff, 0 0 0 5px var(--g); }
 .app .sv-gutter:focus-visible { outline: 3px solid var(--md-sys-color-secondary); outline-offset: -3px; }
 
 /* 取り込み中の知らせ。今の画面の上に重ねる */
@@ -149,3 +184,39 @@
   :root:not([data-theme="light"]) .app .sv-line-halo { stroke: var(--pdf-backdrop); stroke-opacity: .6; }
 }
 :root[data-theme="dark"] .app .sv-line-halo { stroke: var(--pdf-backdrop); stroke-opacity: .6; }
+
+/* --- 全画面（発表のとき） ---
+ * 根の要素を Fullscreen API で全画面にする。使えないときは .is-fill でウィンドウいっぱいに広げる（モーダル 50・知らせ 40 より下）。
+ * 欄の見出しは隠し、道具の帯は上に浮かせて重ねる（下の線の位置を動かさない）。上の端にマウスを近づけると .fs-bar で出す */
+.app .slides-view.is-fullscreen { background: var(--pdf-backdrop); }
+.app .slides-view.is-fill { position: fixed; inset: 0; z-index: 35; }
+.app .slides-view:fullscreen { width: 100%; height: 100%; }
+.app .slides-view:fullscreen::backdrop { background: var(--pdf-backdrop); }
+.app .slides-view.is-fullscreen .sv { position: relative; }
+.app .slides-view.is-fullscreen .sv-pane-head { display: none; }
+.app .slides-view.is-fullscreen .sv-toolbar {
+  position: absolute; top: 8px; left: 12px; right: 12px; z-index: 20;
+  border: 1px solid var(--background-modifier-border); border-radius: var(--md-shape-md);
+  background: var(--md-sys-color-surface-container-high); box-shadow: var(--md-elev-3);
+  opacity: 0; transform: translateY(calc(-100% - 12px)); pointer-events: none;
+  transition: opacity .15s, transform .15s;
+}
+/* マウスが近い・上にある・キーボードでフォーカスしたときに出す */
+.app .slides-view.is-fullscreen.fs-bar .sv-toolbar,
+.app .slides-view.is-fullscreen .sv-toolbar:hover,
+.app .slides-view.is-fullscreen .sv-toolbar:has(:focus-visible) { opacity: 1; transform: none; pointer-events: auto; }
+.app .slides-view.is-fullscreen .pp-scroll { padding-top: 12px; }
+
+.app .sv-fs-hint {
+  position: absolute; top: 64px; left: 50%; transform: translateX(-50%); z-index: 25; pointer-events: none;
+  padding: 8px 16px; border-radius: var(--md-shape-full); box-shadow: var(--md-elev-2);
+  background: var(--md-sys-color-inverse-surface); color: var(--md-sys-color-inverse-on-surface); font-size: var(--font-ui-small);
+  animation: sv-fs-hint 2.5s ease-in forwards;
+}
+@keyframes sv-fs-hint { 0%, 80% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .app .slides-view.is-fullscreen .sv-toolbar { transition: none; }
+  .app .sv-fs-hint { animation: none; }
+}
+/* 消したあとの「元に戻す」の知らせ。画面全体ではなく分割の中の下に出す（この画面だけを全画面にしても見えるように） */
+.app .sv-split .snackbar.sv-snack { position: absolute; bottom: 24px; z-index: 20; max-width: min(560px, calc(100% - 32px)); }

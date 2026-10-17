@@ -17,6 +17,7 @@ import {
   parseMarkupOps,
   putSlides,
   renderSlideLinks,
+  restoreMarkup,
 } from "./slides.ts";
 import { MemoryVault } from "./vault.ts";
 
@@ -188,6 +189,46 @@ test("最後の番号のグループを消しても、その番号は使い直�
   // 同じ名前で足し直されても、次の番号にずらす
   const again = applyMarkupOps(d, [{ op: "add", item: { ...mk(3, 2), id: "new" } }]);
   assert.equal(markupName(again.markups[1]), "Markup-03.03");
+});
+
+test("消したグループを元に戻すと、同じ ID・番号・リンクのまま、元の位置に戻る", () => {
+  const gone = mk(3, 2, { links: [link("a"), link("b")] });
+  const base = applyMarkupOps(deckOf([]), [{ op: "add", item: mk(3, 1) }, { op: "add", item: gone }, { op: "add", item: mk(4, 1) }]);
+  const removed = { ...base, markups: base.markups.filter((m) => m.id !== gone.id) };
+  const back = restoreMarkup(removed, gone, 1);
+  assert.deepEqual(back.markups.map((m) => m.id), ["m-3-1", "m-3-2", "m-4-1"]);
+  assert.equal(back.markups[1], gone);
+  // 既にあるときは何もしない
+  assert.equal(restoreMarkup(back, gone, 0), back);
+  // 保存する前（消す → 戻す）なら、送る操作は無い
+  assert.deepEqual(diffMarkups(base, back, new Set([gone.id])), []);
+});
+
+test("消したことを保存したあとに元に戻しても、名前は変わらない", async () => {
+  const v = new MemoryVault();
+  const id = await importPaper(v, "paper.pdf", PDF, "Paper");
+  await putSlides(v, id, "talk.pdf", PDF);
+  const gone = mk(3, 2, { links: [link("a")] });
+  const saved = (await changeMarkups(v, id, [{ op: "add", item: mk(3, 1) }, { op: "add", item: gone }])).deck;
+  const afterRemove = (await changeMarkups(v, id, diffMarkups(saved, { ...saved, markups: saved.markups.filter((m) => m.id !== gone.id) }))).deck;
+  assert.equal(afterRemove.used?.[3], 2);
+  const local = restoreMarkup(afterRemove, gone, 1);
+  const ops = diffMarkups(afterRemove, local, new Set([gone.id]));
+  assert.deepEqual(ops, [{ op: "restore", item: gone }]);
+  // HTTP を通る形（JSON）にしても、戻す操作のまま届く
+  const r = await changeMarkups(v, id, JSON.parse(JSON.stringify(ops)));
+  const back = r.deck.markups.find((m) => m.id === gone.id);
+  assert.equal(back && markupName(back), "Markup-03.02");
+  assert.deepEqual(back?.links.map((l) => l.id), ["a"]);
+  assert.match(r.note, /### Markup-03\.02/);
+  // 同じ操作をもう一度当てても増えない
+  assert.equal(applyMarkupOps(r.deck, ops).markups.length, r.deck.markups.length);
+  // 戻す操作でなく足す操作（ほかの部分を足す）なら、これまでどおり次の番号にずらす
+  const other = applyMarkupOps(afterRemove, [{ op: "add", item: { ...gone, id: "other" } }]);
+  assert.equal(markupName(other.markups.at(-1)!), "Markup-03.03");
+  // 戻すときでも、同じ名前が既にあればずらす
+  const clash = applyMarkupOps(r.deck, parseMarkupOps([{ op: "restore", item: { ...gone, id: "x" } }]));
+  assert.equal(markupName(clash.markups.at(-1)!), "Markup-03.03");
 });
 
 test("メモに HTML コメントの記号があっても、ノートの一覧の範囲は壊れない", async () => {

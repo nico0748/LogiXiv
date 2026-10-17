@@ -13,14 +13,17 @@ import { READ_TOOLS, WRITE_TOOLS, type Tool } from "./tools.ts";
 const INSTRUCTIONS = `PaperLens は、論文を読みながら訳・用語・数式・読解メモを Markdown のノートに残すアプリです。
 データは保存先フォルダの普通のファイルで、Obsidian の保管庫としても開けます。
 
-- 論文1本 = papers/<論文ID>/ のフォルダ。paper.pdf（原文）、note.md（読解ノート）、paperlens.json（マーカーの位置など）、sentences.json（1 文ずつの対訳）が入っています。
+- 論文1本 = papers/<論文ID>/ のフォルダ。paper.pdf（原文）、note.md（読解ノート）、paperlens.json（マーカーの位置など）、sentences.json（1 文ずつの対訳）が入っています。発表スライドがあれば slides.pdf（表示に使う PDF）、slides.pptx（PPTX から取り込んだときの元のファイル）、slides.json（囲んだグループと論文へのリンク）も入ります。
+- ファイルを直接書き換えず、必ずツールで変更してください（画面と同時に書いても消し合わないよう、ツールは変更を 1 件ずつ当てます）。
 - 読解ノートはテンプレートから作られ、段階（## 見出し）ごとに記録欄があります。記録欄は set_fields で書きます。記録欄の外側は利用者が自由に書く場所なので、変更しないでください。
 - 読解の段階は status で表します: ${STATUSES.join(" → ")}。
 - まず get_settings と list_papers を呼び、論文 ID と記録欄の ID を確かめてください。本文は read_paper_text で数ページずつ読みます。
-- マーカー（add_highlight）は PDF の文字どおりに指定すると、画面の PDF 上にも色が付きます。
+- マーカー（add_highlight）は PDF の文字どおりに指定すると、画面の PDF 上にも色が付きます。引く場所を直すときは update_highlight に text か page を渡します。
+- 数式・図・表など文字で読めないところは get_page_image でページの画像を見ます（rect で一部だけを切り出せます）。
+- 全論文の用語と数式を横断して見るときは get_lists（画面の「リスト」と同じ単語帳・数式帳）を使います。
 - 書く日本語は、です・ます調ではなく、ノートらしい簡潔な常体（〜である、〜する）にそろえます。専門用語は初出で原語を括弧書きにします。
-- 全文を 1 文ずつ訳すときは get_sentence_outline → get_translation_batch → set_translations を、remainingUnique が 0 になるまで繰り返します（プロンプト translate_paper に手順があります）。文の指定は hash で行います。訳す対象でない文は skip_sentences、区切りの誤りは fix_sentence_boundary、訳語の統一は update_glossary を使います。sentences.json がまだ無い論文では parse_sentences を呼びます。
-- 論文に発表スライド（slides.pdf）があれば、利用者がスライドを四角で囲んだ部分（グループ。名前は Markup-03.02 = 3 ページ目の 2 個目）を get_slide_markups で読めます。各グループが論文のどの文章・図・数式に当たるかを link_slide_markup でつなぐと、画面ではスライドと論文が線で結ばれます。
+- 全文を 1 文ずつ訳すときは get_sentence_outline → get_translation_batch → set_translations を、remainingUnique が 0 になるまで繰り返します（プロンプト translate_paper に手順があります）。文の指定は hash で行います。訳す対象でない文は skip_sentences、区切りの誤りは fix_sentence_boundary（取り消しは get_sentence_outline の boundaryEdits の id で）、訳語の統一は update_glossary（1 語だけ消すなら remove_glossary_terms）を使います。訳を消すのは clear_translations、文のメモを消すのは remove_sentence_note です。人が直した訳は、利用者に確かめずに消さないでください。sentences.json がまだ無い論文では parse_sentences を呼びます。
+- 発表スライドは import_slides（PDF か PPTX の絶対パス）で論文に取り込みます。スライドを四角で囲んだ部分をグループと呼び、名前は Markup-03.02（3 ページ目の 2 個目）です。get_slide_markups で一覧と四角の中の文字を、read_slide_text でスライドの文字を読めます。囲むのは add_slide_markup（rect か、スライドの文字列 text で）で、各グループが論文のどの文章・図・数式に当たるかを link_slide_markup でつなぐと、画面ではスライドと論文が線で結ばれます。直すのは update_slide_markup・update_slide_link・unlink_slide_markup、消すのは delete_slide_markup（戻り値の removed を restore_slide_markup に渡すと戻せます）です。
 - アプリを開いている場合、ここでの変更は画面にすぐ反映されます。`;
 
 export function createServer(opts: { readOnly?: boolean } = {}) {

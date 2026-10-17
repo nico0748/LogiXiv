@@ -162,3 +162,139 @@ test("PPTX の見分け: 拡張子で決め、無いときだけ中身を見る"
   const k = await api(`/api/papers/${id}/slides?name=talk.key`, { method: "POST", body: new Uint8Array(zip("Index/")) });
   assert.equal(k.status, 400);
 });
+
+// --- MCP で囲む・直す・消す・取り込む --------------------------------------------
+
+const slidesFile = path.join(data, "talk-slides.pdf");
+
+test("MCP: スライドの取り込みは絶対パスの PDF だけを受け付け、差し替えてもグループを残す", async () => {
+  fs.writeFileSync(slidesFile, slides);
+  await assert.rejects(tool("import_slides", { paper: id, source: "talk.pdf" }), /絶対パスで指定/);
+  await assert.rejects(tool("import_slides", { paper: id, source: "https://example.com/talk.pdf" }), /URL からは取り込めません/);
+  await assert.rejects(tool("import_slides", { paper: id, source: path.join(data, "none.pdf") }), /ファイルが見つかりません/);
+  const key = path.join(data, "talk.key");
+  fs.writeFileSync(key, "x");
+  await assert.rejects(tool("import_slides", { paper: id, source: key }), /PPTX か PDF に書き出して/);
+  await assert.rejects(tool("import_slides", { paper: "nope", source: slidesFile }), /論文が見つかりません/);
+  const r = await tool("import_slides", { paper: id, source: slidesFile });
+  assert.equal(r.source, "talk-slides.pdf");
+  assert.equal(r.slidePages, 2);
+  assert.equal(r.replaced, true);
+  assert.equal(r.keptMarkups, 1);
+  assert.deepEqual(r.outOfRange, []);
+});
+
+test("MCP: スライドの文字をページごとに読む", async () => {
+  const t = TOOLS.find((x) => x.name === "read_slide_text")!;
+  const all = (await t.handler({ paper: id })).content[0].text;
+  assert.match(all, /^総ページ数: 2/);
+  assert.match(all, /--- スライド p\.1 ---\nTitle slide/);
+  assert.match(all, /Proposed method/);
+  const two = (await t.handler({ paper: id, from_page: 2 })).content[0].text;
+  assert.doesNotMatch(two, /Title slide/);
+});
+
+test("MCP: get_slide_markups は範囲・色・リンクの位置・スライドの情報も返す", async () => {
+  const g = await tool("get_slide_markups", { paper: id });
+  assert.equal(g.source, "talk-slides.pdf");
+  assert.equal(g.slidePages, 2);
+  assert.ok(g.importedAt);
+  const m = g.markups[0];
+  assert.deepEqual(m.rect, { x: 0.05, y: 0.1, w: 0.4, h: 0.12 });
+  assert.equal(m.color, 0);
+  assert.equal(m.colorHex, "#2a78d6");
+  assert.equal(m.outOfRange, undefined);
+  assert.ok(m.links.length > 0);
+  assert.ok(m.links.every((l: { rects: unknown[] }) => l.rects.length > 0));
+});
+
+test("MCP: 文字か範囲でスライドを囲み、名前と色が自動で決まる", async () => {
+  const a = await tool("add_slide_markup", { paper: id, slide_page: 1, text: "Title  slide" });
+  assert.equal(a.markup, "Markup-01.01");
+  assert.equal(a.color, 1); // 0 番は Markup-02.01 が使っている
+  // 文字を囲む四角なので、文字はその中に入る
+  const g = await tool("get_slide_markups", { paper: id });
+  assert.equal(g.markups.find((m: { name: string }) => m.name === "Markup-01.01").slideText, "Title slide");
+  const b = await tool("add_slide_markup", { paper: id, slide_page: 2, rect: { x: 0.5, y: 0.5, w: 0.3, h: 0.3 }, memo: "図の説明" });
+  assert.equal(b.markup, "Markup-02.02");
+  const deck = JSON.parse(fs.readFileSync(path.join(data, "papers", id, "slides.json"), "utf8"));
+  assert.equal(deck.used["2"], 2);
+  assert.equal(deck.markups.find((m: { id: string }) => m.id === b.id).memo, "図の説明");
+  await assert.rejects(tool("add_slide_markup", { paper: id, slide_page: 3, rect: { x: 0, y: 0, w: 0.1, h: 0.1 } }), /スライドは 2 ページです/);
+  await assert.rejects(tool("add_slide_markup", { paper: id, slide_page: 1 }), /どちらか一方/);
+  await assert.rejects(tool("add_slide_markup", { paper: id, slide_page: 1, text: "x", rect: { x: 0, y: 0, w: 0.1, h: 0.1 } }), /どちらか一方/);
+  await assert.rejects(tool("add_slide_markup", { paper: id, slide_page: 1, text: "Proposed method" }), /p\.1 にその文字列が見つかりませんでした/);
+});
+
+test("MCP: グループのメモ・色・範囲と、リンクの種類を直す", async () => {
+  const u = await tool("update_slide_markup", { paper: id, markup: "Markup-02.02", color: 5, rect: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 } });
+  assert.equal(u.color, 5);
+  assert.equal(u.colorHex, "#008300");
+  for (const k of ["x", "y", "w", "h"] as const) assert.ok(Math.abs(u.rect[k] - { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }[k]) < 1e-9, JSON.stringify(u.rect));
+  assert.equal(u.memo, "図の説明"); // 指定しなかった項目は変えない
+  await assert.rejects(tool("update_slide_markup", { paper: id, markup: "Markup-02.02" }), /どれかを指定/);
+  await assert.rejects(tool("update_slide_markup", { paper: id, markup: "Markup-02.02", color: 99 }), /color は 0〜7/);
+  await assert.rejects(tool("update_slide_markup", { paper: id, markup: "Markup-07.01", memo: "x" }), /グループが見つかりません/);
+  // 前からの呼び方も使える
+  assert.equal((await tool("set_slide_markup_memo", { paper: id, markup: "02.02", memo: "別のメモ" })).memo, "別のメモ");
+
+  const byName = async (n: string) => (await tool("get_slide_markups", { paper: id })).markups.find((m: { name: string }) => m.name === n);
+  const l = (await byName("Markup-02.01")).links[0];
+  const kind = l.kind === "equation" ? "figure" : "equation";
+  const r = await tool("update_slide_link", { paper: id, markup: "Markup-02.01", link: l.id, kind });
+  assert.equal(r.kind, kind === "equation" ? "数式" : "図");
+  assert.equal((await byName("Markup-02.01")).links[0].kind, kind);
+  await assert.rejects(tool("update_slide_link", { paper: id, markup: "Markup-02.01", link: "l-none", kind: "text" }), /そのリンクはありません/);
+});
+
+test("MCP: グループを消すとリンクも消え、消したものを丸ごと返す", async () => {
+  await tool("link_slide_markup", { paper: id, markup: "Markup-02.02", kind: "figure", page: 1, rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 } });
+  const d = await tool("delete_slide_markup", { paper: id, markup: "Markup-02.02" });
+  assert.equal(d.markup, "Markup-02.02");
+  assert.equal(d.links, 1);
+  assert.equal(d.removed.memo, "別のメモ");
+  assert.equal(d.removed.links.length, 1);
+  const g = await tool("get_slide_markups", { paper: id });
+  assert.ok(!g.markups.some((m: { name: string }) => m.name === "Markup-02.02"));
+  const note = fs.readFileSync(path.join(data, "papers", id, "note.md"), "utf8");
+  assert.doesNotMatch(note, /Markup-02\.02/);
+  // 番号は使い直さない
+  assert.equal((await tool("add_slide_markup", { paper: id, slide_page: 2, rect: { x: 0.1, y: 0.6, w: 0.2, h: 0.2 } })).markup, "Markup-02.03");
+  await assert.rejects(tool("delete_slide_markup", { paper: id, markup: "Markup-02.02" }), /グループが見つかりません/);
+});
+
+test("MCP: 消したグループを restore_slide_markup で同じ名前のまま戻す", async () => {
+  const d = await tool("delete_slide_markup", { paper: id, markup: "Markup-01.01" });
+  const r = await tool("restore_slide_markup", { paper: id, item: d.removed });
+  assert.equal(r.markup, "Markup-01.01");
+  assert.equal(r.id, d.removed.id);
+  const g = await tool("get_slide_markups", { paper: id });
+  assert.deepEqual(g.markups.find((m: { name: string }) => m.name === "Markup-01.01").rect, d.removed.rect);
+});
+
+test("MCP: ページが減ったスライドに差し替えると、ページの外のグループに印が付く", async () => {
+  const doc = await PDFDocument.create();
+  doc.addPage([960, 540]);
+  const one = path.join(data, "one-page.pdf");
+  fs.writeFileSync(one, await doc.save());
+  const r = await tool("import_slides", { paper: id, source: one });
+  assert.equal(r.slidePages, 1);
+  assert.ok(r.outOfRange.includes("Markup-02.01"), JSON.stringify(r.outOfRange));
+  const g = await tool("get_slide_markups", { paper: id });
+  assert.equal(g.slidePages, 1);
+  assert.equal(g.markups.find((m: { name: string }) => m.name === "Markup-02.01").outOfRange, true);
+  assert.equal(g.markups.find((m: { name: string }) => m.name === "Markup-01.01").outOfRange, undefined);
+  await assert.rejects(tool("add_slide_markup", { paper: id, slide_page: 2, rect: { x: 0, y: 0, w: 0.1, h: 0.1 } }), /スライドは 1 ページです/);
+  await tool("import_slides", { paper: id, source: slidesFile });
+});
+
+test("MCP: スライドの道具は読み取りと書き込みに分かれている", async () => {
+  const { READ_TOOLS, WRITE_TOOLS } = await import("../mcp/tools.ts");
+  const read = READ_TOOLS.map((t) => t.name);
+  const write = WRITE_TOOLS.map((t) => t.name);
+  for (const n of ["get_slide_markups", "read_slide_text"]) assert.ok(read.includes(n) && !write.includes(n), n);
+  for (const n of ["import_slides", "add_slide_markup", "link_slide_markup", "update_slide_link", "unlink_slide_markup", "update_slide_markup", "set_slide_markup_memo", "delete_slide_markup", "restore_slide_markup"]) {
+    assert.ok(write.includes(n) && !read.includes(n), n);
+  }
+  assert.equal(TOOLS.find((t) => t.name === "delete_slide_markup")!.config.annotations.destructiveHint, true);
+});
