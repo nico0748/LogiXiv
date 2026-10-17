@@ -263,8 +263,7 @@ test("MCP: グループを消すとリンクも消え、消したものを丸ご
   await assert.rejects(tool("delete_slide_markup", { paper: id, markup: "Markup-02.02" }), /グループが見つかりません/);
 });
 
-// TODO: restore op は別ブランチで追加（src/lib/slides.ts の MarkupOp に { op: "restore", item } が入ったら skip を外す）
-test("MCP: 消したグループを restore_slide_markup で同じ名前のまま戻す", { skip: "restore op は別ブランチで追加" }, async () => {
+test("MCP: 消したグループを restore_slide_markup で同じ名前のまま戻す", async () => {
   const d = await tool("delete_slide_markup", { paper: id, markup: "Markup-01.01" });
   const r = await tool("restore_slide_markup", { paper: id, item: d.removed });
   assert.equal(r.markup, "Markup-01.01");
