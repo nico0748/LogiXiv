@@ -22,6 +22,7 @@ interface Props {
   vaultName: string;
   onOpenSettings: () => void;
   onSwitchVault?: () => void;
+  notify?: (text: string) => void;
 }
 
 export function LeftSidebar(p: Props) {
@@ -73,7 +74,7 @@ export function LeftSidebar(p: Props) {
       </div>
 
       {p.tab === "files" ? (
-        <PaperListPane backend={p.backend} papers={p.papers} current={p.current} showing={p.current !== null} onOpen={p.onOpenPaper} onHit={p.onHit} onAdd={() => fileRef.current?.click()} />
+        <PaperListPane backend={p.backend} papers={p.papers} current={p.current} showing={p.current !== null} onOpen={p.onOpenPaper} onHit={p.onHit} onAdd={() => fileRef.current?.click()} notify={p.notify} />
       ) : (
         <SearchView {...p} />
       )}

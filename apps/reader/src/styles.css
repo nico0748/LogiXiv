@@ -355,6 +355,15 @@ mark { background: var(--text-highlight-bg); color: inherit; border-radius: 2px;
   padding: 6px 8px 4px; letter-spacing: 0.02em;
 }
 .nav-count { font-weight: 400; margin-left: 4px; }
+.list-head { display: flex; align-items: center; gap: 8px; }
+.list-head > span { flex: 1; min-width: 0; }
+.sort-select {
+  font: inherit; font-weight: 400; color: var(--text-muted); background: transparent; cursor: pointer;
+  border: 1px solid transparent; border-radius: var(--radius-s); padding: 2px 4px; max-width: 60%;
+}
+.sort-select:hover { background: var(--background-modifier-hover); }
+.sort-select:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; }
+.bib-export { margin: 6px 4px 0; }
 .nav-files { list-style: none; margin: 0; padding: 0; }
 .nav-file-title {
   width: 100%; text-align: left; border: 0; background: transparent; cursor: pointer; color: var(--text-muted);

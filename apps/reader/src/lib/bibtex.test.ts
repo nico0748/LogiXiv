@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bibKey, escapeTex, toBibtex } from "./bibtex.ts";
+import { bibKey, escapeTex, toBibFile, toBibtex } from "./bibtex.ts";
 
 const base = { title: "Attention Is All You Need", authors: ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"], year: "2017" };
 
@@ -51,4 +51,15 @@ test("8. 日本語の題名でも、キーに日本語が入らない", () => {
   const k = bibKey({ title: "長い論文を読むための疎な注意", authors: ["Taro Yamada"], year: "2024" }, "x");
   assert.equal(k, "yamada2024");
   assert.equal(bibKey({ title: "注意", authors: ["山田 太郎"], year: "2024" }, "p-1"), "p1");
+});
+
+test("まとめて書き出すと、重なったキーに a, b を付ける", () => {
+  const bib = toBibFile([
+    { fm: base, id: "x" },
+    { fm: { ...base, venue: "NeurIPS" }, id: "y" },
+    { fm: base, id: "z" },
+  ]);
+  const keys = [...bib.matchAll(/^@\w+\{([^,]+),/gm)].map((m) => m[1]);
+  assert.deepEqual(keys, ["vaswani2017attention", "vaswani2017attentiona", "vaswani2017attentionb"]);
+  assert.match(bib, /\}\n\n@inproceedings/);
 });
