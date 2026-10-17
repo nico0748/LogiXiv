@@ -13,7 +13,7 @@ export interface Snack {
   n: number;
 }
 
-export function Snackbar({ snack, onClose }: { snack: Snack | null; onClose: () => void }) {
+export function Snackbar({ snack, onClose, className }: { snack: Snack | null; onClose: () => void; className?: string }) {
   const [hold, setHold] = useState({ hover: false, focus: false });
   const left = useRef(0);
   const closeRef = useRef(onClose);
@@ -40,7 +40,7 @@ export function Snackbar({ snack, onClose }: { snack: Snack | null; onClose: () 
     <div role="status" aria-live="polite">
       {snack && (
         <div
-          className="snackbar"
+          className={`snackbar${className ? ` ${className}` : ""}`}
           onMouseEnter={() => setHold((h) => ({ ...h, hover: true }))}
           onMouseLeave={() => setHold((h) => ({ ...h, hover: false }))}
           onFocus={() => setHold((h) => ({ ...h, focus: true }))}

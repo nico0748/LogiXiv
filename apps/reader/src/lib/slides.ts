@@ -158,6 +158,8 @@ export type MarkupPatch = Partial<Pick<SlideMarkup, "rect" | "color" | "memo">>;
 
 export type MarkupOp =
   | { op: "add"; item: SlideMarkup }
+  /** 消したグループを元に戻す。消した番号でも、同じ名前のものが今無ければ番号を変えない（名前を変えない） */
+  | { op: "restore"; item: SlideMarkup }
   | { op: "update"; id: string; patch: MarkupPatch }
   | { op: "remove"; id: string }
   | { op: "addLink"; id: string; link: SlideLink }
@@ -168,12 +170,14 @@ export function applyMarkupOps(deck: SlideDeck, ops: MarkupOp[]): SlideDeck {
   const list = [...deck.markups];
   const used = { ...(deck.used ?? {}) };
   for (const op of ops) {
-    const id = op.op === "add" ? op.item.id : op.id;
+    const id = op.op === "add" || op.op === "restore" ? op.item.id : op.id;
     const i = list.findIndex((m) => m.id === id);
-    if (op.op === "add") {
+    if (op.op === "add" || op.op === "restore") {
       if (i >= 0) continue; // 同じ ID が既にあれば、先に足した側を残す
-      // 同じ名前が既にある（別の書き手が同じページに足した）か、消したグループの番号なら、次の番号にずらす
-      const clash = list.some((m) => m.page === op.item.page && m.index === op.item.index) || op.item.index <= (used[op.item.page] ?? 0);
+      // 同じ名前が既にある（別の書き手が同じページに足した）か、消したグループの番号なら、次の番号にずらす。
+      // 元に戻すときは、消したときと同じ ID の同じ部分なので、消した番号のまま戻す（名前を変えない）
+      const clash =
+        list.some((m) => m.page === op.item.page && m.index === op.item.index) || (op.op === "add" && op.item.index <= (used[op.item.page] ?? 0));
       const item = clash ? { ...op.item, index: nextIndex(list, op.item.page, used) } : op.item;
       list.push(item);
       used[item.page] = Math.max(used[item.page] ?? 0, item.index);
@@ -192,7 +196,16 @@ export function applyMarkupOps(deck: SlideDeck, ops: MarkupOp[]): SlideDeck {
   return { ...deck, used, markups: list };
 }
 
-export function diffMarkups(base: SlideDeck, next: SlideDeck): MarkupOp[] {
+/** 消したグループを、消す前の位置（at 番目）に同じ ID・番号・リンクのまま戻す。既にあれば何もしない */
+export function restoreMarkup(deck: SlideDeck, item: SlideMarkup, at: number): SlideDeck {
+  if (deck.markups.some((m) => m.id === item.id)) return deck;
+  const markups = [...deck.markups];
+  markups.splice(Math.min(Math.max(0, at), markups.length), 0, item);
+  return { ...deck, used: { ...deck.used, [item.page]: Math.max(deck.used?.[item.page] ?? 0, item.index) }, markups };
+}
+
+/** base から next への操作。restored に入っている ID のグループを足すときは、元に戻す操作にする */
+export function diffMarkups(base: SlideDeck, next: SlideDeck, restored: ReadonlySet<string> = new Set()): MarkupOp[] {
   const ops: MarkupOp[] = [];
   const before = new Map(base.markups.map((m) => [m.id, m]));
   const ids = new Set(next.markups.map((m) => m.id));
@@ -200,7 +213,7 @@ export function diffMarkups(base: SlideDeck, next: SlideDeck): MarkupOp[] {
   for (const m of next.markups) {
     const b = before.get(m.id);
     if (!b) {
-      ops.push({ op: "add", item: m });
+      ops.push({ op: restored.has(m.id) ? "restore" : "add", item: m });
       continue;
     }
     if (JSON.stringify(b) === JSON.stringify(m)) continue;
@@ -277,6 +290,8 @@ export function parseMarkupOps(raw: unknown): MarkupOp[] {
     switch (o.op) {
       case "add":
         return { op: "add", item: markupOf(o.item) };
+      case "restore":
+        return { op: "restore", item: markupOf(o.item) };
       case "remove":
         return { op: "remove", id: str(o.id, "id") };
       case "update": {
@@ -297,7 +312,7 @@ export function parseMarkupOps(raw: unknown): MarkupOp[] {
       case "removeLink":
         return { op: "removeLink", id: str(o.id, "id"), link: str(o.link, "link") };
       default:
-        return bad(`op は add / update / remove / addLink / updateLink / removeLink のどれかです（${String(o.op)}）。`);
+        return bad(`op は add / restore / update / remove / addLink / updateLink / removeLink のどれかです（${String(o.op)}）。`);
     }
   });
 }

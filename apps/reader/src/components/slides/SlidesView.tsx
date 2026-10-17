@@ -8,8 +8,10 @@
 // - 左: スライド。「囲む」でドラッグすると四角のマークアップ（グループ）ができる。名前は Markup-ページ.番号。
 // - 右: 論文。マークアップを選んでいる間、文章はドラッグで選んで、図・数式は四角で囲んでリンクする。
 // - 間: グループの色の線でつなぐ。片方が画面の外にあるときは、端まで点線で引く。
+// - 名前の札は、グループにカーソルかフォーカスがあるときだけ出す（いつも出すとスライドや論文の文字を隠すため）。
+//   論文側は札の代わりに小さな色の点を置き、点に乗ると札に広がる。札の消すボタンでグループごと（両側とも）消せる。
 
-import { Frame, MousePointer2, Spline, SquareDashed, Upload } from "lucide-react";
+import { Frame, MousePointer2, Spline, SquareDashed, Trash2, Upload } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Rect } from "../../lib/model.ts";
 import { newId } from "../../lib/model.ts";
@@ -28,6 +30,7 @@ import {
   normalizeRect,
   overlapRatio,
 } from "../../lib/slides.ts";
+import { Snackbar, type Snack } from "../Snackbar.tsx";
 import { PdfPages, type PdfPagesHandle } from "./PdfPages.tsx";
 import "./slides.css";
 import type { Slides } from "./useSlides.ts";
@@ -347,16 +350,50 @@ function Split({
     window.getSelection()?.removeAllRanges();
   };
 
-  // キー操作: R で囲む、V で選ぶ、F/E/T で論文側の道具、Esc で道具を戻す
+  // --- 消す・元に戻す ---------------------------------------------------------
+  // 論文側のリンクはグループの中にあるので、どちらの側から消してもグループごと（両側とも）消える。
+  // その場で確かめずに消すので、下の知らせ（と ⌘Z / Ctrl+Z）で元に戻せるようにする
+  const removeGroup = (m: SlideMarkup) => {
+    slides.remove(m.id);
+    if (active === m.id) setActive(null);
+    // 消した要素の上では mouseleave が来ないので、ここで外す
+    setHover(null);
+  };
+  const undoRemove = () => {
+    const m = slides.restore();
+    if (m) setActive(m.id);
+  };
+  const undoRef = useRef(undoRemove);
+  undoRef.current = undoRemove;
+  const removed = slides.lastRemoved;
+  const removedSnack = useMemo<Snack | null>(
+    () =>
+      removed && {
+        message: `${markupName(removed.markup)} を消しました${removed.markup.links.length ? `（リンク ${removed.markup.links.length} 件も）` : ""}`,
+        action: { label: "元に戻す", onClick: () => undoRef.current() },
+        ms: 8000,
+        n: removed.n,
+      },
+    [removed],
+  );
+
+  // キー操作: R で囲む、V で選ぶ、F/E/T で論文側の道具、Esc で道具を戻す、Delete で選んだグループを消す、⌘Z で消したのを戻す
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => undefined);
   keyRef.current = (e: KeyboardEvent) => {
     const t = e.target as HTMLElement | null;
-    if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
-    // 入力中、メニューやモーダルの中、ほかの画面を重ねているときは使わない
+    if (e.defaultPrevented || e.isComposing) return;
+    // 入力中、メニューやモーダルの中、ほかの画面を重ねているときは使わない（入力欄の ⌘Z はその欄の取り消しに回す）
     if (t?.closest("input, textarea, select, [contenteditable], dialog, [role=menu], [role=dialog], .menu-surface:not(.sv-sel)")) return;
     if (document.querySelector("dialog[open], [role=dialog][aria-modal=true]")) return;
     const k = e.key.toLowerCase();
-    if (k === "r") setSlideTool("box");
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && k === "z" && removed) {
+      e.preventDefault();
+      undoRemove();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if ((e.key === "Delete" || e.key === "Backspace") && activeMarkup) removeGroup(activeMarkup);
+    else if (k === "r") setSlideTool("box");
     else if (k === "v") setSlideTool("select");
     else if (k === "t" && active) setPaperTool("text");
     else if (k === "f" && active) setPaperTool("figure");
@@ -404,33 +441,54 @@ function Split({
   const hov = hover && deck.markups.some((m) => m.id === hover) ? hover : null;
   const dim = (id: string) => (hov ? hov !== id : active ? active !== id : false);
   const color = (m: SlideMarkup) => ({ "--g": GROUP_COLORS[m.color % GROUP_COLORS.length] }) as CSSProperties;
+  /** 札の中の消すボタン。スライド側と論文側のどちらにも置き、どちらで押してもグループごと消す */
+  const delBtn = (m: SlideMarkup) => (
+    <button
+      type="button"
+      className="mu-del"
+      aria-label={`${markupName(m)} を消す（論文のリンク ${m.links.length} 件も消えます）`}
+      title={`${markupName(m)} を消す（論文のリンク ${m.links.length} 件も消えます。消したあと元に戻せます）`}
+      onClick={(e) => {
+        e.stopPropagation();
+        removeGroup(m);
+      }}
+    >
+      <Trash2 size={12} aria-hidden="true" />
+    </button>
+  );
 
   const slideOverlay = (n: number) => (
     <>
       <div className="mu-layer">
         {(byPage.slidesBy.get(n) ?? []).map((m) => (
-          <button
+          // 四角（選ぶボタン）と札（消すボタン入り）を並べて包む。ボタンの中にボタンは置けないため。
+          // カーソルは包みで見るので、四角から札へ動かしても札は消えない
+          <div
             key={m.id}
-            type="button"
-            data-mk={m.id}
-            className={`mu-box${m.id === active ? " is-active" : ""}${dim(m.id) ? " is-dim" : ""}${m.rect.y < 0.05 ? " tag-inside" : ""}`}
-            style={{ ...color(m), left: `${m.rect.x * 100}%`, top: `${m.rect.y * 100}%`, width: `${m.rect.w * 100}%`, height: `${m.rect.h * 100}%` }}
-            aria-label={`${markupName(m)}（リンク ${m.links.length} 件）`}
-            aria-pressed={m.id === active}
+            className={`mu${hov === m.id ? " is-hover" : ""}${dim(m.id) ? " is-dim" : ""}${m.rect.y < 0.05 ? " tag-inside" : ""}`}
+            style={{ ...color(m), ...pos(m.rect) }}
             onMouseEnter={() => setHover(m.id)}
             onMouseLeave={() => setHover(null)}
             onFocus={() => setHover(m.id)}
-            onBlur={() => setHover(null)}
-            onClick={() => {
-              setActive(m.id === active ? null : m.id);
-              if (m.id !== active && m.links[0]) showLink(m.links[0]);
-            }}
+            onBlur={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setHover(null)}
           >
+            <button
+              type="button"
+              data-mk={m.id}
+              className={`mu-box${m.id === active ? " is-active" : ""}`}
+              aria-label={`${markupName(m)}（リンク ${m.links.length} 件）`}
+              aria-pressed={m.id === active}
+              onClick={() => {
+                setActive(m.id === active ? null : m.id);
+                if (m.id !== active && m.links[0]) showLink(m.links[0]);
+              }}
+            />
             <span className="mu-tag">
               <span className="mu-dot" aria-hidden="true" />
               {markupName(m)}
+              {delBtn(m)}
             </span>
-          </button>
+          </div>
         ))}
       </div>
       {slideTool === "box" && <DrawLayer label={`スライド ${n} ページ目を囲む`} onBox={(r) => addMarkup(n, r)} />}
@@ -458,21 +516,30 @@ function Split({
             <div key={l.id} className={`ln ${cls}`} style={color(m)}>
               {l.kind !== "text" && <div className="ln-frame" style={pos(b)} />}
               <div className="ln-anchor" data-ln={l.id} style={pos(b)} />
-              <button
-                type="button"
-                className={`mu-tag ln-tag${b.y < 0.05 ? " tag-inside" : ""}`}
+              {/* 文字の選択を邪魔しないよう、カーソルを受けるのは左上の点（乗ると札に広がる）だけにする */}
+              <div
+                className={`ln-pin${hov === m.id ? " is-hover" : ""}${b.y < 0.05 ? " tag-inside" : ""}`}
                 style={{ left: `${b.x * 100}%`, top: `${b.y * 100}%` }}
-                title={`${markupName(m)} の${LINK_KIND_LABEL[l.kind]}。押すとスライドへ移ります`}
                 onMouseEnter={() => setHover(m.id)}
                 onMouseLeave={() => setHover(null)}
-                onClick={() => {
-                  setActive(m.id);
-                  showMarkup(m);
-                }}
+                onFocus={() => setHover(m.id)}
+                onBlur={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setHover(null)}
               >
-                <span className="mu-dot" aria-hidden="true" />
-                {markupName(m)}
-              </button>
+                <button
+                  type="button"
+                  className="ln-go"
+                  aria-label={`${markupName(m)} の${LINK_KIND_LABEL[l.kind]}。押すとスライドへ移ります`}
+                  title={`${markupName(m)} の${LINK_KIND_LABEL[l.kind]}。押すとスライドへ移ります`}
+                  onClick={() => {
+                    setActive(m.id);
+                    showMarkup(m);
+                  }}
+                >
+                  <span className="mu-dot" aria-hidden="true" />
+                  <span className="ln-name">{markupName(m)}</span>
+                </button>
+                {delBtn(m)}
+              </div>
             </div>
           );
         })}
@@ -643,6 +710,8 @@ function Split({
             );
           })}
         </svg>
+        {/* 元に戻す知らせは分割の中に出す（この画面だけを全画面にしても見えるように） */}
+        <Snackbar snack={removedSnack} onClose={slides.dismissRemoved} className="sv-snack" />
       </div>
     </div>
   );

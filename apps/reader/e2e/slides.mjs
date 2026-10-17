@@ -4,6 +4,7 @@
 // 2. 画面で「囲む」を選び、スライドの 2 ページ目を囲む → Markup-02.01 ができる
 // 3. 論文の文を選んで「文章としてリンク」、図を囲んでリンクする → 線が 2 本引かれる
 // 4. slides.json と note.md に残ること、MCP の書き込みで線が増えることを確かめる
+// 5. 名前の札はカーソルを乗せたときだけ出ること、スライド側・論文側・Delete キーのどれで消してもグループごと消え、元に戻せることを確かめる
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,7 +71,7 @@ try {
     await page.mouse.down();
     await page.mouse.move(b.x + b.width * 0.5, b.y + b.height * 0.25, { steps: 6 });
     await page.mouse.up();
-    await page.locator('.mu-box[aria-pressed="true"]', { hasText: "Markup-02.01" }).waitFor();
+    await page.locator('.mu-box[aria-pressed="true"][aria-label^="Markup-02.01"]').waitFor();
     await page.locator(".mp-item.is-active .mp-name", { hasText: "Markup-02.01" }).waitFor();
   });
 
@@ -113,6 +114,104 @@ try {
   });
 
   await page.screenshot({ path: path.join(shotDir, "slides-split.png") });
+
+  // --- 名前の札と、グループを消す・元に戻す ---------------------------------
+  const savedDeck = async (ok) => {
+    let deck;
+    for (let i = 0; i < 40; i++) {
+      deck = JSON.parse(readFileSync(path.join(data, "papers", id, "slides.json"), "utf8"));
+      if (ok(deck)) return deck;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return fail(`slides.json: ${JSON.stringify(deck)}`);
+  };
+  const visible = (sel) => page.evaluate((q) => [...document.querySelectorAll(q)].filter((e) => e.getClientRects().length > 0).length, sel);
+  const gone = () =>
+    page.waitForFunction(() =>
+      [".mu-box", ".mu-tag", ".ln-anchor", ".ln-fill", ".ln-frame", ".ln-pin", ".sv-lines path.sv-line"].every((q) => !document.querySelector(q)),
+    );
+  const restoredAll = async () => {
+    await page.locator('.mu-box[aria-label^="Markup-02.01"]').waitFor();
+    await page.waitForFunction(() => document.querySelectorAll(".sv-lines path.sv-line").length === 2 && document.querySelectorAll(".ln-pin").length === 2);
+    await savedDeck((d) => d.markups.length === 1 && d.markups[0].index === 1 && d.markups[0].links.length === 2);
+  };
+
+  await step("名前の札はふだん出ず、グループにカーソルを乗せると両側に出る（四角から札へ動かしても消えない）", async () => {
+    await page.mouse.move(5, 5);
+    if (await visible(".mu-tag")) fail("スライドの札がふだんから出ています");
+    if (await visible(".ln-pin .ln-name")) fail("論文の札がふだんから出ています");
+    if ((await visible(".ln-pin")) !== 2) fail("論文側の色の点がありません");
+    // 点は小さく、文字をほとんど隠さない
+    const dot = await page.locator(".ln-pin").first().boundingBox();
+    if (dot.width > 14 || dot.height > 14) fail(`論文側の点が大きすぎます: ${JSON.stringify(dot)}`);
+    await page.locator(".mu-box").hover();
+    await page.locator(".mu-tag").waitFor({ state: "visible" });
+    await page.waitForFunction(() => document.querySelectorAll(".ln-pin.is-hover .ln-name").length === 2);
+    // 四角から札の消すボタンへ、少しずつ動かす
+    const box = await page.locator(".mu-box").boundingBox();
+    const del = await page.locator(".mu-tag .mu-del").boundingBox();
+    await page.mouse.move(box.x + 20, box.y + 6);
+    await page.mouse.move(del.x + del.width / 2, del.y + del.height / 2, { steps: 8 });
+    if (!(await visible(".mu-tag .mu-del"))) fail("四角から札へ動かすと、札が消えました");
+    await page.screenshot({ path: path.join(shotDir, "delete-hover.png") });
+    // 論文側の点に乗ると、その場で札に広がる
+    await page.mouse.move(5, 5);
+    await page.waitForFunction(() => !document.querySelector(".ln-pin.is-hover"));
+    await page.locator(".ln-pin").first().hover();
+    await page.locator(".ln-pin").first().locator(".ln-name").waitFor({ state: "visible" });
+    await page.locator(".mu-tag").waitFor({ state: "visible" });
+    await page.mouse.move(5, 5);
+  });
+
+  await step("スライドの札の消すボタンで、四角・論文のリンク・線が消え、slides.json からもなくなる", async () => {
+    await page.locator(".mu-box").hover();
+    await page.getByRole("button", { name: "Markup-02.01 を消す（論文のリンク 2 件も消えます）" }).first().click();
+    await gone();
+    await page.locator(".sv-snack", { hasText: "Markup-02.01 を消しました（リンク 2 件も）" }).waitFor();
+    if (await page.locator(".mp-item").count()) fail("右サイドバーにグループが残っています");
+    await savedDeck((d) => d.markups.length === 0);
+    const note = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");
+    if (/### Markup-02\.01/.test(note)) fail(`note.md に残っています:\n${note}`);
+  });
+
+  await step("「元に戻す」で、同じ名前・同じリンクのまま戻る（消したのを保存したあとでも）", async () => {
+    await page.locator(".sv-snack").getByRole("button", { name: "元に戻す" }).click();
+    await restoredAll();
+    await page.locator(".mp-item.is-active .mp-name", { hasText: "Markup-02.01" }).waitFor();
+    if (await page.locator(".sv-snack").count()) fail("戻したあとも知らせが残っています");
+    const note = await (async () => {
+      for (let i = 0; i < 30; i++) {
+        const n = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");
+        if (/### Markup-02\.01/.test(n)) return n;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return "";
+    })();
+    if (!note) fail("note.md に戻っていません");
+  });
+
+  await step("論文側の点から消しても、スライドの四角ごと消える。すぐ ⌘Z（Ctrl+Z）で戻せる", async () => {
+    await page.mouse.move(5, 5);
+    await page.locator(".ln-pin").first().hover();
+    await page.locator(".ln-pin").first().getByRole("button", { name: /^Markup-02\.01 を消す/ }).click();
+    await gone();
+    // 保存を待たずに戻す（消す → 戻すが保存の前に済む）
+    await page.keyboard.press("ControlOrMeta+z");
+    await restoredAll();
+  });
+
+  await step("グループを選んで Delete を押すと消える", async () => {
+    await page.mouse.move(5, 5);
+    const pressed = await page.locator(".mu-box").getAttribute("aria-pressed");
+    if (pressed !== "true") await page.locator(".mu-box").click();
+    await page.locator('.mu-box[aria-pressed="true"]').waitFor();
+    await page.keyboard.press("Delete");
+    await gone();
+    await savedDeck((d) => d.markups.length === 0);
+    await page.locator(".sv-snack").getByRole("button", { name: "元に戻す" }).click();
+    await restoredAll();
+    await page.mouse.move(5, 5);
+  });
 
   await step("右サイドバーのリンクを外すと、線が 1 本になる", async () => {
     await page.getByRole("button", { name: /p\.1 のリンクを外す/ }).last().click();
@@ -197,8 +296,8 @@ try {
   });
 
   await step("最後の番号のグループを消して足し直しても、同じ名前にならない", async () => {
+    // 右サイドバーの消すボタンは 1 回押しで消す（元に戻せるため）
     await page.locator(".mp-item.is-active .mp-delete").click();
-    await page.locator(".mp-item.is-active .mp-delete.is-confirm").click();
     await page.waitForFunction(() => !document.querySelector(".mu-box"));
     await page.keyboard.press("r");
     const slide2 = await page.locator(".sv-slides .pp-page").nth(1).boundingBox();
@@ -206,7 +305,7 @@ try {
     await page.mouse.down();
     await page.mouse.move(slide2.x + slide2.width * 0.4, slide2.y + slide2.height * 0.7, { steps: 5 });
     await page.mouse.up();
-    await page.locator(".mu-box", { hasText: "Markup-02.02" }).waitFor();
+    await page.locator('.mu-box[aria-label^="Markup-02.02"]').waitFor();
   });
 
   await step("メモを打ってすぐ別の論文を開いても、メモは保存される", async () => {
