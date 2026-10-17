@@ -426,6 +426,30 @@ export function clearTranslation(vault: NodeVault, id: string, hash: string) {
   return mutate(vault, id, (doc) => deleteTranslation(doc, hash).document);
 }
 
+/**
+ * 訳をまとめて消す。keepHuman なら人が直した訳（revisedByHuman）は残す。
+ * 消した hash と、人手修正済みのため残した hash を返す（どちらも書き込んだ時点の最新で数える）。
+ */
+export async function clearTranslations(vault: NodeVault, id: string, hashes: string[], keepHuman: boolean) {
+  const cleared: string[] = [];
+  const keptHuman: string[] = [];
+  const document = await mutate(vault, id, (doc) => {
+    let working = doc;
+    for (const h of hashes) {
+      const t = working.annotations.translations[h];
+      if (!t) continue;
+      if (keepHuman && t.revisedByHuman) {
+        keptHuman.push(h);
+        continue;
+      }
+      working = deleteTranslation(working, h).document;
+      cleared.push(h);
+    }
+    return working;
+  });
+  return { document, cleared, keptHuman };
+}
+
 export function addSentenceNote(vault: NodeVault, id: string, hash: string, body: string) {
   return mutate(vault, id, (doc) => must(addNote(doc, hash, body), "メモを付けられませんでした").document);
 }

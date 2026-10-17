@@ -97,7 +97,7 @@ function classify(rel: string): Change | null {
   if (parts[2] === "note.md") return { kind: "note", paper };
   if (parts[2] === "paperlens.json") return { kind: "annotations", paper };
   if (parts[2] === "sentences.json" || parts[2] === "sentences.status.json") return { kind: "sentences", paper };
-  if (parts[2] === "slides.json" || parts[2] === "slides.pdf") return { kind: "slides", paper };
+  if (parts[2] === "slides.json" || parts[2] === "slides.pdf" || parts[2] === "slides.pptx") return { kind: "slides", paper };
   if (parts.length === 2 || parts[2] === "paper.pdf") return { kind: "papers", paper };
   return null;
 }

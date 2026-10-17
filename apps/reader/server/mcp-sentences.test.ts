@@ -192,11 +192,80 @@ test("区切りの直し: merge で新しい hash を返し、undo で戻す", a
   assert.equal(none.applied, false);
 });
 
+test("区切りの直しの記録を概要に出し、ID を指して取り消せる", async () => {
+  const m = await tool("fix_sentence_boundary", { paper: PAPER, action: "merge", sentence_hashes: [HASH[1], HASH[2]] });
+  const o = await tool("get_sentence_outline", { paper: PAPER });
+  assert.equal(o.boundaryEdits.length, 1);
+  assert.equal(o.boundaryEdits[0].id, m.editId);
+  assert.equal(o.boundaryEdits[0].type, "merge");
+  assert.equal(o.boundaryEdits[0].detached, undefined);
+  assert.match(o.boundaryEdits[0].source, /We propose sparse window attention/);
+  const u = await tool("fix_sentence_boundary", { paper: PAPER, action: "undo", undo_edit_id: o.boundaryEdits[0].id });
+  assert.equal(u.undoneEditId, m.editId);
+  assert.deepEqual((await tool("get_sentence_outline", { paper: PAPER })).boundaryEdits, []);
+});
+
+test("文のメモは ID 付きで返り、remove_sentence_note で消せる", async () => {
+  const g = await tool("get_sentences", { paper: PAPER, section_id: "s1" });
+  const item = g.sentences[1].noteItems[0];
+  assert.equal(item.body, "window は「窓」と訳した");
+  assert.deepEqual(g.sentences[1].notes, ["window は「窓」と訳した"]); // 前からの形も残す
+  const s = await tool("search_sentences", { paper: PAPER, query: "窓" });
+  assert.equal(s.hits.find((h: { hash: string }) => h.hash === HASH[1]).noteItems[0].id, item.id);
+  const b = await tool("get_translation_batch", { paper: PAPER, from: 0, limit: 6 });
+  assert.equal(b.notes[1][0].id, item.id);
+  const r = await tool("remove_sentence_note", { paper: PAPER, note_id: item.id });
+  assert.equal(r.removed, item.id);
+  assert.equal(r.sentenceHash, HASH[1]);
+  assert.equal((await tool("get_sentences", { paper: PAPER, section_id: "s1" })).sentences[1].noteItems, undefined);
+  await rejects("remove_sentence_note", { paper: PAPER, note_id: item.id }, /メモが見つかりません/);
+});
+
+test("用語集から 1 語だけ消す", async () => {
+  await tool("update_glossary", { paper: PAPER, entries: [{ term: "window", translation: "窓" }] });
+  const r = await tool("remove_glossary_terms", { paper: PAPER, terms: ["MEMORY", "nope"] });
+  assert.deepEqual(r.removed, ["MEMORY"]);
+  assert.deepEqual(r.unknownTerms, ["nope"]);
+  assert.equal(r.total, 1);
+  assert.deepEqual((await tool("get_sentence_outline", { paper: PAPER })).glossary.map((g: { term: string }) => g.term), ["window"]);
+});
+
+test("訳を消す: 人が直した訳は、include_human を付けない限り残す", async () => {
+  const r = await tool("clear_translations", { paper: PAPER, sentence_hashes: [HASH[0], HASH[1], HASH[3], "zzzz"] });
+  assert.equal(r.cleared, 1);
+  assert.deepEqual(r.keptHuman, [HASH[0]]);
+  assert.deepEqual(r.unknownHashes, ["zzzz"]);
+  assert.deepEqual(r.untranslated, [HASH[3]]);
+  assert.match(r.hint, /人が直した訳/);
+  assert.equal(r.remainingUnique, 1);
+  const file = () => JSON.parse(fs.readFileSync(path.join(data, "papers", PAPER, "sentences.json"), "utf8")).annotations.translations;
+  assert.equal(file()[HASH[1]], undefined);
+  assert.ok(file()[HASH[0]]);
+  // 訳を消した文は「訳さない」にできる
+  const sk = await tool("skip_sentences", { paper: PAPER, sentence_hashes: [HASH[1]], reason: "other" });
+  assert.equal(sk.skipped, 1);
+  await tool("skip_sentences", { paper: PAPER, sentence_hashes: [HASH[1]], undo: true });
+  const all = await tool("clear_translations", { paper: PAPER, sentence_hashes: [HASH[0]], include_human: true });
+  assert.equal(all.cleared, 1);
+  assert.deepEqual(all.keptHuman, []);
+  assert.equal(file()[HASH[0]], undefined);
+});
+
 test("読み取りのみでは対訳の書き込みツールを出さない。設定画面に手順が載る", () => {
   const read = READ_TOOLS.map((t) => t.name);
   const write = WRITE_TOOLS.map((t) => t.name);
   for (const n of ["get_sentence_outline", "get_sentences", "get_translation_batch", "search_sentences"]) assert.ok(read.includes(n), n);
-  for (const n of ["set_translations", "add_sentence_note", "update_glossary", "skip_sentences", "fix_sentence_boundary", "parse_sentences"]) {
+  for (const n of [
+    "set_translations",
+    "add_sentence_note",
+    "remove_sentence_note",
+    "update_glossary",
+    "remove_glossary_terms",
+    "clear_translations",
+    "skip_sentences",
+    "fix_sentence_boundary",
+    "parse_sentences",
+  ]) {
     assert.ok(write.includes(n), n);
     assert.ok(!read.includes(n), n);
   }

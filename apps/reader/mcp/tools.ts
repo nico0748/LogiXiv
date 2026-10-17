@@ -3,9 +3,10 @@
 // 実体は server/ と src/lib/ の処理を直接呼ぶため、アプリを起動していなくても使える。
 // アプリを開いている場合は、ここでの変更が画面にすぐ反映される（サーバーがフォルダを見張っている）。
 
+import nodePath from "node:path";
 import { z } from "zod";
 import { DEFAULT_TEMPLATE, STATUSES } from "../src/lib/defaultTemplate.ts";
-import { type ListName, MARKER_LABEL } from "../src/lib/model.ts";
+import { type Highlight, type ListName, MARKER_LABEL } from "../src/lib/model.ts";
 import {
   PAPERS_DIR,
   TEMPLATE_PATH,
@@ -13,8 +14,10 @@ import {
   ensureLayout,
   listPapers,
   loadNote,
+  loadAnnotations,
   notePath,
   paperDetail,
+  pdfPath,
   readTemplate,
   searchNotes,
   updateNote,
@@ -36,11 +39,18 @@ import {
   requirePaper,
   updateItem,
 } from "../server/service.ts";
+import { collectLists } from "../server/lists.ts";
+import { findText, readPages } from "../server/pdftext.ts";
+import { MAX_IMAGE_SIDE, renderPagePng } from "../server/render.ts";
 import { parseSentences } from "../server/sentences.ts";
+import { slidesDataPath, slidesPdfPath, slidesSourcePath } from "../src/lib/slides.ts";
 import { SENTENCE_READ_TOOLS, SENTENCE_WRITE_TOOLS, sentenceProgress } from "./sentenceTools.ts";
 import { SLIDE_READ_TOOLS, SLIDE_WRITE_TOOLS } from "./slideTools.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Text = { type: "text"; text: string };
+type Image = { type: "image"; data: string; mimeType: string };
+// 先頭は必ず文字（画像を返すツールも、先頭に説明の文字を置く）
+export type Result = { content: [Text, ...(Text | Image)[]]; isError?: boolean };
 // 引数の型は inputSchema（zod）で検査済み
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Args = Record<string, any>;
@@ -69,6 +79,9 @@ const PAPER = z.string().describe("論文 ID（papers/ の下のフォルダ名�
 const COLOR = z.enum(["yellow", "cyan", "magenta", "green"]).describe(
   `マーカーの色。${Object.entries(MARKER_LABEL).map(([k, v]) => `${k}=${v}`).join("、")}。使い分けは利用者に合わせます`,
 );
+const RECT = z
+  .object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1), w: z.number().gt(0).max(1), h: z.number().gt(0).max(1) })
+  .describe("ページに対する割合（0〜1）の x, y, w, h。左上が原点");
 const ITEM = z.string().describe("項目の ID。get_paper の annotations に含まれる id を指定します");
 
 /** 記録欄（field）を探し、無ければ候補を添えて止める。 */
@@ -101,6 +114,10 @@ const READ: Tool[] = [
           paper: `${PAPERS_DIR}/<論文ID>/paper.pdf`,
           note: `${PAPERS_DIR}/<論文ID>/note.md`,
           annotations: `${PAPERS_DIR}/<論文ID>/paperlens.json`,
+          sentences: `${PAPERS_DIR}/<論文ID>/sentences.json`,
+          slides: slidesPdfPath("<論文ID>"),
+          slidesSource: slidesSourcePath("<論文ID>"),
+          slideMarkups: slidesDataPath("<論文ID>"),
         },
         statuses: STATUSES,
         fields: parseFields(tpl).map(({ id, label, hint, section }) => ({ id, label, hint, phase: section })),
@@ -237,6 +254,61 @@ const READ: Tool[] = [
     },
     handler: async () => text(await readTemplate(await vault())),
   },
+  {
+    name: "get_page_image",
+    config: {
+      title: "ページの画像",
+      description:
+        "論文かスライドの 1 ページを PNG の画像で返します。数式・図・表・画像だけのスライドなど、read_paper_text や read_slide_text の文字では分からないところを見るときに使います。" +
+        `rect（ページに対する割合 0〜1 の x, y, w, h）で一部だけを切り出せます。画像の長い辺は ${MAX_IMAGE_SIDE}px までに収めます（細かい数式は rect で切り出すと読みやすくなります）。` +
+        "見た範囲は、そのまま link_slide_markup・add_slide_markup の rect や add_equation に使えます。",
+      inputSchema: {
+        paper: PAPER,
+        page: z.number().int().min(1).describe("ページ（1 から）"),
+        source: z.enum(["paper", "slides"]).default("paper").describe("paper=論文の PDF、slides=発表スライド"),
+        rect: RECT.optional().describe("切り出す範囲（ページに対する割合 0〜1）。省略するとページ全体"),
+        scale: z.number().min(0.5).max(6).optional().describe(`拡大率（1 = 72dpi）。省略すると 2。長い辺が ${MAX_IMAGE_SIDE}px を超えないよう自動で下げます`),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler: async ({ paper, page, source = "paper", rect, scale }) => {
+      const v = await vault();
+      await requirePaper(v, paper);
+      const rel = source === "slides" ? slidesPdfPath(paper) : pdfPath(paper);
+      if (!(await v.exists(rel))) {
+        throw new Error(source === "slides" ? "この論文にはスライドがありません。import_slides で取り込んでください。" : `論文の PDF（${rel}）が見つかりません。`);
+      }
+      const r = await renderPagePng(v.resolve(rel), page, { rect, scale });
+      return {
+        content: [
+          { type: "text", text: JSON.stringify({ source, page, pages: r.pages, rect: rect ?? null, width: r.width, height: r.height, scale: Number(r.scale.toFixed(3)) }) },
+          { type: "image", data: r.png.toString("base64"), mimeType: "image/png" },
+        ],
+      };
+    },
+  },
+  {
+    name: "get_lists",
+    config: {
+      title: "単語帳と数式帳",
+      description:
+        "すべての論文から集めた単語帳（vocab: add_term の用語と、対訳の用語集 update_glossary の訳語）と数式帳（formulas: add_equation の数式）を返します。画面の「リスト」と同じ内容です。" +
+        "query を渡すと、語・意味・説明・TeX・見出しにその語句を含むものだけに絞ります（大文字と小文字は区別しません）。訳語をほかの論文とそろえるときに使います。",
+      inputSchema: {
+        query: z.string().optional().describe("絞り込む語句"),
+        paper: PAPER.optional().describe("指定するとその論文だけに絞る"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler: async ({ query, paper }) => {
+      const all = await collectLists(await vault());
+      const q = (query ?? "").trim().toLowerCase();
+      const hit = (...xs: (string | undefined)[]) => !q || xs.some((x) => x?.toLowerCase().includes(q));
+      const vocab = all.vocab.filter((x) => (!paper || x.paperId === paper) && hit(x.term, x.reading, x.meaning, x.detail));
+      const formulas = all.formulas.filter((x) => (!paper || x.paperId === paper) && hit(x.label, x.tex, x.explanation));
+      return json({ vocab, formulas });
+    },
+  },
 ];
 
 const WRITE: Tool[] = [
@@ -341,17 +413,37 @@ const WRITE: Tool[] = [
     name: "update_highlight",
     config: {
       title: "マーカーを直す",
-      description: "マーカーの訳・メモ・色を書き換えます。指定した項目だけを変えます。",
+      description:
+        "マーカーの訳・メモ・色を書き換えます。指定した項目だけを変えます。" +
+        "引く場所を変えるときは text（PDF の文字どおりの新しい原文）か page（探すページ）を指定します。PDF の中を探し直して、色を付ける位置も付け直します。見つからなければ何も変えません。",
       inputSchema: {
         paper: PAPER,
         id: ITEM,
         translation: z.string().optional(),
         memo: z.string().optional(),
         color: COLOR.optional(),
+        text: z.string().min(1).optional().describe("引き直す原文。省略して page だけ指定すると、今の原文をそのページで探し直します"),
+        page: z.number().int().min(1).optional().describe("探すページ"),
       },
       annotations: { readOnlyHint: false, idempotentHint: true },
     },
-    handler: async ({ paper, id, ...patch }) => json(await updateItem(await vault(), paper, "highlights", id, clean(patch))),
+    handler: async ({ paper, id, text: newText, page, ...patch }) => {
+      const v = await vault();
+      await requirePaper(v, paper);
+      const moved: Partial<Highlight> = {};
+      if (newText !== undefined || page !== undefined) {
+        const cur = (await loadAnnotations(v, paper)).highlights.find((h) => h.id === id);
+        if (!cur) throw new Error(`マーカーが見つかりません: ${id}。get_paper の annotations で id を確かめてください。`);
+        // 新しく引くとき（add_highlight）と同じく、文字の実際の位置で端を合わせる
+        const pages = await readPages(v.resolve(pdfPath(paper)), { glyphs: true });
+        if (page && page > pages.length) throw new Error(`論文は ${pages.length} ページです。page を 1〜${pages.length} で指定してください。`);
+        const m = findText(pages, newText ?? cur.text, page);
+        if (!m) throw new Error("本文の中にその文が見つかりませんでした。PDF の文字どおりに指定するか、page を確かめてください。マーカーは変えていません。");
+        Object.assign(moved, { page: m.page, rects: m.rects, text: m.text });
+      }
+      const item = (await updateItem(v, paper, "highlights", id, { ...clean(patch), ...moved })) as Highlight;
+      return json({ ...item, rects: undefined, located: moved.rects ? true : undefined });
+    },
   },
   {
     name: "add_term",
@@ -387,6 +479,7 @@ const WRITE: Tool[] = [
         detail: z.string().optional(),
         inPaper: z.string().optional(),
         related: z.array(z.string()).optional(),
+        page: z.number().int().min(1).optional().describe("出てきたページ"),
       },
       annotations: { readOnlyHint: false, idempotentHint: true },
     },
@@ -420,6 +513,8 @@ const WRITE: Tool[] = [
         tex: z.string().optional(),
         label: z.string().optional(),
         explanation: z.string().optional(),
+        page: z.number().int().min(1).optional().describe("出てきたページ"),
+        source: z.string().optional().describe("PDF 上の元の文字列"),
       },
       annotations: { readOnlyHint: false, idempotentHint: true },
     },
@@ -471,14 +566,22 @@ const WRITE: Tool[] = [
     config: {
       title: "保存先を変える",
       description:
-        "保存先フォルダを変えます。設定ファイルに書くため、アプリの画面も同じフォルダに切り替わります。環境変数 PAPERLENS_DATA で起動している場合は、その指定が優先されます。",
-      inputSchema: { path: z.string().min(1).describe("保存先フォルダの絶対パス") },
+        "保存先フォルダを変えます。設定ファイルに書くため、アプリの画面も同じフォルダに切り替わります（画面の設定と同じ）。フォルダが無ければ作り、テンプレートを置きます。" +
+        "環境変数 PAPERLENS_DATA で起動している場合は変えられません（MCP の登録から PAPERLENS_DATA を外してください）。変えたら list_papers で中身を確かめます。",
+      inputSchema: { path: z.string().min(1).describe("保存先フォルダの絶対パス（~ で始めてもよい）") },
       annotations: { readOnlyHint: false, idempotentHint: true },
     },
     handler: async ({ path }) => {
-      writeConfig({ dataRoot: path });
+      const p = String(path).trim();
+      // 画面の API（PUT /api/meta/data-root）と同じ決まり
+      if (!nodePath.isAbsolute(p.replace(/^~/, "/"))) throw new Error(`保存先は絶対パスで指定してください: ${p}`);
+      if (process.env.PAPERLENS_DATA) {
+        throw new Error("環境変数 PAPERLENS_DATA で保存先が決まっているため変えられません。MCP の登録から PAPERLENS_DATA を外し、PAPERLENS_CONFIG で設定ファイルを渡してください。");
+      }
+      writeConfig({ dataRoot: p });
+      await vault();
       const c = readConfig();
-      return json({ dataRoot: c.dataRoot, dataRootSource: c.dataRootSource, note: c.dataRootSource === "env" ? "PAPERLENS_DATA が優先されています" : undefined });
+      return json({ dataRoot: c.dataRoot, dataRootSource: c.dataRootSource });
     },
   },
 ];
