@@ -102,6 +102,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
         setDoc(d);
         onLoaded?.(d);
         // getPage は描画を伴わないので、全ページでも短い時間で終わる
+        // 読み終わる前に文書を閉じた（論文を替えた）ときの失敗は捨てる。ここで拾わないと、捕まえていない失敗になる
         const all = await Promise.all(
           Array.from({ length: d.numPages }, (_, i) =>
             d.getPage(i + 1).then((p) => {
@@ -109,8 +110,8 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
               return { w: v.width, h: v.height };
             }),
           ),
-        );
-        if (!cancelled) setSizes(all);
+        ).catch(() => null);
+        if (!cancelled && all) setSizes(all);
       },
       (e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)),
     );
@@ -575,7 +576,8 @@ function PageView({
   };
 
   useEffect(() => {
-    void doc.getPage(n).then(setPage);
+    // 描き終わる前に文書を閉じたときの失敗は捨てる
+    doc.getPage(n).then(setPage, () => undefined);
   }, [doc, n]);
 
   useEffect(() => {

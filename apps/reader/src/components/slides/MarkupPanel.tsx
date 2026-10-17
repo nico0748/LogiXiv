@@ -1,8 +1,9 @@
 // 右サイドバー: スライドのグループ（マークアップ）の一覧。選ぶと、スライドと論文の該当箇所へ移る。
 // メモ、色、リンクの種類を直したり、リンクやグループを消したりできる。
+// グループを消すと、論文側のリンク（ペア先）も一緒に消える。元に戻す知らせは中央の画面（SlidesView）に出る。
 
 import { Trash2, X } from "lucide-react";
-import { type CSSProperties, useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 import { GROUP_COLORS, LINK_KIND_LABEL, type LinkKind, type SlideMarkup, markupName, sortMarkups } from "../../lib/slides.ts";
 import type { SlideFocus } from "./SlidesView.tsx";
 import type { Slides } from "./useSlides.ts";
@@ -21,13 +22,6 @@ const COLOR_NAMES = ["青", "橙", "青緑", "黄", "桃", "緑", "紫", "赤"];
 
 export function MarkupPanel({ slides, active, setActive, setHover, reveal, slideCount }: Props) {
   const s = slides.state;
-  // 消すボタンは 2 回押しで消す（リンクごと消えて、元に戻せないため）
-  const [confirm, setConfirm] = useState<string | null>(null);
-  useEffect(() => {
-    if (!confirm) return;
-    const t = window.setTimeout(() => setConfirm(null), 4000);
-    return () => window.clearTimeout(t);
-  }, [confirm]);
   if (s.kind !== "ready") {
     return <p className="empty">{s.kind === "loading" ? "読み込んでいます" : "スライドを追加すると、囲んだ部分（グループ）がここに並びます。"}</p>;
   }
@@ -128,19 +122,19 @@ export function MarkupPanel({ slides, active, setActive, setHover, reveal, slide
                         ))}
                     </ul>
                     <div className="mp-actions">
+                      {/* 1 回押しで消す（中央の画面の知らせか ⌘Z で元に戻せる） */}
                       <button
-                        className={`btn text sm mp-delete${confirm === m.id ? " is-confirm" : ""}`}
+                        className="btn text sm mp-delete"
+                        aria-label={`${markupName(m)} を消す（論文のリンク ${m.links.length} 件も消えます）`}
+                        title={`論文のリンク ${m.links.length} 件も消えます。消したあと元に戻せます`}
                         onClick={() => {
-                          if (confirm !== m.id) return setConfirm(m.id);
-                          setConfirm(null);
-                          slides.update((d) => ({ ...d, markups: d.markups.filter((x) => x.id !== m.id) }));
+                          slides.remove(m.id);
                           setActive(null);
                           // 消した行の上では mouseleave が来ないので、ここで外す
                           setHover(null);
                         }}
                       >
-                        <Trash2 size={14} aria-hidden="true" />{" "}
-                        {confirm === m.id ? `もう一度押すと消します（リンク ${m.links.length} 件も消えます）` : `${markupName(m)} を消す`}
+                        <Trash2 size={14} aria-hidden="true" /> {markupName(m)} を消す
                       </button>
                     </div>
                   </div>

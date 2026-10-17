@@ -15,7 +15,8 @@ export interface Snack {
   n: number;
 }
 
-export function Snackbar({ snack, onClose }: { snack: Snack | null; onClose: () => void }) {
+/** inline: 置いた場所にそのまま出す（全画面の要素の中に置いたときは、移さなくても見える） */
+export function Snackbar({ snack, onClose, className, inline }: { snack: Snack | null; onClose: () => void; className?: string; inline?: boolean }) {
   const [hold, setHold] = useState({ hover: false, focus: false });
   const left = useRef(0);
   const closeRef = useRef(onClose);
@@ -50,7 +51,7 @@ export function Snackbar({ snack, onClose }: { snack: Snack | null; onClose: () 
     <div role="status" aria-live="polite">
       {snack && (
         <div
-          className="snackbar"
+          className={`snackbar${className ? ` ${className}` : ""}`}
           onMouseEnter={() => setHold((h) => ({ ...h, hover: true }))}
           onMouseLeave={() => setHold((h) => ({ ...h, hover: false }))}
           onFocus={() => setHold((h) => ({ ...h, focus: true }))}
@@ -72,5 +73,5 @@ export function Snackbar({ snack, onClose }: { snack: Snack | null; onClose: () 
       )}
     </div>
   );
-  return host ? createPortal(region, host) : region;
+  return host && !inline ? createPortal(region, host) : region;
 }
