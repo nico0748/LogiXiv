@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 // 画面の下に短い知らせを出す（M3 のスナックバー）。
 // 読み上げソフトには role="status" で伝え、フォーカスは移さない。
 // マウスが上にあるときと、フォーカスが中にあるときは、時間を止める（消える前に操作できるように）。
+// 全画面（スライドと論文の画面）のときは、全画面の要素の中に出す（外に置くと見えないため）。
 
 export interface Snack {
   message: string;
@@ -24,6 +26,14 @@ export function Snackbar({ snack, onClose }: { snack: Snack | null; onClose: () 
     setHold({ hover: false, focus: false });
   }, [snack]);
 
+  const [host, setHost] = useState<Element | null>(null);
+  useEffect(() => {
+    const on = () => setHost(document.fullscreenElement);
+    on();
+    document.addEventListener("fullscreenchange", on);
+    return () => document.removeEventListener("fullscreenchange", on);
+  }, []);
+
   const paused = hold.hover || hold.focus;
   useEffect(() => {
     if (!snack || paused) return;
@@ -36,7 +46,7 @@ export function Snackbar({ snack, onClose }: { snack: Snack | null; onClose: () 
   }, [snack, paused]);
 
   // 読み上げを確実にするため、知らせの入れ物は常に置いておく
-  return (
+  const region = (
     <div role="status" aria-live="polite">
       {snack && (
         <div
@@ -62,4 +72,5 @@ export function Snackbar({ snack, onClose }: { snack: Snack | null; onClose: () 
       )}
     </div>
   );
+  return host ? createPortal(region, host) : region;
 }

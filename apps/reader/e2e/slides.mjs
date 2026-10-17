@@ -4,6 +4,7 @@
 // 2. 画面で「囲む」を選び、スライドの 2 ページ目を囲む → Markup-02.01 ができる
 // 3. 論文の文を選んで「文章としてリンク」、図を囲んでリンクする → 線が 2 本引かれる
 // 4. slides.json と note.md に残ること、MCP の書き込みで線が増えることを確かめる
+// 5. 全画面（発表のとき）: ボタンと P キーで入る・出る、見出しが隠れる、線がずれない、帯が上の端で出る、使えないときはウィンドウいっぱい
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -242,8 +243,155 @@ try {
     if (head.length < 200) fail("スライドが上書きされました");
   });
 
+  // --- 全画面（発表のとき）-----------------------------------------------------
+  // スライドと論文を並べた画面ごと全画面にする。見出しは隠れ、道具の帯は上の端にマウスを近づけたときだけ出る。
+  const fsState = () =>
+    page.evaluate(() => {
+      const v = document.querySelector(".slides-view");
+      const bar = document.querySelector(".sv-toolbar");
+      return {
+        native: document.fullscreenElement === v,
+        fill: v.classList.contains("is-fill"),
+        on: v.classList.contains("is-fullscreen"),
+        heads: [...document.querySelectorAll(".sv-pane-head")].map((h) => getComputedStyle(h).display),
+        bar: Number(getComputedStyle(bar).opacity),
+      };
+    });
+  const waitBar = (shown) => page.waitForFunction((s) => Number(getComputedStyle(document.querySelector(".sv-toolbar")).opacity) === (s ? 1 : 0), shown);
+  // 線の端（丸）が、どれかの四角とどれかのリンク先に付いているか。最後の段階では四角が 2 個になるので、上の linesAttached とは別に確かめる
+  const linesOk = async () => {
+    await page.waitForTimeout(500);
+    const ok = await page.evaluate(() => {
+      const svg = document.querySelector(".sv-lines").getBoundingClientRect();
+      const near = (p, r) => p.x >= r.left - 3 && p.x <= r.right + 3 && p.y >= r.top - 3 && p.y <= r.bottom + 3;
+      const boxes = [...document.querySelectorAll(".mu-box")].map((e) => e.getBoundingClientRect());
+      const targets = [...document.querySelectorAll(".ln-anchor")].map((e) => e.getBoundingClientRect());
+      return [...document.querySelectorAll(".sv-lines g")].flatMap((g) => {
+        const cs = [...g.querySelectorAll("circle")].map((c) => ({ x: svg.left + +c.getAttribute("cx"), y: svg.top + +c.getAttribute("cy") }));
+        return cs.length < 2 ? [] : [boxes.some((r) => near(cs[0], r)) && targets.some((t) => near(cs[1], t))];
+      });
+    });
+    if (!ok.length || ok.includes(false)) fail(`線の端がずれています: ${JSON.stringify(ok)}`);
+  };
+
+  await step("全画面: 元の論文のスライドの画面に戻し、線を 1 本引いておく", async () => {
+    await page.locator(".nav-file-title:not(.is-active)").first().click();
+    await page.locator(".sv-slides .pp-page").nth(1).waitFor();
+    await page.locator(".sv-paper .pp-page .textLayer span").first().waitFor();
+    const deck = (await (await fetch(`${base}/api/papers/${id}/slides`)).json()).deck;
+    const link = { id: "l-fs", kind: "figure", page: 1, rects: [{ x: 0.15, y: 0.3, w: 0.5, h: 0.1 }], text: "", createdAt: "" };
+    await fetch(`${base}/api/papers/${id}/slides/markups`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-paperlens-client": "agent" },
+      body: JSON.stringify({ ops: [{ op: "addLink", id: deck.markups[0].id, link }] }),
+    });
+    await page.waitForFunction(() => document.querySelectorAll(".sv-lines circle").length === 2, null, { timeout: 5000 });
+    await linesOk();
+  });
+
+  await step("全画面: ボタンで画面ごと全画面になり、見出しと道具の帯が隠れ、線は四角に付いたまま", async () => {
+    await page.getByRole("button", { name: "全画面", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector(".slides-view").classList.contains("is-fullscreen"));
+    const st = await fsState();
+    if (!st.native && !st.fill) fail(`全画面になっていません: ${JSON.stringify(st)}`);
+    console.log(st.native ? "  （Fullscreen API で全画面になりました）" : "  （このブラウザでは Fullscreen API が使えず、ウィンドウいっぱいの表示になりました）");
+    if (st.heads.some((d) => d !== "none")) fail(`欄の見出しが出ています: ${JSON.stringify(st)}`);
+    await page.locator(".sv-fs-hint", { hasText: "Esc で全画面を終えます" }).waitFor();
+    // 押したボタンにフォーカスが残っていても、マウスが離れれば帯は隠れる
+    await page.mouse.move(800, 600);
+    await waitBar(false);
+    await linesOk();
+    const r = await page.locator(".slides-view").boundingBox();
+    if (Math.round(r.width) !== 1600 || Math.round(r.height) !== 960) fail(`画面いっぱいになっていません: ${JSON.stringify(r)}`);
+  });
+
+  await step("全画面: 上の端にマウスを動かすと道具の帯が出て、止まると隠れる（線は動かない）", async () => {
+    const before = await page.locator(".sv-lines circle").first().getAttribute("cy");
+    await page.mouse.move(800, 10);
+    await waitBar(true);
+    if ((await page.locator(".sv-lines circle").first().getAttribute("cy")) !== before) fail("帯を出したら線が動きました");
+    await linesOk();
+    await page.screenshot({ path: path.join(shotDir, "slides-fullscreen.png") });
+    await page.mouse.move(800, 500);
+    await page.waitForTimeout(2300);
+    await waitBar(false);
+  });
+
+  await step("全画面: 「全画面を終える」で戻り、見出しが出て、線は付いたまま", async () => {
+    await page.mouse.move(800, 10);
+    await waitBar(true);
+    await page.getByRole("button", { name: "全画面を終える" }).click();
+    await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
+    const st = await fsState();
+    if (st.heads.some((d) => d === "none") || st.bar !== 1) fail(`元に戻っていません: ${JSON.stringify(st)}`);
+    await linesOk();
+  });
+
+  await step("全画面: P キーでも切り替わり、全画面の中に知らせが出る", async () => {
+    await page.mouse.move(800, 500);
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => document.querySelector(".slides-view.is-fullscreen"));
+    await linesOk();
+    // 囲むと「…を作りました」の知らせが出る。全画面の要素の中に描かれていること
+    await page.keyboard.press("r");
+    const slide1 = await page.locator(".sv-slides .pp-page").first().boundingBox();
+    await page.mouse.move(slide1.x + slide1.width * 0.1, slide1.y + slide1.height * 0.6);
+    await page.mouse.down();
+    await page.mouse.move(slide1.x + slide1.width * 0.4, slide1.y + slide1.height * 0.8, { steps: 5 });
+    await page.mouse.up();
+    await page.locator(".snackbar", { hasText: "を作りました" }).waitFor();
+    const inside = await page.evaluate(() => {
+      const host = document.fullscreenElement ?? document.querySelector(".slides-view");
+      const sn = document.querySelector(".snackbar");
+      const r = sn.getBoundingClientRect();
+      return host.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) || !document.fullscreenElement;
+    });
+    if (!inside) fail("知らせが全画面の中に見えていません");
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
+  });
+
+  await step("全画面: 画面の外に描くモーダル（リスト）を開くと、全画面を終えて見えるようにする", async () => {
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => document.querySelector(".slides-view.is-fullscreen"));
+    await page.keyboard.press("Control+Shift+L");
+    await page.getByRole("dialog", { name: "リスト" }).waitFor();
+    await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog", { name: "リスト" }).waitFor({ state: "detached" });
+  });
+
+  await step("全画面: Fullscreen API が断られたときはウィンドウいっぱいに広げ、Esc は選択を外してから全画面を終える", async () => {
+    await page.evaluate(() => {
+      window.__rf = Element.prototype.requestFullscreen;
+      Element.prototype.requestFullscreen = () => Promise.reject(new Error("denied"));
+    });
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => document.querySelector(".slides-view.is-fill"));
+    const cover = await page.evaluate(() => {
+      const v = document.querySelector(".slides-view");
+      const r = v.getBoundingClientRect();
+      const pts = [[5, 5], [innerWidth - 5, 5], [5, innerHeight - 5], [innerWidth - 5, innerHeight - 5]];
+      return { r: [r.left, r.top, r.width, r.height], all: pts.every(([x, y]) => v.contains(document.elementFromPoint(x, y))) };
+    });
+    if (!cover.all || cover.r[0] !== 0 || cover.r[1] !== 0) fail(`ウィンドウを覆っていません: ${JSON.stringify(cover)}`);
+    await linesOk();
+    // 選んでいるグループがあるときの Esc は、まず選択を外す
+    if (!(await page.locator('.mu-box[aria-pressed="true"]').count())) fail("グループが選ばれていません");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector('.mu-box[aria-pressed="true"]'));
+    await page.waitForTimeout(100);
+    if (!(await page.locator(".slides-view.is-fill").count())) fail("選択を外す Esc で全画面まで終わりました");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector(".slides-view.is-fill, .slides-view.is-fullscreen"));
+    await page.evaluate(() => {
+      Element.prototype.requestFullscreen = window.__rf;
+    });
+    await linesOk();
+  });
+
   if (errors.length) fail(`コンソールのエラー:\n${errors.join("\n")}`);
-  console.log(`スクリーンショット: ${path.join(shotDir, "slides-split.png")}`);
+  console.log(`スクリーンショット: ${path.join(shotDir, "slides-split.png")}, ${path.join(shotDir, "slides-fullscreen.png")}`);
   console.log("papers:", readdirSync(path.join(data, "papers")).join(", "));
 } finally {
   await browser?.close();
