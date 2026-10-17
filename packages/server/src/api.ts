@@ -371,14 +371,15 @@ export class PaperLensApi {
     const document = createDocument({ structure, sourceFileName: fileName });
 
     try {
-      await this.store.writePdf(document.id, pdf);
-      await this.store.write(document);
-      // 書き込みの最中に切れることもある。半分だけ置いて帰らないよう、
-      // 書き終えてから消す（消せる状態にしてから判定する）。
+      // PDF と document.json を書き切ってから置く（途中の状態は一覧に見えない）。
+      // 書き込みの最中に切れることもあるので、置く直前にもう一度見る。
+      await this.store.create(document, pdf, () => {
+        if (clientGone()) throw pdfIngestAbandoned(fileName);
+      });
+      // 置いた直後に切れていたら、置いたものを消す。
       if (clientGone()) throw pdfIngestAbandoned(fileName);
     } catch (error) {
-      // 書けなかったときに作りかけを残さない。document.json の無いディレクトリは
-      // 一覧に出ないので、利用者からは見えも消せもしないゴミになる。
+      // 置いたあとで失敗したときに、作ったものを残さない。
       await this.store.remove(document.id).catch(() => undefined);
       throw error;
     }
