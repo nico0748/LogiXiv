@@ -66,16 +66,18 @@ Claude も同じフォルダに付いてくる。アプリを開いていれば�
 
 | ツール | 用途 |
 | --- | --- |
-| `get_sentence_outline` | タイトル・節構成・ページ数・解析方式（`caveat` / `quality`）・用語集・進捗・再開位置（`firstUntranslatedOrder`） |
-| `get_sentences` | 文を範囲・節・ページで取得（原文 + 既存訳 + メモ）。`from` は**通し番号 (order)** |
+| `get_sentence_outline` | タイトル・節構成・ページ数・解析方式（`caveat` / `quality`）・用語集・進捗・再開位置（`firstUntranslatedOrder`）・区切りの直しの記録（`boundaryEdits`: `id` / `type` / `detached`） |
+| `get_sentences` | 文を範囲・節・ページで取得（原文 + 既存訳 + メモ）。`from` は**通し番号 (order)**。メモは `noteItems` に `{id, body}` で入る |
 | `get_translation_batch` | 翻訳作業の入口。連続した本文と、そのうちの未訳リストを返す |
 | `search_sentences` | 原文・訳文・メモを横断検索。ヒットに訳文とメモが入る |
 | `parse_sentences` | PDF を文に分ける・分け直す（`parser`: `auto` / `grobid` / `fallback`）。訳とメモはハッシュで再結合される |
 | `set_translations` | 訳をまとめて書き込む（1 回 最大 120 文）。結果は JSON |
-| `add_sentence_note` | 文にメモを付ける。存在しない hash は拒否される |
+| `add_sentence_note` / `remove_sentence_note` | 文にメモを付ける（存在しない hash は拒否される）／メモを `note_id` で 1 件消す |
 | `update_glossary` | 訳語の対応表（用語集）を更新。既定は追記、`mode: "replace"` で全置換 |
+| `remove_glossary_terms` | 用語集から指定した原語だけを消す（大文字小文字は区別しない）。1 語だけ消すときはこちら |
+| `clear_translations` | 訳を消して未訳に戻す。人が直した訳（`revisedByHuman`）は `include_human: true` のときだけ消す |
 | `skip_sentences` | 「この文は訳す対象ではない」と記録する。未訳の集計から外れる。`undo: true` で取り消し |
-| `fix_sentence_boundary` | 文の区切りを直す（結合・分割・**取り除き**・取り消し）。再解析しても保たれる |
+| `fix_sentence_boundary` | 文の区切りを直す（結合・分割・**取り除き**・取り消し）。再解析しても保たれる。特定の編集の取り消しは `boundaryEdits` の `id` を `undo_edit_id` に |
 
 論文の指定はすべて `paper`（`papers/` の下のフォルダ名。`list_papers` が返す `id`）。
 `list_papers` は対訳の進み具合も添えて返す。
@@ -92,16 +94,28 @@ Claude も同じフォルダに付いてくる。アプリを開いていれば�
 | `get_settings` | 保管庫、フォルダ構成、読解の段階、テンプレートの記録欄 |
 | `list_papers` / `get_paper` / `get_note` | 論文の一覧、論文 1 本の記録（記録欄・マーカー・用語・数式）、ノートの本文 |
 | `read_paper_text` / `find_in_paper` | PDF の本文をページごとに読む、本文の中を探す |
+| `get_page_image` | 論文かスライド（`source`: `paper` / `slides`）の 1 ページを PNG で返す。`rect` で切り出し、長い辺は 1600px まで。数式・図・画像だけのスライドを見るときに |
+| `get_lists` | 全論文の単語帳（用語と対訳の用語集）と数式帳。`query` / `paper` で絞れる（画面の「リスト」と同じ） |
 | `search_notes` / `get_graph` | すべてのノートの横断検索、論文と用語のつながり |
 | `import_paper` | 端末の PDF や URL（arXiv など）から取り込む。取り込み後に文への解析を自動で始める |
 | `set_fields` / `set_status` / `set_meta` | 記録欄、読解の段階、書誌情報を書く |
-| `add_highlight` / `update_highlight` | 本文の文にマーカーと訳を付ける。PDF の該当位置にも色が付く |
-| `add_term` / `update_term` / `add_equation` / `update_equation` | 用語と数式を登録する |
+| `add_highlight` / `update_highlight` | 本文の文にマーカーと訳を付ける。PDF の該当位置にも色が付く。`update_highlight` に `text` か `page` を渡すと引く場所を探し直す |
+| `add_term` / `update_term` / `add_equation` / `update_equation` | 用語と数式を登録する・直す（ページ、数式の元の文字列も直せる） |
 | `remove_annotation` | マーカー・用語・数式を消す |
 | `get_template` / `set_template` / `reset_template` | テンプレートを読む、書き換える、初期状態に戻す |
-| `set_data_root` | 保管庫を変える |
-| `get_slide_markups` | 発表スライド（`slides.pdf`）で囲んだグループの一覧。名前（Markup-03.02）、四角の中の文字、論文へのリンク |
-| `link_slide_markup` / `unlink_slide_markup` / `set_slide_markup_memo` | グループを論文の文章（`text` で探す）・図・数式（`page` と `rect`）につなぐ、外す、メモを書く |
+| `set_data_root` | 保管庫を変える（絶対パスだけ。`PAPERLENS_DATA` で起動しているときは断る。画面の設定と同じ決まり） |
+
+### 発表スライド
+
+| ツール | 用途 |
+| --- | --- |
+| `import_slides` | 端末の PDF か PPTX（絶対パス）を論文に取り込む。PPTX は LibreOffice か Keynote で PDF に変換する。差し替えてもグループとリンクは残る（ページの外になったものは `outOfRange`） |
+| `get_slide_markups` | 囲んだグループの一覧。名前（Markup-03.02）、範囲（`rect`）、色（番号と `colorHex`）、四角の中の文字、論文へのリンク（位置付き）、スライドのページ数（`slidePages`）、取り込んだファイルの情報 |
+| `read_slide_text` | スライドの文字をページごとに読む |
+| `add_slide_markup` | スライドを囲んでグループを作る（`rect` か、スライドの文字列 `text`）。名前と色は自動で決まる |
+| `link_slide_markup` / `update_slide_link` / `unlink_slide_markup` | グループを論文の文章（`text` で探す）・図・数式（`page` と `rect`）につなぐ、リンクの種類を直す、外す |
+| `update_slide_markup` / `set_slide_markup_memo` | グループのメモ・色・範囲を直す（`set_slide_markup_memo` はメモだけを直す前からの呼び方） |
+| `delete_slide_markup` / `restore_slide_markup` | グループを消す（リンクも一緒に消える。戻り値の `removed` は消したグループそのもの）、`removed` を渡して同じ名前のまま戻す |
 
 読解ノートは `paperlens://papers/<論文ID>/note.md` の資料（resource）としても読める。
 
@@ -181,8 +195,9 @@ stated otherwise, and the residual fraction is ρ = 0.25.
 
 既に訳が付いている文は対象外にできない（記録しても未訳の集計は減らないので、
 返事だけが嘘になる）。`alreadyTranslated` に載って返ってくる。その文を片付けたいときは、
-画面でその文の「**訳を消して外す**」を押す。訳を消す操作は画面側にしかない
-（MCP から他人の訳を消せる口は開けていない）。
+`clear_translations` で訳を消してから `skip_sentences` に渡す（画面ならその文の「**訳を消して外す**」）。
+`clear_translations` は人が直した訳（`revisedByHuman`）を既定では消さず、`keptHuman` に載せて返す。
+消すのは `include_human: true` を渡したときだけで、利用者に確かめてから使う。
 
 ### 同じ本文が複数回あるとき
 
@@ -273,7 +288,9 @@ npm test
 
 `server/mcp-sentences.test.ts` が、MCP のクライアントから対訳のツールを呼び、概要・窓の取得
 （同じ本文は 1 回だけ）・訳の書き込み（人手修正済みと未知の hash を機械可読に断る）・
-訳さない記録・終了判定・区切りの直しと取り消し・読み取り専用の公開範囲を確かめる。旧 Web 版の MCP は、リポジトリの最上位の
+訳さない記録・終了判定・区切りの直しと取り消し（ID 指定も）・メモと用語集の削除・訳の消去・読み取り専用の公開範囲を確かめる。
+`server/slides.test.ts` が発表スライドのツール（取り込み・囲む・直す・消す・リンク）を、
+`server/mcp-core.test.ts` がページの画像・リスト・項目の直し・保管庫の変更を確かめる。旧 Web 版の MCP は、リポジトリの最上位の
 `npm run test:e2e` が stdio で起動し、`initialize` → `tools/list` → `prompts/list` →
 `tools/call` まで通ることと、`get_translation_batch` の応答に文脈の重複が無いことを確かめる。
 

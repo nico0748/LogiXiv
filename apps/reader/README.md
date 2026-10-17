@@ -158,11 +158,13 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 | `list_papers` / `get_paper` / `get_note` | 論文の一覧、論文1本の記録（記録欄・マーカー・用語・数式）、ノートの本文 |
 | `get_bibtex` | 論文の BibTeX（画面の「BibTeX をコピー」と同じ内容） |
 | `read_paper_text` / `find_in_paper` | PDF の本文をページごとに読む、本文の中を探す |
+| `get_page_image` | 論文かスライドの 1 ページを画像で見る（一部の切り出しもできる。数式・図・画像だけのスライド向け） |
+| `get_lists` | 全論文の単語帳と数式帳（画面の「リスト」と同じ） |
 | `search_notes` / `get_graph` | すべてのノートの横断検索、論文と用語のつながり |
 | `import_paper` | 端末の PDF や URL（arXiv など）から取り込む |
 | `set_fields` / `set_status` / `set_meta` | 記録欄、読解の段階、書誌情報（著者・年など）を書く。著者など一覧の項目は配列で渡す |
-| `add_highlight` / `update_highlight` | 本文の文にマーカーと訳を付ける。PDF の該当位置にも色が付く |
-| `add_term` / `update_term` / `add_equation` / `update_equation` | 用語と数式を登録する |
+| `add_highlight` / `update_highlight` | 本文の文にマーカーと訳を付ける。PDF の該当位置にも色が付く。引く場所も直せる |
+| `add_term` / `update_term` / `add_equation` / `update_equation` | 用語と数式を登録する・直す |
 | `remove_annotation` | マーカー・用語・数式を消す |
 | `get_template` / `set_template` / `reset_template` | テンプレートを読む、書き換える、初期状態に戻す |
 | `set_data_root` | 保存先を変える |
@@ -170,8 +172,13 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 | `get_translation_batch` / `set_translations` | 全文翻訳の窓を受け取り、訳をまとめて書き戻す |
 | `parse_sentences` | PDF を 1 文ずつに分ける・分け直す（訳とメモは引き継ぎます） |
 | `add_sentence_note` / `update_glossary` / `skip_sentences` / `fix_sentence_boundary` | 文のメモ、訳語の統一、訳さない記録、区切りの直し |
-| `get_slide_markups` | 発表スライドで囲んだグループの一覧（名前、四角の中の文字、論文へのリンク） |
-| `link_slide_markup` / `unlink_slide_markup` / `set_slide_markup_memo` | グループを論文の文章・図・数式につなぐ、リンクを外す、メモを書く |
+| `remove_sentence_note` / `remove_glossary_terms` / `clear_translations` | 文のメモを消す、用語集から 1 語ずつ消す、訳を消す（人が直した訳は確かめてからだけ） |
+| `import_slides` | 発表スライド（PDF か PPTX の絶対パス）を取り込む。差し替えても囲んだグループは残る |
+| `get_slide_markups` / `read_slide_text` | 発表スライドで囲んだグループの一覧（名前、範囲、色、四角の中の文字、論文へのリンク）、スライドの文字 |
+| `add_slide_markup` | スライドを囲んでグループを作る（範囲か、スライドの文字列で） |
+| `link_slide_markup` / `update_slide_link` / `unlink_slide_markup` | グループを論文の文章・図・数式につなぐ、リンクの種類を直す、外す |
+| `update_slide_markup` / `set_slide_markup_memo` | グループのメモ・色・範囲を直す |
+| `delete_slide_markup` / `restore_slide_markup` | グループを消す、消したグループを戻す |
 
 ほかに、段階を追って論文を読む `read_paper`、1 文ずつ全文を訳す `translate_paper`、読んだ論文をふり返る `review_notes` のプロンプトがあります。対訳のツールの詳しい設計は [../../docs/mcp.md](../../docs/mcp.md) にあります。読解ノートは `paperlens://papers/<論文ID>/note.md` の資料としても読めます。
 
@@ -237,7 +244,7 @@ papers/*/paper.pdf
 
 ```
 server/      ローカルサーバー（API、保存先の見張り、PDF の本文取り出し、対訳の保存と解析 sentences.ts）
-mcp/         MCP サーバー（tools.ts に読解ノートのツール、sentenceTools.ts に対訳のツール）
+mcp/         MCP サーバー（tools.ts に読解ノートのツール、sentenceTools.ts に対訳のツール、slideTools.ts に発表スライドのツール）
 electron/    デスクトップ版
 src/         画面（React）。src/components/shell/ に Obsidian 風の枠（リボン・サイドバー・ステータスバー）、
              src/components/sentences/ に対訳。src/lib/ の論文フォルダの処理はサーバーと MCP からも使う
