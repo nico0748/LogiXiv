@@ -1,4 +1,4 @@
-// 読解ノートの frontmatter から BibTeX を作る。画面の「BibTeX をコピー」と MCP の get_bibtex で使う。
+// 読解ノートの frontmatter から BibTeX を作る。画面の「BibTeX をコピー」「BibTeX を書き出す」と MCP の get_bibtex で使う。
 //
 // 種類の決め方:
 //   1. arxiv があり、venue が空か arXiv        → @misc（eprint と archivePrefix を付ける）
@@ -40,7 +40,7 @@ export function bibKey(fm: Record<string, FmValue>, paperId: string): string {
 
 const stripDoi = (s: string) => s.trim().replace(/^https?:\/\/(dx\.)?doi\.org\//i, "");
 
-export function toBibtex(fm: Record<string, FmValue>, paperId: string): string {
+export function toBibtex(fm: Record<string, FmValue>, paperId: string, key = bibKey(fm, paperId)): string {
   const venue = fmText(fm.venue).trim();
   const arxiv = fmText(fm.arxiv).trim();
   const fields: [string, string][] = [];
@@ -64,5 +64,25 @@ export function toBibtex(fm: Record<string, FmValue>, paperId: string): string {
   if (doi) fields.push(["doi", escapeTex(doi)]);
   if (arxiv) fields.push(["url", `https://arxiv.org/abs/${arxiv}`]);
   const body = fields.map(([k, v]) => `  ${k} = {${v}}`).join(",\n");
-  return `@${type}{${bibKey(fm, paperId)},\n${body}\n}\n`;
+  return `@${type}{${key},\n${body}\n}\n`;
 }
+
+/**
+ * 複数の論文を 1 つの .bib にまとめる。同じキーが重なったときは、2 つ目から a, b, … を付けて分ける
+ * （vaswani2017attention と vaswani2017attentiona）。BibTeX は同じキーを 2 度書くと後ろを捨てるため。
+ */
+export function toBibFile(papers: { fm: Record<string, FmValue>; id: string }[]): string {
+  const used = new Set<string>();
+  return papers
+    .map(({ fm, id }) => {
+      const base = bibKey(fm, id);
+      let key = base;
+      for (let i = 0; used.has(key); i++) key = base + suffix(i);
+      used.add(key);
+      return toBibtex(fm, id, key);
+    })
+    .join("\n");
+}
+
+/** 0 → a, 25 → z, 26 → aa */
+const suffix = (i: number): string => (i < 26 ? "" : suffix(Math.floor(i / 26) - 1)) + String.fromCharCode(97 + (i % 26));

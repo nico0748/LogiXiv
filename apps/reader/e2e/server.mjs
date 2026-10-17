@@ -230,6 +230,17 @@ await step("URL から取り込む（新しい論文は書誌情報の欄を開�
   if (count() !== before + 1) throw new Error("同じ URL で論文が増えた");
 });
 
+await step("論文一覧を段階の順に並べ替え、並び順を覚える", async () => {
+  await openLeft();
+  const stages = () => page.locator(".nav-files .nav-file-meta .tag").allTextContents();
+  await page.getByLabel("並び順").selectOption({ label: "読解の段階の順" });
+  await page.waitForFunction(() => [...document.querySelectorAll(".nav-files .nav-file-meta .tag")].map((e) => e.textContent).join() === "未読,精読");
+  await page.screenshot({ path: `${shotDir}/17-sort.png` });
+  if ((await page.evaluate(() => localStorage.getItem("paperlens.ui.paperSort"))) !== "status") throw new Error("並び順を覚えていない");
+  await page.getByLabel("並び順").selectOption({ label: "発行年が新しい順" });
+  if ((await stages()).length !== 2) throw new Error("並べ替えで論文の数が変わった");
+});
+
 const md = readFileSync(path.join(data, "papers", id, "note.md"), "utf8");
 for (const want of ["status: 精読", "画面から書いた要約。", "エージェントが書いた読む目的。", "> [!quote] p.1（水色）", "> 訳: Transformer は長い", "### [[疎な窓付き注意（sparse window attention）]]", "O(n \\cdot w)", "> 訳: 画面で付けた訳。"]) {
   if (!md.includes(want)) {

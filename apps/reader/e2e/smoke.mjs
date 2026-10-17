@@ -198,6 +198,14 @@ await step("段階で絞り込み、すべて表示で戻す", async () => {
   await page.locator(".filter-band").waitFor({ state: "detached" });
 });
 
+await step("一覧の BibTeX を .bib に書き出す", async () => {
+  const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "すべての BibTeX を書き出す" }).click()]);
+  if (download.suggestedFilename() !== "paperlens.bib") throw new Error(`ファイル名が違う: ${download.suggestedFilename()}`);
+  const bib = readFileSync(await download.path(), "utf8");
+  if (!/^@\w+\{[^,]+,\n  title = /.test(bib)) throw new Error(`BibTeX の形が違う: ${bib.slice(0, 80)}`);
+  await page.locator(".snackbar", { hasText: "1 件の BibTeX を書き出しました" }).waitFor();
+});
+
 await step("ページ番号を入れて移る", async () => {
   const input = page.getByLabel("ページ番号");
   await input.fill("2");

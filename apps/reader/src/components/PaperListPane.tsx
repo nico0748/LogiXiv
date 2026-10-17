@@ -1,5 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { type Backend, ServerBackend, serverApi } from "../lib/backend.ts";
+import { toBibFile } from "../lib/bibtex.ts";
+import { readFrontmatter } from "../lib/frontmatter.ts";
+import { SORT_KEYS, SORT_LABEL, type SortKey, isSortKey, sortPapers } from "../lib/paperSort.ts";
 import type { PaperSummary, SearchHit } from "../lib/papers.ts";
 import { parseFields } from "../lib/template.ts";
 import { StatusChips } from "./StatusChips.tsx";
@@ -9,8 +12,10 @@ import { StatusChips } from "./StatusChips.tsx";
 // - 検索の語は 300ms 待ってから使う。題名・著者・年で一覧を絞り、2 文字以上ならノートの中も探す
 // - 段階の絞り込みは localStorage に覚える。検索の語は覚えない（開き直したときに一覧が理由なく短くならないように）
 // - 開いている論文は、絞り込みに当てはまらなくても一覧の先頭に残す
+// - 並び順は localStorage に覚える。「BibTeX を書き出す」は、絞り込んだ一覧をその並び順で 1 つの .bib にする
 
 const FILTER_KEY = "paperlens.ui.statusFilter";
+const SORT_KEY = "paperlens.ui.paperSort";
 const HIT_LIMIT = 50;
 
 const REGION_LABEL: Record<string, string> = {
@@ -32,9 +37,11 @@ interface Props {
   onHit: (hit: SearchHit) => void;
   /** 「PDF を追加」（論文が無いときに出す） */
   onAdd: () => void;
+  /** 書き出しの結果を知らせる */
+  notify?: (text: string) => void;
 }
 
-export function PaperListPane({ backend, papers, current, showing, onOpen, onHit, onAdd }: Props) {
+export function PaperListPane({ backend, papers, current, showing, onOpen, onHit, onAdd, notify }: Props) {
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState(() => {
@@ -44,6 +51,15 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
       return "";
     }
   });
+  const [sort, setSort] = useState<SortKey>(() => {
+    try {
+      const v = localStorage.getItem(SORT_KEY);
+      return isSortKey(v) ? v : "created";
+    } catch {
+      return "created";
+    }
+  });
+  const [exporting, setExporting] = useState(false);
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [labels, setLabels] = useState<Record<string, string>>({});
   /** 記録欄の外（body）の当たりを押したときの知らせ */
@@ -61,6 +77,14 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
       // 覚えられなくても絞り込みは効く
     }
   }, [status]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SORT_KEY, sort);
+    } catch {
+      // 覚えられなくても並べ替えは効く
+    }
+  }, [sort]);
 
   // 記録欄の見出しは、テンプレートから引く
   useEffect(() => {
@@ -97,7 +121,7 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
     const q = fold(query);
     return [p.title, p.authors.join(" "), p.year].some((s) => fold(s).includes(q));
   };
-  const filtered = papers.filter(matches);
+  const filtered = useMemo(() => sortPapers(papers, sort), [papers, sort]).filter(matches);
   const outside = current && !filtered.some((p) => p.id === current) ? papers.find((p) => p.id === current) : undefined;
   const shown = outside ? [outside, ...filtered] : filtered;
   const noteHits = (hits ?? []).filter((h) => h.region !== "frontmatter");
@@ -105,6 +129,24 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
   const filtering = !!activeStatus || !!query;
 
   const band = [query ? `『${query}』で絞り込み中` : "", activeStatus ? `${activeStatus}のみ表示` : ""].filter(Boolean).join("・");
+  const exportBib = async () => {
+    setExporting(true);
+    try {
+      const notes = await Promise.all(filtered.map(async (p) => ({ id: p.id, fm: readFrontmatter(await backend.loadNote(p.id)) })));
+      const url = URL.createObjectURL(new Blob([toBibFile(notes)], { type: "application/x-bibtex" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filtering ? "paperlens-selected.bib" : "paperlens.bib";
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      notify?.(`${notes.length} 件の BibTeX を書き出しました`);
+    } catch (e) {
+      notify?.(`BibTeX を書き出せませんでした: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const clear = () => {
     setDraft("");
     setQuery("");
@@ -143,7 +185,17 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
         </div>
       )}
       <div className="sidebar-scroll">
-        <div className="nav-header-title">論文 <span className="nav-count">{papers.length}</span></div>
+        <div className="nav-header-title list-head">
+          <span>論文 <span className="nav-count">{papers.length}</span></span>
+          {papers.length > 1 && (
+            <>
+              <label className="visually-hidden" htmlFor="paper-sort">並び順</label>
+              <select id="paper-sort" className="sort-select" value={sort} onChange={(e) => isSortKey(e.target.value) && setSort(e.target.value)}>
+                {SORT_KEYS.map((k) => <option key={k} value={k}>{SORT_LABEL[k]}</option>)}
+              </select>
+            </>
+          )}
+        </div>
         {papers.length === 0 ? (
           <div className="empty">
             <p>論文はまだありません。PDF をここにドロップするか、取り込んでください。取り込むと、テンプレートから読解ノートを作ります。</p>
@@ -164,6 +216,11 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
               </li>
             ))}
           </ul>
+        )}
+        {filtered.length > 0 && (
+          <button className="btn text sm bib-export" disabled={exporting} onClick={() => void exportBib()}>
+            {exporting ? "書き出しています…" : filtering ? `表示中の ${filtered.length} 件の BibTeX を書き出す` : "すべての BibTeX を書き出す"}
+          </button>
         )}
         {hits && noteHits.length > 0 && (
           <section className="hit-list" aria-labelledby="hit-head">

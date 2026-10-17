@@ -33,6 +33,8 @@ export interface PaperSummary {
   authors: string[];
   /** arXiv の ID（版の番号を除く）。無ければ "" */
   arxiv: string;
+  /** ノートを作った日（frontmatter の created、YYYY-MM-DD）。無ければ "" */
+  created: string;
 }
 
 /** frontmatter から一覧に出す項目を取り出す。 */
@@ -45,6 +47,7 @@ function summaryOf(id: string, fm: Record<string, FmValue>): PaperSummary {
     year: fmText(fm.year),
     authors: Array.isArray(a) ? a : a?.trim() ? [a.trim()] : [],
     arxiv: fmText(fm.arxiv),
+    created: fmText(fm.created),
   };
 }
 

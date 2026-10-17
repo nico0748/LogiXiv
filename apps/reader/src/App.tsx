@@ -579,6 +579,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
             vaultName={backend.name}
             onOpenSettings={() => setOverlay("settings")}
             onSwitchVault={onClose}
+            notify={notify}
           />
         </div>
         {leftOpen && <ResizeHandle side="left" width={ws.leftWidth} onResize={(w) => patch({ leftWidth: w })} onDragging={setResizing} label="左サイドバーの幅" />}
