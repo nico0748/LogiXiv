@@ -9,7 +9,7 @@
 // - 右: 論文。マークアップを選んでいる間、文章はドラッグで選んで、図・数式は四角で囲んでリンクする。
 // - 間: グループの色の線でつなぐ。片方が画面の外にあるときは、端まで点線で引く。
 
-import { Frame, MousePointer2, Spline, SquareDashed, Upload } from "lucide-react";
+import { Frame, Maximize, Minimize, MousePointer2, Spline, SquareDashed, Upload } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Rect } from "../../lib/model.ts";
 import { newId } from "../../lib/model.ts";
@@ -30,6 +30,7 @@ import {
 } from "../../lib/slides.ts";
 import { PdfPages, type PdfPagesHandle } from "./PdfPages.tsx";
 import "./slides.css";
+import { useFullscreen } from "./useFullscreen.ts";
 import type { Slides } from "./useSlides.ts";
 
 export type SlideTool = "select" | "box";
@@ -66,6 +67,29 @@ export function SlidesView(props: Props) {
   const s = slides.state;
   const fileRef = useRef<HTMLInputElement>(null);
   const [dropping, setDropping] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const ready = s.kind === "ready" && !!props.paperPdf;
+  const fs = useFullscreen(rootRef, ready);
+  // 全画面では道具の帯を隠し、上の端にマウスを近づけたときだけ出す（止まって 2 秒で隠す）
+  const [bar, setBar] = useState(false);
+  const [fsHint, setFsHint] = useState(false);
+  const barTimer = useRef(0);
+  useEffect(() => {
+    setBar(false);
+    setFsHint(!!fs.mode);
+    if (!fs.mode) return;
+    const t = window.setTimeout(() => setFsHint(false), 2500);
+    return () => window.clearTimeout(t);
+  }, [fs.mode]);
+  useEffect(() => () => window.clearTimeout(barTimer.current), []);
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!fs.mode) return;
+    const inBar = (e.target as Element).closest?.(".sv-toolbar");
+    if (!inBar && e.clientY - e.currentTarget.getBoundingClientRect().top > 56) return;
+    setBar(true);
+    window.clearTimeout(barTimer.current);
+    barTimer.current = window.setTimeout(() => setBar(false), 2000);
+  };
 
   const pick = async (f: File | undefined) => {
     if (!f || slides.importing) return;
@@ -93,7 +117,9 @@ export function SlidesView(props: Props) {
 
   return (
     <div
-      className={`slides-view${dropping ? " is-drop-target" : ""}`}
+      ref={rootRef}
+      className={`slides-view${dropping ? " is-drop-target" : ""}${fs.mode ? " is-fullscreen" : ""}${fs.mode === "fill" ? " is-fill" : ""}${bar ? " fs-bar" : ""}`}
+      onPointerMove={onPointerMove}
       onDragOver={(e) => {
         if (!e.dataTransfer.types.includes("Files")) return;
         e.preventDefault();
@@ -112,6 +138,7 @@ export function SlidesView(props: Props) {
       }}
     >
       {input}
+      {fsHint && <div className="sv-fs-hint" role="status">Esc で全画面を終えます。上の端にマウスを動かすと道具が出ます</div>}
       {slides.importing && (
         // 今の画面（拡大率や分割の幅）を残したまま、上に重ねて知らせる
         <div className="sv-importing" role="status" aria-busy="true">
@@ -134,7 +161,7 @@ export function SlidesView(props: Props) {
       ) : !props.paperPdf ? (
         <div className="drop-hint" aria-busy="true"><h2>論文を読み込んでいます</h2></div>
       ) : (
-        <Split {...props} deck={s.deck} slidePdf={s.pdf} paperPdf={props.paperPdf} onReplace={() => fileRef.current?.click()} />
+        <Split {...props} deck={s.deck} slidePdf={s.pdf} paperPdf={props.paperPdf} onReplace={() => fileRef.current?.click()} fullscreen={!!fs.mode} onFullscreen={fs.toggle} />
       )}
     </div>
   );
@@ -157,7 +184,9 @@ function Split({
   setIsolate,
   onSlideCount,
   onReplace,
-}: Props & { deck: SlideDeck; slidePdf: ArrayBuffer; paperPdf: ArrayBuffer; onReplace: () => void }) {
+  fullscreen,
+  onFullscreen,
+}: Props & { deck: SlideDeck; slidePdf: ArrayBuffer; paperPdf: ArrayBuffer; onReplace: () => void; fullscreen: boolean; onFullscreen: () => void }) {
   const [slideTool, setSlideTool] = useState<SlideTool>("select");
   const [paperTool, setPaperTool] = useState<PaperTool>("text");
   const [slideZoom, setSlideZoom] = useState(1);
@@ -551,6 +580,9 @@ function Split({
         </div>
         <button className={`btn text sm${isolate ? " is-on" : ""}`} aria-pressed={isolate} title="選んだグループの線だけを出す" onClick={() => setIsolate(!isolate)}>
           <Spline size={14} aria-hidden="true" /> 選んだ線だけ
+        </button>
+        <button className="btn text sm sv-fs-btn" title={fullscreen ? "全画面を終える（P / Esc）" : "スライドと論文を全画面で表示する（P）"} onClick={onFullscreen}>
+          {fullscreen ? <Minimize size={14} aria-hidden="true" /> : <Maximize size={14} aria-hidden="true" />} {fullscreen ? "全画面を終える" : "全画面"}
         </button>
       </div>
       <div ref={splitRef} className="sv-split" style={{ gridTemplateColumns: `minmax(0, ${ratio}fr) 56px minmax(0, ${1 - ratio}fr)` }}>
