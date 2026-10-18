@@ -9,7 +9,7 @@ import { type Pt, segmentText, snapSegments } from "../lib/selection.ts";
 import { attachEndOfContent } from "../lib/textSelection.ts";
 import type { Pos } from "../lib/position.ts";
 import { setSentenceFocus, setSentenceMarksVisible, useSentenceFocus, useSentenceMarksVisible } from "../lib/sentenceFocus.ts";
-import { type SentenceMark, hitTest, marksByPage, sentenceAnchor } from "../lib/sentencesView.ts";
+import { type SentenceMark, hitTest, marksByPage, sentenceAnchor, successorSentence } from "../lib/sentencesView.ts";
 import { SentenceMarkLayer } from "./sentences/SentenceMarks.tsx";
 import { useSentences } from "./sentences/useSentences.ts";
 
@@ -88,6 +88,22 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
   const focus = useSentenceFocus();
   const activeSentence = paperId && focus.paperId === paperId ? focus.id : null;
   const pickSentence = useCallback((m: SentenceMark) => paperId && setSentenceFocus(paperId, m.id, m.hash, "pdf"), [paperId]);
+
+  // 選んでいた文が結合・分割で消えたら、後を継いだ文を選び直す。
+  // そのままだと PDF の枠も対訳のカードも選択が外れ、結合・分割の結果が PDF に出ていないように見える。
+  const prevDoc = useRef(sdoc);
+  useEffect(() => {
+    const prev = prevDoc.current;
+    prevDoc.current = sdoc;
+    if (!sdoc || !prev || !paperId || focus.paperId !== paperId || !focus.id) return;
+    const now = sdoc.structure.sentences;
+    if (now.some((x) => x.id === focus.id)) return;
+    const gone = prev.structure.sentences.find((x) => x.id === focus.id);
+    const next = gone && successorSentence(gone, now);
+    // PDF は既にその位置を見せているので動かさず、対訳タブだけ後継のカードへ寄せる
+    if (next) setSentenceFocus(paperId, next.id, next.hash, "pdf");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sdoc]);
 
   useEffect(() => {
     let cancelled = false;
