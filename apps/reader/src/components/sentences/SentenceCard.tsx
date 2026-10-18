@@ -1,7 +1,9 @@
 import type { NonBodySentence, Note, Sentence, Translation } from "@paperlens/core";
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { type SentencesState, sentencesApi } from "../../lib/sentencesApi.ts";
-import { NONBODY_LABEL, seamLabel, wordBoundaries } from "../../lib/sentencesView.ts";
+import type { Equation } from "../../lib/model.ts";
+import { NONBODY_LABEL, equationNumber, seamLabel, wordBoundaries } from "../../lib/sentencesView.ts";
+import { Tex } from "../Tex.tsx";
 
 /** 書き込みを 1 つ走らせる。成功したら true（失敗の知らせはパネルが出す）。 */
 export type Act = (f: () => Promise<SentencesState>) => Promise<boolean>;
@@ -284,6 +286,28 @@ export const NonBodyCard = memo(function NonBodyCard({ item, matched }: { item: 
         {NONBODY_LABEL[item.kind]}（訳しません）{matched && <span className="sl-badge">検索に一致</span>}
       </p>
       <p className="sl-orig" lang="en">{item.text}</p>
+    </article>
+  );
+});
+
+/** 訳さない数式の代わりに、数式タブに登録した式を TeX で差し込む。押すと数式タブのその式へ移る。 */
+export const FormulaRow = memo(function FormulaRow({ item, equation, onOpen }: { item: NonBodySentence; equation: Equation; onOpen: (id: string) => void }) {
+  const no = equationNumber(item.text);
+  const name = equation.label.trim() || (no ? `式(${no})` : "数式");
+  return (
+    <article className="sl-card is-formula" data-sl-card={item.id}>
+      <p className="sl-kind">
+        数式 {name}
+        <span className="grow" />
+        <button type="button" className="btn text sm sl-formula-link" onClick={() => onOpen(equation.id)} title="数式タブでこの式を開く">数式タブで見る</button>
+      </p>
+      {equation.tex.trim() ? (
+        <button type="button" className="tex-locate" onClick={() => onOpen(equation.id)} aria-label={`${name}を数式タブで開く`}>
+          <Tex tex={equation.tex} />
+        </button>
+      ) : (
+        <p className="sl-orig">TeX はまだありません。</p>
+      )}
     </article>
   );
 });

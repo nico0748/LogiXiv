@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { NonBodySentence, PaperDocument, Sentence } from "@paperlens/core";
+import type { Equation } from "./model.ts";
 import {
   buildRows,
+  equationNumber,
+  matchEquation,
   filterNonBody,
   filterSentences,
   formatElapsed,
@@ -155,4 +158,46 @@ test("結合・分割で消えた文の後継: 結合した文、分割した先
   const near = { ...s(1, "Alpha is first. Beta follows."), id: "near" };
   assert.equal(successorSentence(a, [far, near])?.id, "near");
   assert.equal(successorSentence(a, [s(3, "Gamma.")]), null);
+});
+
+test("数式の行は、数式タブの式と対応が付けば式として差し込み、付かなければ載せない。表・柱も載せない", () => {
+  const nb = (id: string, kind: NonBodySentence["kind"], text: string, afterHash: string, y = 300): NonBodySentence => ({
+    ...s(9, text, { rects: [{ page: 1, x: 100, y, w: 300, h: 20 }] }), id, kind, afterOrder: 0, afterHash,
+  });
+  const eq = (id: string, extra: Partial<Equation>): Equation => ({ id, label: "", tex: "x", explanation: "", source: "", createdAt: "", ...extra });
+  const d = doc([s(0, "A."), s(1, "B.")], {
+    nonBody: [
+      nb("f1", "formula", "Attention(Q, K,V ) = softmax √ V, (1)", "h-A.", 300),
+      nb("f2", "formula", "si j = √i , (2)", "h-A.", 500),
+      nb("f3", "formula", "garbled (3)", "h-B.", 600),
+      nb("t1", "table", "a a", "h-B."),
+      nb("r1", "runningHead", "Journal 2024", "h-B."),
+      nb("c1", "caption", "Figure 1. A cat.", "h-B."),
+    ],
+  });
+  const equations = [
+    // 位置が重なる（f1 の y=300/800=0.375 付近）
+    eq("e-place", { page: 1, rects: [{ x: 0.2, y: 0.37, w: 0.5, h: 0.03 }] }),
+    // 見出しの番号で対応
+    eq("e-num", { page: 1, label: "式(2)" }),
+    // 既定の見出し「式3」は登録順の番号なので対応させない
+    eq("e-auto", { page: 1, label: "式3" }),
+  ];
+  const rows = buildRows(d, d.structure.sentences, filterNonBody(d.structure, { query: "", onlyUntranslated: false }), equations);
+  assert.deepEqual(
+    rows.filter((r) => r.kind !== "heading").map((r) => (r.kind === "formula" ? `F:${r.equation.id}` : r.kind === "nonbody" ? `N:${r.item.id}` : r.kind === "sentence" ? r.sentence.id : "")),
+    ["s0", "F:e-place", "F:e-num", "s1", "N:c1"],
+  );
+});
+
+test("式番号は行の中で最後の (n)", () => {
+  assert.equal(equationNumber("E f(x) = 1. (1) M"), "1");
+  assert.equal(equationNumber("a (see (2)) = b (3a)"), "3a");
+  assert.equal(equationNumber("no number"), null);
+  const item: NonBodySentence = { ...s(9, "y = x (4)"), id: "f", kind: "formula", afterOrder: 0, afterHash: null, page: 2 };
+  const eq = (id: string, extra: Partial<Equation>): Equation => ({ id, label: "", tex: "", explanation: "", source: "", createdAt: "", ...extra });
+  // 元の文字列の番号でも対応する。ページが違えば対応しない
+  assert.equal(matchEquation(item, [eq("a", { page: 2, source: "y=x (4)" })], [])?.id, "a");
+  assert.equal(matchEquation(item, [eq("b", { page: 3, label: "(4)" })], []), null);
+  assert.equal(matchEquation(item, [eq("c", { label: "(4)" })], [])?.id, "c");
 });

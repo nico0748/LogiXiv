@@ -14,7 +14,8 @@ import {
   sentenceProgress,
 } from "../../lib/sentencesView.ts";
 import { GlossaryView } from "./GlossaryView.tsx";
-import { type Act, NonBodyCard, SentenceCard } from "./SentenceCard.tsx";
+import type { Equation } from "../../lib/model.ts";
+import { type Act, FormulaRow, NonBodyCard, SentenceCard } from "./SentenceCard.tsx";
 import { useSentences } from "./useSentences.ts";
 import "./sentences.css";
 
@@ -28,7 +29,14 @@ const PARSERS: { id: ParserChoice; label: string }[] = [
  * 対訳タブ。論文を 1 文ずつのカードに分け、原文の下に訳を並べる。
  * 訳を入れるのは Claude（MCP 経由）か人。ここでは読む・直す・区切りを整えることに集中する。
  */
-export function SentencePanel({ paperId }: { paperId: string | null }) {
+const NO_EQUATIONS: Equation[] = [];
+
+export function SentencePanel({ paperId, equations = NO_EQUATIONS, onOpenEquation }: {
+  paperId: string | null;
+  /** 数式タブの式。訳さない数式の行の代わりに差し込む */
+  equations?: Equation[];
+  onOpenEquation?: (id: string) => void;
+}) {
   const { state, error } = useSentences(paperId);
   const [flash, setFlash] = useState<string | null>(null);
 
@@ -82,7 +90,7 @@ export function SentencePanel({ paperId }: { paperId: string | null }) {
         <ParseForm label="もう一度解析する" onParse={(parser) => act(() => sentencesApi.parse(paperId, parser))} />
       </div>
     );
-  return <Ready key={paperId} paperId={paperId} doc={state.document} act={act} flash={flashEl} />;
+  return <Ready key={paperId} paperId={paperId} doc={state.document} act={act} flash={flashEl} equations={equations} onOpenEquation={onOpenEquation} />;
 }
 
 function ParseForm({ label, onParse, initial = "auto" }: { label: string; onParse: (p: ParserChoice) => Promise<boolean>; initial?: ParserChoice }) {
@@ -128,7 +136,14 @@ function Parsing({ startedAt }: { startedAt: string }) {
 
 type View = "sentences" | "glossary";
 
-function Ready({ paperId, doc, act, flash }: { paperId: string; doc: PaperDocument; act: Act; flash: React.ReactNode }) {
+function Ready({ paperId, doc, act, flash, equations, onOpenEquation }: {
+  paperId: string;
+  doc: PaperDocument;
+  act: Act;
+  flash: React.ReactNode;
+  equations: Equation[];
+  onOpenEquation?: (id: string) => void;
+}) {
   const [view, setView] = useState<View>("sentences");
   const [query, setQuery] = useState("");
   const [onlyUntranslated, setOnlyUntranslated] = useState(false);
@@ -141,7 +156,10 @@ function Ready({ paperId, doc, act, flash }: { paperId: string; doc: PaperDocume
   const filter = useMemo(() => ({ query, onlyUntranslated }), [query, onlyUntranslated]);
   const visible = useMemo(() => filterSentences(doc, filter, notes), [doc, filter, notes]);
   const visibleNb = useMemo(() => filterNonBody(doc.structure, filter), [doc.structure, filter]);
-  const rows = useMemo(() => buildRows(doc, visible, visibleNb), [doc, visible, visibleNb]);
+  const openEquation = useCallback((id: string) => onOpenEquation?.(id), [onOpenEquation]);
+  const rows = useMemo(() => buildRows(doc, visible, visibleNb, equations), [doc, visible, visibleNb, equations]);
+  // 数式・表などは載せないので、実際に並ぶ行だけを数える
+  const shownNb = useMemo(() => rows.filter((r) => r.kind === "nonbody" || r.kind === "formula").length, [rows]);
   const prog = useMemo(() => sentenceProgress(doc), [doc]);
   const caveats = useMemo(() => qualityCaveats(doc.structure), [doc.structure]);
   const edits = (doc.annotations.sentenceEdits ?? []).filter((e) => !e.detached);
@@ -252,7 +270,7 @@ function Ready({ paperId, doc, act, flash }: { paperId: string; doc: PaperDocume
         <>
           {filtering && (
             <p className="sl-hint">
-              一致: 本文 {visible.length} 件{visibleNb.length > 0 && ` ／ 訳さない行 ${visibleNb.length} 件`}
+              一致: 本文 {visible.length} 件{shownNb > 0 && ` ／ 訳さない行 ${shownNb} 件`}
             </p>
           )}
           {rows.length === 0 ? (
@@ -269,6 +287,8 @@ function Ready({ paperId, doc, act, flash }: { paperId: string; doc: PaperDocume
                 <h3 key={r.key} className="sl-section">{r.title}</h3>
               ) : r.kind === "nonbody" ? (
                 <NonBodyCard key={r.key} item={r.item} matched={filtering} />
+              ) : r.kind === "formula" ? (
+                <FormulaRow key={r.key} item={r.item} equation={r.equation} onOpen={openEquation} />
               ) : (
                 <SentenceCard
                   key={r.key}
