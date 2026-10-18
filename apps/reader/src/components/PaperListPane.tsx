@@ -12,6 +12,7 @@ import { StatusChips } from "./StatusChips.tsx";
 // - 検索の語は 300ms 待ってから使う。題名・著者・年で一覧を絞り、2 文字以上ならノートの中も探す
 // - 段階の絞り込みは localStorage に覚える。検索の語は覚えない（開き直したときに一覧が理由なく短くならないように）
 // - 開いている論文は、絞り込みに当てはまらなくても一覧の先頭に残す
+// - 行のタグを押すと、そのタグ（#tag）で絞り込む。検索の語が # で始まるときはタグだけを見る
 // - 並び順は localStorage に覚える。「BibTeX を書き出す」は、絞り込んだ一覧をその並び順で 1 つの .bib にする
 
 const FILTER_KEY = "paperlens.ui.statusFilter";
@@ -96,7 +97,7 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
 
   useEffect(() => {
     setBodyHit(null);
-    if (query.length < 2) return setHits(null);
+    if (query.length < 2 || query.startsWith("#")) return setHits(null);
     let cancelled = false;
     void backend.search(query).then(
       (h) => !cancelled && setHits(h),
@@ -119,7 +120,9 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
     if (activeStatus && p.status !== activeStatus) return false;
     if (!query) return true;
     const q = fold(query);
-    return [p.title, p.authors.join(" "), p.year].some((s) => fold(s).includes(q));
+    // #ml のように # で始まる語は、タグだけで絞り込む
+    if (q.startsWith("#")) return p.tags.some((t) => fold(t) === q.slice(1));
+    return [p.title, p.authors.join(" "), p.year, ...p.tags].some((s) => fold(s).includes(q));
   };
   const filtered = useMemo(() => sortPapers(papers, sort), [papers, sort]).filter(matches);
   const outside = current && !filtered.some((p) => p.id === current) ? papers.find((p) => p.id === current) : undefined;
@@ -213,6 +216,19 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
                     {p === outside && <span className="tag out-of-filter">絞り込み外</span>}
                   </span>
                 </button>
+                {p.tags.length > 0 && (
+                  <span className="nav-file-tags">
+                    {p.tags.map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className={`paper-tag${fold(query) === `#${fold(t)}` ? " is-active" : ""}`}
+                        aria-label={`タグ ${t} で絞り込む`}
+                        onClick={() => { setDraft(`#${t}`); setQuery(`#${t}`); }}
+                      >#{t}</button>
+                    ))}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

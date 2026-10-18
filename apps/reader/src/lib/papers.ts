@@ -35,11 +35,14 @@ export interface PaperSummary {
   arxiv: string;
   /** ノートを作った日（frontmatter の created、YYYY-MM-DD）。無ければ "" */
   created: string;
+  /** frontmatter の tags。文字列のとき（tags: ml）は 1 要素の配列。空の項目は除く */
+  tags: string[];
 }
 
 /** frontmatter から一覧に出す項目を取り出す。 */
 function summaryOf(id: string, fm: Record<string, FmValue>): PaperSummary {
   const a = fm.authors;
+  const t = fm.tags;
   return {
     id,
     title: fmText(fm.title) || id,
@@ -48,6 +51,7 @@ function summaryOf(id: string, fm: Record<string, FmValue>): PaperSummary {
     authors: Array.isArray(a) ? a : a?.trim() ? [a.trim()] : [],
     arxiv: fmText(fm.arxiv),
     created: fmText(fm.created),
+    tags: (Array.isArray(t) ? t : [t ?? ""]).map((x) => x.trim()).filter(Boolean),
   };
 }
 
