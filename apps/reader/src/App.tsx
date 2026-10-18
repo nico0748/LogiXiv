@@ -2,7 +2,7 @@ import { ExternalLink, FileText, PanelLeft, PanelRight, Presentation, Waypoints 
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GraphView } from "./components/GraphView.tsx";
 import { ListModal } from "./components/ListModal";
-import { PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView.tsx";
+import { type LocateRequest, PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView.tsx";
 import { type Busy, RightPanel, type Tab } from "./components/RightPanel.tsx";
 import { SettingsDialog, TemplateDialog, UrlImportDialog } from "./components/Dialogs.tsx";
 import { Welcome } from "./components/Welcome.tsx";
@@ -32,7 +32,7 @@ import { ApiError, type Backend, type Link, ServerBackend, VaultBackend, connect
 import { type Pos, loadPos, posKey, savePos, throttleTrailing } from "./lib/position.ts";
 import { type FmValue, FrontmatterError } from "./lib/frontmatter.ts";
 import { type Snack, Snackbar } from "./components/Snackbar.tsx";
-import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId } from "./lib/model.ts";
+import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId, type Rect } from "./lib/model.ts";
 import type { PaperSummary, SearchHit } from "./lib/papers.ts";
 import { openPdf } from "./lib/pdf.ts";
 import { getFrontmatter } from "./lib/template.ts";
@@ -69,6 +69,15 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [ai, setAi] = useState<AiSettings>(loadAiSettings);
   const [dialog, setDialog] = useState<"settings" | "template" | "url" | null>(null);
   const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number; instant?: boolean } | null>(null);
+  /** 用語・数式の場所を PDF で示す指示 */
+  const [locateReq, setLocateReq] = useState<LocateRequest | null>(null);
+  /** PDF で場所を囲んでいる数式の id */
+  const [boxFor, setBoxFor] = useState<string | null>(null);
+  // 論文を替えたら、前の論文の場所の指示と囲むモードを捨てる
+  useEffect(() => {
+    setLocateReq(null);
+    setBoxFor(null);
+  }, [current]);
   /** リストから論文のページへ飛ぶとき。nonce を変えると同じページでももう一度飛ぶ */
   const [scrollToPage, setScrollToPage] = useState<{ page: number; nonce: number } | undefined>(undefined);
   const [overlay, setOverlay] = useState<Overlay>(null);
@@ -356,7 +365,11 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     setBusyFor(id, "working");
     try {
       const r = await toTex(ai, source, crops.current.get(id) ?? null, { title, around: contexts.current.get(id) ?? source });
-      update((a) => ({ ...a, equations: a.equations.map((e) => (e.id === id ? { ...e, tex: r.tex, explanation: r.explanation } : e)) }));
+      update((a) => ({
+        ...a,
+        // 記号の欄は、手で書いたものがあれば上書きしない
+        equations: a.equations.map((e) => (e.id === id ? { ...e, tex: r.tex, explanation: r.explanation, symbols: e.symbols?.length ? e.symbols : r.symbols } : e)),
+      }));
       setBusyFor(id, undefined);
     } catch (e) {
       setBusyFor(id, { error: describeError(e) });
@@ -380,7 +393,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       const id = newId("t");
       const term = s.text.slice(0, 80);
       contexts.current.set(id, s.around);
-      update((x) => ({ ...x, terms: [{ id, term, reading: "", short: "", detail: "", inPaper: "", related: [], page: s.page, createdAt: now }, ...x.terms] }));
+      update((x) => ({ ...x, terms: [{ id, term, reading: "", short: "", detail: "", inPaper: "", related: [], page: s.page, rects: s.rects, createdAt: now }, ...x.terms] }));
       setTab("terms");
       setRightOpen(true);
       if (aiReady) void runTerm(id, term);
@@ -390,7 +403,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       crops.current.set(id, s.crop());
       update((x) => ({
         ...x,
-        equations: [{ id, label: `式${x.equations.length + 1}`, tex: "", explanation: "", page: s.page, source: s.text, createdAt: now }, ...x.equations],
+        equations: [{ id, label: `式${x.equations.length + 1}`, tex: "", explanation: "", page: s.page, rects: s.rects, source: s.text, createdAt: now }, ...x.equations],
       }));
       setTab("math");
       setRightOpen(true);
@@ -468,6 +481,15 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   };
 
   const jump = (page: number, y: number) => setJumpTo({ page, y, n: Date.now() });
+  const locate = (req: Omit<LocateRequest, "n">) => setLocateReq({ ...req, n: Date.now() });
+  const onBox = (page: number, rect: Rect) => {
+    const id = boxFor;
+    setBoxFor(null);
+    if (!id) return;
+    update((a) => ({ ...a, equations: a.equations.map((e) => (e.id === id ? { ...e, page, rects: [rect] } : e)) }));
+    setLocateReq({ page, rects: [rect], n: Date.now() });
+    notify(`数式の場所を p.${page} に設定しました`);
+  };
 
   const openPaper = (id: string) => {
     // スライドの画面では、その論文のスライドに切り替える（続けて対応づけられるように）
@@ -661,6 +683,11 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
                 })
               }
               onPosition={(pos) => current && posSaver.call(keyFor(current), pos)}
+              locate={locateReq}
+              onLocateMiss={(r) => notify(r.page ? `p.${r.page} の本文に見つかりませんでした。ページだけ表示しています` : "本文に見つかりませんでした")}
+              boxing={boxFor !== null}
+              onBox={onBox}
+              onBoxCancel={() => setBoxFor(null)}
             />
           ) : (
             <div className="drop-hint">
@@ -698,6 +725,9 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
               activeId={activeId}
               setActive={setActiveId}
               jump={jump}
+              locate={locate}
+              boxFor={boxFor}
+              setBoxFor={setBoxFor}
               busy={busy}
               aiReady={aiReady}
               retry={retry}

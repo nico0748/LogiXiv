@@ -226,6 +226,7 @@ export async function addEquation(vault: NodeVault, id: string, input: EquationI
     label: input.label || `式${a.equations.length + 1}`,
     tex: input.tex.trim(),
     explanation: input.explanation ?? "",
+    ...(input.symbols?.length ? { symbols: input.symbols } : {}),
     page: input.page,
     source: input.source ?? "",
     createdAt: new Date().toISOString(),

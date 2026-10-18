@@ -231,7 +231,7 @@ function ListModalBody({ onClose, onJump, initialTab = "vocab" }: ListModalProps
             </div>
             <div className="lm-header-actions">
               <div className="lm-segment" role="group" aria-label="並べ方">
-                <button type="button" aria-pressed={sort === "paper"} onClick={() => setSort("paper")}>論文ごと</button>
+                <button type="button" aria-pressed={sort === "paper"} onClick={() => setSort("paper")} title="論文ごとに、論文に出てくる順（ページ順）で並べる">論文・ページ順</button>
                 <button type="button" aria-pressed={sort === "alpha"} onClick={() => setSort("alpha")}>
                   {tab === "vocab" ? "五十音・ABC順" : "名前順"}
                 </button>

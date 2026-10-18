@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { attachGlyphs, type FontLike, layoutGlyphs } from "../lib/glyphs.ts";
 import type { Highlight, MarkerColor, Rect } from "../lib/model.ts";
 import { fromDisplay, type LaidItem, layoutItems, mergeLineRects, segmentRects, type Segment, type TextItemLike, textRotation, toDisplay } from "../lib/pageText.ts";
+import { findText } from "../lib/findText.ts";
 import { openPdf } from "../lib/pdf.ts";
 import { type Pt, segmentText, snapSegments } from "../lib/selection.ts";
 import { attachEndOfContent } from "../lib/textSelection.ts";
@@ -51,14 +52,35 @@ interface Props {
   paperId?: string | null;
   /** そのページの先頭までスクロールする。nonce が変わるたびに動く。 */
   scrollToPage?: { page: number; nonce: number };
+  /**
+   * 論文中の場所を示す（用語・数式のカードから）。n が変わるたびに動く。
+   * rects があればそこを、無ければ needles の語を page（無ければ先頭）から順に本文で探して光らせる。
+   */
+  locate?: LocateRequest | null;
+  /** 探しても本文に見つからなかったとき */
+  onLocateMiss?: (req: LocateRequest) => void;
+  /** 枠で囲むモード（数式の場所を指定する）。囲み終えると onBox、Esc で onBoxCancel */
+  boxing?: boolean;
+  onBox?: (page: number, rect: Rect) => void;
+  onBoxCancel?: () => void;
 }
+
+export interface LocateRequest {
+  page?: number;
+  rects?: Rect[];
+  needles?: string[];
+  n: number;
+}
+
+/** 場所を光らせておく時間（ms） */
+const FLASH_MS = 2600;
 
 /** 文の枠が無いページに渡す配列。毎回 [] を作ると memo が外れる。 */
 const NO_MARKS: SentenceMark[] = [];
 
 const COLORS: MarkerColor[] = ["yellow", "cyan", "magenta", "green"];
 
-export function PdfView({ data, highlights, activeId, onAction, onHighlightClick, onLoaded, jumpTo, initialPos, onRestored, onPosition, paperId, scrollToPage }: Props) {
+export function PdfView({ data, highlights, activeId, onAction, onHighlightClick, onLoaded, jumpTo, initialPos, onRestored, onPosition, paperId, scrollToPage, locate, onLocateMiss, boxing, onBox, onBoxCancel }: Props) {
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   /** 全ページの寸法。そろうまではページを描かない（仮の高さで並べると、移動先がずれるため） */
   const [sizes, setSizes] = useState<Size[] | null>(null);
@@ -240,6 +262,64 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
     else jump(j);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollToPage?.nonce]);
+
+  // 用語・数式の場所を光らせる
+  const [flash, setFlash] = useState<{ page: number; rects: Rect[]; n: number } | null>(null);
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), FLASH_MS);
+    return () => clearTimeout(t);
+  }, [flash]);
+  const missRef = useRef(onLocateMiss);
+  missRef.current = onLocateMiss;
+  useEffect(() => {
+    if (!locate || !doc || !sizes) return;
+    let cancelled = false;
+    void (async () => {
+      let hit = locate.page && locate.rects?.length ? { page: locate.page, rects: locate.rects } : null;
+      if (!hit && locate.needles?.length) {
+        // 指定のページを先に、続けて先頭から探す
+        const order = Array.from({ length: doc.numPages }, (_, i) => i + 1);
+        if (locate.page && locate.page <= doc.numPages) order.unshift(...order.splice(locate.page - 1, 1));
+        search: for (const n of order) {
+          const m = await pageModel(doc, n);
+          if (cancelled) return;
+          if (!m) continue;
+          const pt = { page: n, width: 0, height: 0, rotation: m.rotation, text: "", items: m.items };
+          for (const needle of locate.needles) {
+            const found = findText([pt], needle);
+            if (found?.rects.length) {
+              hit = { page: n, rects: found.rects };
+              break search;
+            }
+          }
+        }
+      }
+      if (cancelled) return;
+      if (!hit) {
+        if (locate.page) goTo(locate.page, 0, Math.abs(locate.page - curPageRef.current) < 3, 0);
+        missRef.current?.(locate);
+        return;
+      }
+      goTo(hit.page, hit.rects[0].y, Math.abs(hit.page - curPageRef.current) < 3, 160);
+      setFlash({ ...hit, n: locate.n });
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // 指示（n）が来たときだけ動かす。文書や寸法が後からそろったら、そのときに動かす
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locate?.n, doc, sizes]);
+
+  // 囲むモードは Esc でやめる
+  const cancelRef = useRef(onBoxCancel);
+  cancelRef.current = onBoxCancel;
+  useEffect(() => {
+    if (!boxing) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && cancelRef.current?.();
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [boxing]);
 
   const pageText = useCallback(
     async (n: number) => {
@@ -467,6 +547,12 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
           <span>読み込み中</span>
         )}
         <span className="spacer" />
+        {boxing && (
+          <span className="box-hint" role="status">
+            数式をドラッグで囲んでください
+            <button className="btn text sm" onClick={() => onBoxCancel?.()}>やめる（Esc）</button>
+          </span>
+        )}
         {sdoc && (
           <button
             className={`btn text sm sl-marks-toggle${marksVisible ? " is-on" : ""}`}
@@ -508,6 +594,8 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
               marks={marksVisible ? (markMap?.get(n) ?? NO_MARKS) : NO_MARKS}
               activeSentence={activeSentence}
               onPickSentence={pickSentence}
+              flash={flash?.page === n ? flash : null}
+              onBox={boxing ? onBox : undefined}
             />
           ))}
         {menu && (
@@ -551,6 +639,8 @@ function PageView({
   marks,
   activeSentence,
   onPickSentence,
+  flash,
+  onBox,
 }: {
   doc: PDFDocumentProxy;
   n: number;
@@ -562,6 +652,10 @@ function PageView({
   marks: SentenceMark[];
   activeSentence: string | null;
   onPickSentence: (m: SentenceMark) => void;
+  /** このページで光らせる場所 */
+  flash: { rects: Rect[]; n: number } | null;
+  /** あれば囲むモード。ドラッグで囲んだ枠（ページに対する割合）を渡す */
+  onBox?: (page: number, rect: Rect) => void;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -709,7 +803,53 @@ function PageView({
           })}
         </div>
       )}
+      {flash && (
+        <div className="locate-layer" aria-hidden="true" key={flash.n}>
+          {flash.rects.map((r, i) => (
+            <div key={i} className="locate-flash" style={{ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` }} />
+          ))}
+        </div>
+      )}
+      {onBox && <BoxCapture onBox={(r) => onBox(n, r)} />}
       <span className="page-no">{n}</span>
+    </div>
+  );
+}
+
+/** 囲むモードでページに重ねる面。ドラッグした矩形をページに対する割合で返す。 */
+function BoxCapture({ onBox }: { onBox: (r: Rect) => void }) {
+  const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const at = (e: React.PointerEvent) => {
+    const b = e.currentTarget.getBoundingClientRect();
+    return { x: Math.min(1, Math.max(0, (e.clientX - b.left) / b.width)), y: Math.min(1, Math.max(0, (e.clientY - b.top) / b.height)) };
+  };
+  const rect = drag && { x: Math.min(drag.x0, drag.x1), y: Math.min(drag.y0, drag.y1), w: Math.abs(drag.x1 - drag.x0), h: Math.abs(drag.y1 - drag.y0) };
+  return (
+    <div
+      className="box-capture"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        const p = at(e);
+        setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+      }}
+      onPointerMove={(e) => {
+        if (!drag) return;
+        const p = at(e);
+        setDrag({ ...drag, x1: p.x, y1: p.y });
+      }}
+      onPointerUp={(e) => {
+        e.stopPropagation();
+        setDrag(null);
+        // 小さすぎる枠（クリックしただけ）は無視する
+        if (rect && rect.w > 0.01 && rect.h > 0.005) onBox(rect);
+      }}
+      onMouseUp={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {rect && <div className="box-draft" style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.w * 100}%`, height: `${rect.h * 100}%` }} />}
     </div>
   );
 }

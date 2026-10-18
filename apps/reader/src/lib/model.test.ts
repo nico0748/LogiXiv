@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type Annotations, type Highlight, type Term, applyOps, diffAnnotations, emptyAnnotations } from "./model.ts";
+import { type Annotations, type Highlight, type Term, applyOps, diffAnnotations, emptyAnnotations, renderEquations, sortTermsByPage } from "./model.ts";
 
 const h = (id: string, extra: Partial<Highlight> = {}): Highlight => ({
   id, page: 1, rects: [{ x: 0, y: 0, w: 1, h: 1 }], text: id, color: "yellow", translation: "", memo: "", createdAt: "", ...extra,
@@ -44,4 +44,27 @@ test("数式はページ順、同じページは見出しの番号順、ペー�
   assert.deepEqual(list.map((x) => x.id), ["c", "a", "hand", "b", "z"], "元の配列は並べ替えない");
   const md = renderEquations(list);
   assert.ok(md.indexOf("式(9)") < md.indexOf("式(10)"));
+});
+
+test("用語はページ順、同じページなら上から並ぶ。ページの無いものは先頭", () => {
+  const at = (id: string, page?: number, y?: number): Term => ({ ...t(id), page, rects: y === undefined ? undefined : [{ x: 0, y, w: 0.1, h: 0.01 }] });
+  const sorted = sortTermsByPage([at("p3", 3), at("p1-low", 1, 0.8), at("hand"), at("p1-high", 1, 0.2)]);
+  assert.deepEqual(sorted.map((x) => x.id), ["hand", "p1-high", "p1-low", "p3"]);
+});
+
+test("数式の記号は note.md に表で書き出す", () => {
+  const md = renderEquations([
+    {
+      id: "e1", label: "式(1)", tex: "y = Wx", explanation: "", source: "", createdAt: "", page: 2,
+      symbols: [
+        { symbol: "W", kind: "matrix", meaning: "重み | 学習する", shape: "\\mathbb{R}^{m \\times n}" },
+        { symbol: "x", kind: "", meaning: "入力\n特徴量" },
+        { symbol: "", kind: "", meaning: "" },
+      ],
+    },
+  ]);
+  assert.match(md, /\| 記号 \| 種類 \| 意味 \| 次元・範囲 \|/);
+  assert.match(md, /\| \$W\$ \| 行列 \| 重み \\\| 学習する \| \$\\mathbb\{R\}\^\{m \\times n\}\$ \|/);
+  assert.match(md, /\| \$x\$ \|  \| 入力 特徴量 \|  \|/);
+  assert.equal(md.split("\n").filter((l) => l.startsWith("| $") || l.startsWith("|  |")).length, 2);
 });

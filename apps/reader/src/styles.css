@@ -522,6 +522,23 @@ mark { background: var(--text-highlight-bg); color: inherit; border-radius: 2px;
 /* 選択中: 行を四角で囲まず、各行の下に 2px の線を引く */
 .mk.active { box-shadow: inset 0 -2px 0 var(--mk-strong); }
 .page-no { position: absolute; right: -2px; bottom: -22px; font-size: var(--font-ui-smaller); color: var(--text-faint); }
+/* 用語・数式の場所: しばらく枠で囲んで光らせ、薄れて消える */
+.locate-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+.locate-flash {
+  position: absolute; border-radius: 3px; margin: -2px; padding: 2px; box-sizing: content-box;
+  outline: 2px solid var(--md-sys-color-tertiary);
+  background: color-mix(in srgb, var(--md-sys-color-tertiary) 18%, transparent);
+  animation: locate-flash 2.6s ease-out forwards;
+}
+@keyframes locate-flash {
+  0%, 15% { opacity: 0; transform: scale(1.15); }
+  25%, 70% { opacity: 1; transform: none; }
+  100% { opacity: 0; }
+}
+/* 数式を囲むモード: ページ全体で十字のカーソル、ドラッグ中の枠 */
+.box-capture { position: absolute; inset: 0; z-index: 6; cursor: crosshair; touch-action: none; }
+.box-draft { position: absolute; border: 2px dashed var(--md-sys-color-tertiary); background: color-mix(in srgb, var(--md-sys-color-tertiary) 12%, transparent); }
+.box-hint { display: inline-flex; align-items: center; gap: 4px; font-size: var(--font-ui-small); color: var(--md-sys-color-on-tertiary-container); background: var(--md-sys-color-tertiary-container); border-radius: var(--radius-m); padding: 0 0 0 10px; }
 
 /* メニューの面（選択メニュー、「追加」のメニュー）。位置の規則は各部品に置く */
 .menu-surface, .sel-menu {
@@ -597,6 +614,50 @@ mark { background: var(--text-highlight-bg); color: inherit; border-radius: 2px;
 }
 .katex-box .katex { font-size: 1.05em; }
 .tex-input { font-family: var(--font-monospace); font-size: var(--font-ui-smaller); }
+.tex-inline .katex { font-size: 1.05em; }
+
+/* 用語・数式の並べ方（リストの .lm-segment と同じ形） */
+.sort-toggle { display: inline-flex; padding: 2px; margin-bottom: 8px; border-radius: var(--radius-m); background: var(--background-modifier-hover); }
+.row > .sort-toggle { margin-bottom: 0; }
+.sort-toggle button {
+  padding: 2px 10px; border: 0; border-radius: var(--radius-s); background: transparent;
+  color: var(--text-muted); font-size: var(--font-ui-smaller); cursor: pointer;
+}
+.sort-toggle button:hover { color: var(--text-normal); }
+.sort-toggle button[aria-pressed="true"] { background: var(--background-primary); color: var(--text-normal); box-shadow: 0 0 0 1px var(--background-modifier-border); }
+
+/* 押すと論文中の場所を示す見出しと式 */
+.locate-link {
+  all: unset; cursor: pointer; border-radius: var(--radius-s);
+  text-decoration: underline dotted color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 3px;
+}
+.locate-link:hover { color: var(--text-accent); text-decoration-color: currentColor; }
+.locate-link:focus-visible { outline: 2px solid var(--md-sys-color-secondary); outline-offset: 2px; }
+.tex-locate { all: unset; display: block; width: 100%; box-sizing: border-box; cursor: pointer; border-radius: var(--radius-s); }
+.tex-locate > .katex-box { transition: border-color .12s; }
+.tex-locate:hover > .katex-box { border-color: var(--interactive-accent); }
+.tex-locate:focus-visible { outline: 2px solid var(--md-sys-color-secondary); outline-offset: 2px; }
+
+/* 数式の記号の一覧 */
+.sym { margin-top: 8px; display: grid; gap: 6px; }
+.sym-head { display: flex; align-items: center; gap: 4px; }
+.sym-head .grow { flex: 1; }
+.sym-list { margin: 0; display: grid; gap: 4px; }
+.sym-row { display: grid; grid-template-columns: minmax(36px, max-content) 1fr; gap: 8px; align-items: baseline; font-size: var(--font-ui-small); }
+.sym-row dt { text-align: center; }
+.sym-row dd { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; }
+.sym-meaning { line-height: 1.6; }
+.sym-shape { color: var(--text-muted); }
+.sym-kind-chip {
+  font-size: var(--font-ui-smaller); line-height: 1.6; padding: 0 6px; border-radius: 999px; white-space: nowrap;
+  background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container);
+}
+.sym-kind-chip.vector { background: var(--md-sys-color-primary-container); color: var(--md-sys-color-on-primary-container); }
+.sym-kind-chip.matrix, .sym-kind-chip.tensor { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
+.sym-edit { display: grid; gap: 4px; padding: 6px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
+.sym-edit-row { display: flex; gap: 4px; align-items: center; }
+.sym-edit-row .sym-symbol { flex: 1; min-width: 0; }
+.sym-edit-row .sym-kind { width: auto; flex: none; }
 .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .row > .grow { flex: 1; }
 
@@ -763,4 +824,5 @@ dialog.wide { max-width: min(880px, calc(100vw - 32px)); }
 
 @media (prefers-reduced-motion: reduce) {
   .sidebar, .modal, .modal-container { transition: none; animation: none; }
+  .locate-flash { animation: none; }
 }

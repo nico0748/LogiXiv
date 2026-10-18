@@ -494,7 +494,18 @@ const WRITE: Tool[] = [
         paper: PAPER,
         tex: z.string().min(1).describe("TeX（$ や $$ は付けない）"),
         label: z.string().optional().describe("見出し（例: 式(3)）。省略すると「式n」"),
-        explanation: z.string().optional().describe("記号の意味と式の読み方"),
+        explanation: z.string().optional().describe("式の役割と読み方"),
+        symbols: z
+          .array(
+            z.object({
+              symbol: z.string().describe("記号の TeX（例: \\mathbf{x}、W_q）"),
+              kind: z.enum(["scalar", "vector", "matrix", "tensor", "set", "function", "other", ""]).describe("値の種類。scalar=スカラー、vector=ベクトル、matrix=行列、tensor=テンソル、set=集合、function=関数、other=その他。分からなければ空文字"),
+              meaning: z.string().describe("論文中で何を表すか"),
+              shape: z.string().optional().describe("次元や値の範囲の TeX（例: \\mathbb{R}^{d}）"),
+            }),
+          )
+          .optional()
+          .describe("式に出てくる記号と意味の一覧。update_equation では一覧ごと置き換えます"),
         page: z.number().int().min(1).optional(),
         source: z.string().optional().describe("PDF 上の元の文字列"),
       },
@@ -513,6 +524,17 @@ const WRITE: Tool[] = [
         tex: z.string().optional(),
         label: z.string().optional(),
         explanation: z.string().optional(),
+        symbols: z
+          .array(
+            z.object({
+              symbol: z.string().describe("記号の TeX（例: \\mathbf{x}、W_q）"),
+              kind: z.enum(["scalar", "vector", "matrix", "tensor", "set", "function", "other", ""]).describe("値の種類。scalar=スカラー、vector=ベクトル、matrix=行列、tensor=テンソル、set=集合、function=関数、other=その他。分からなければ空文字"),
+              meaning: z.string().describe("論文中で何を表すか"),
+              shape: z.string().optional().describe("次元や値の範囲の TeX（例: \\mathbb{R}^{d}）"),
+            }),
+          )
+          .optional()
+          .describe("式に出てくる記号と意味の一覧。update_equation では一覧ごと置き換えます"),
         page: z.number().int().min(1).optional().describe("出てきたページ"),
         source: z.string().optional().describe("PDF 上の元の文字列"),
       },

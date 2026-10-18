@@ -5,6 +5,7 @@
 // 送信するのは選択した範囲の文と、その前後の数文、論文の題名だけ。PDF 全体は送らない。
 
 import Anthropic from "@anthropic-ai/sdk";
+import type { MathSymbol } from "./model.ts";
 
 export interface AiSettings {
   apiKey: string;
@@ -133,6 +134,7 @@ export async function explainTerm(s: AiSettings, term: string, ctx: PaperContext
 export interface TexResult {
   tex: string;
   explanation: string;
+  symbols: MathSymbol[];
 }
 
 /**
@@ -154,7 +156,7 @@ export async function toTex(
   }
   content.push({
     type: "text",
-    text: `論文: ${ctx.title}\n\nPDF から抽出した文字列（崩れている場合がある）:\n${extracted}\n\n${imagePng ? "画像の数式を" : "この数式を"} KaTeX で表示できる TeX に書き起こす。$ や $$ で囲まない。式番号は含めない。explanation には各記号の意味を前後の本文から分かる範囲で1〜3文で書く。\n\n前後の本文:\n${ctx.around}`,
+    text: `論文: ${ctx.title}\n\nPDF から抽出した文字列（崩れている場合がある）:\n${extracted}\n\n${imagePng ? "画像の数式を" : "この数式を"} KaTeX で表示できる TeX に書き起こす。$ や $$ で囲まない。式番号は含めない。explanation には式の役割を前後の本文から分かる範囲で1〜3文で書く。symbols には式に出てくる記号（添字だけのものは除く）を1つずつ挙げ、symbol に TeX、kind に値の種類（scalar=スカラー、vector=ベクトル、matrix=行列、tensor=テンソル、set=集合、function=関数、other=その他。本文から判断できなければ空文字）、meaning に論文中で何を表すか、shape に次元や値の範囲（例: \\mathbb{R}^{d}。分からなければ空文字）を書く。\n\n前後の本文:\n${ctx.around}`,
   });
   return askJson<TexResult>(
     s,
@@ -162,8 +164,25 @@ export async function toTex(
     content,
     {
       type: "object",
-      properties: { tex: { type: "string" }, explanation: { type: "string" } },
-      required: ["tex", "explanation"],
+      properties: {
+        tex: { type: "string" },
+        explanation: { type: "string" },
+        symbols: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              symbol: { type: "string" },
+              kind: { type: "string", enum: ["scalar", "vector", "matrix", "tensor", "set", "function", "other", ""] },
+              meaning: { type: "string" },
+              shape: { type: "string" },
+            },
+            required: ["symbol", "kind", "meaning", "shape"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["tex", "explanation", "symbols"],
       additionalProperties: false,
     },
     "medium",
