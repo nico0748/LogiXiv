@@ -89,6 +89,24 @@ export function hitTest(marks: readonly SentenceMark[], fx: number, fy: number):
   return best;
 }
 
+/**
+ * 結合・分割で消えた文の、後を継いだ文。
+ * 結合なら元の文を含む文、分割なら元の文の先頭の断片。どちらも元の文の書き出しで見分け、
+ * 同じ書き出しが何度も出るときは元の位置（order）に近いものを採る。見つからなければ null。
+ */
+export function successorSentence(gone: Sentence, sentences: readonly Sentence[]): Sentence | null {
+  const head = (t: string) => t.slice(0, 40);
+  let best: Sentence | null = null;
+  for (const s of sentences) {
+    if (!s.text || !gone.text) continue;
+    const merged = s.text.includes(head(gone.text));
+    const split = gone.text.startsWith(head(s.text));
+    if (!merged && !split) continue;
+    if (!best || Math.abs(s.order - gone.order) < Math.abs(best.order - gone.order)) best = s;
+  }
+  return best;
+}
+
 /** 文の先頭の位置（スクロール先）。座標の無い文は null。 */
 export function sentenceAnchor(document: PaperDocument, id: string): { page: number; y: number } | null {
   const s = document.structure.sentences.find((x) => x.id === id);

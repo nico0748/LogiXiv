@@ -12,6 +12,7 @@ import {
   qualityCaveats,
   sentenceAnchor,
   sentenceProgress,
+  successorSentence,
   toPageFraction,
   wordBoundaries,
 } from "./sentencesView.ts";
@@ -139,4 +140,19 @@ test("注意書きは痕跡があるときだけ強く出す", () => {
     quality: { readingOrderRisk: "high", reason: "段が混ざっています", coverageRisk: "high", coverageReason: "欠落" },
   });
   assert.deepEqual(qualityCaveats(d.structure).map((c) => c.label), ["簡易解析", "読み順に崩れの疑い", "本文の欠落の疑い", "抜けのある文 1"]);
+});
+
+test("結合・分割で消えた文の後継: 結合した文、分割した先頭の断片を選ぶ", () => {
+  const a = s(1, "Alpha is first.");
+  const b = s(2, "Beta follows.");
+  const merged = { ...s(1, "Alpha is first. Beta follows."), id: "m" };
+  assert.equal(successorSentence(a, [merged, s(3, "Gamma.")])?.id, "m");
+  const head = { ...s(1, "Alpha is"), id: "p1" };
+  const rest = { ...s(2, "first."), id: "p2" };
+  assert.equal(successorSentence(a, [head, rest, b])?.id, "p1");
+  // 同じ書き出しが2か所にあれば、元の位置に近い方
+  const far = { ...s(9, "Alpha is first."), id: "far" };
+  const near = { ...s(1, "Alpha is first. Beta follows."), id: "near" };
+  assert.equal(successorSentence(a, [far, near])?.id, "near");
+  assert.equal(successorSentence(a, [s(3, "Gamma.")]), null);
 });
