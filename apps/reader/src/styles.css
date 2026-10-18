@@ -172,6 +172,11 @@
 /* --- 基本 --------------------------------------------------------------- */
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+/* 画面全体を窓に固定する。pdf.js が body の末尾に置く canvas.hiddenCanvasElement が1行分の高さを持ち、
+   文書が窓より少し高くなる。そのままだと scrollIntoView（対訳カードへの移動など）が html ごと動かし、
+   上端のタブや見出しが隠れる（下に隙間ができる）。#root を窓に固定して、文書がはみ出さないようにする */
+#root { position: fixed; inset: 0; }
+.hiddenCanvasElement { position: absolute; }
 body {
   background: var(--background-primary);
   color: var(--text-normal);
