@@ -73,6 +73,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [locateReq, setLocateReq] = useState<LocateRequest | null>(null);
   /** PDF で場所を囲んでいる数式の id */
   const [boxFor, setBoxFor] = useState<string | null>(null);
+  /** スライドの画面で、補足情報から論文の面を動かす指示（y はページ内の縦位置 0..1） */
+  const [paperJump, setPaperJump] = useState<{ page: number; y: number; n: number } | null>(null);
   // 論文を替えたら、前の論文の場所の指示と囲むモードを捨てる
   useEffect(() => {
     setLocateReq(null);
@@ -480,8 +482,21 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     setCurrent(r.id);
   };
 
-  const jump = (page: number, y: number) => setJumpTo({ page, y, n: Date.now() });
-  const locate = (req: Omit<LocateRequest, "n">) => setLocateReq({ ...req, n: Date.now() });
+  // スライドの画面では PdfView が無いので、論文の面（SlidesView）へ移る指示に替える
+  const jump = (page: number, y: number) => {
+    if (view === "slides") setPaperJump({ page, y, n: Date.now() });
+    else setJumpTo({ page, y, n: Date.now() });
+  };
+  const locate = (req: Omit<LocateRequest, "n">) => {
+    if (view !== "slides") return setLocateReq({ ...req, n: Date.now() });
+    if (!req.page) return notify("ページが分からないため、論文の画面で探してください");
+    setPaperJump({ page: req.page, y: req.rects?.[0]?.y ?? 0, n: Date.now() });
+  };
+  /** 数式を囲むには PdfView が要る。スライドの画面では囲むモードに入らない */
+  const askBox = (id: string | null) => {
+    if (id !== null && view === "slides") return notify("数式を囲むのは論文の画面で行ってください");
+    setBoxFor(id);
+  };
   const onBox = (page: number, rect: Rect) => {
     const id = boxFor;
     setBoxFor(null);
@@ -575,6 +590,43 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const rightOpen = ws.rightOpen;
   const cls = ["app", leftOpen ? "show-left" : "left-closed", rightOpen ? "show-right" : "right-closed", resizing ? "is-resizing" : ""].join(" ");
   const style = { "--left-w": `${ws.leftWidth}px`, "--right-w": `${ws.rightWidth}px` } as CSSProperties;
+  // スライドの画面に移ったら、論文の画面で始めた囲むモードは捨てる
+  useEffect(() => {
+    if (view === "slides") setBoxFor(null);
+  }, [view]);
+
+  // 右サイドバー（論文の画面）とスライドの画面の補足情報の面で同じものを使う。同時には 1 つしか出さない
+  const rightPanel = current ? (
+    <RightPanel
+      paperId={current}
+      tab={tab}
+      setTab={setTab}
+      ann={ann}
+      update={update}
+      activeId={activeId}
+      setActive={setActiveId}
+      jump={jump}
+      locate={locate}
+      boxFor={boxFor}
+      setBoxFor={askBox}
+      busy={busy}
+      aiReady={aiReady}
+      retry={retry}
+      note={note}
+      noteKey={noteKey}
+      status={status}
+      onField={onField}
+      onStatus={(s) => void onStatus(s)}
+      onOpenSettings={() => setDialog("settings")}
+      onMeta={onMeta}
+      metaError={metaError}
+      notify={notify}
+      focusField={focusField && focusField.paper === loaded ? focusField : null}
+      onFocused={() => setFocusField(null)}
+      sentences={backend.kind === "server"}
+    />
+  ) : null;
+
   const tabTitle = view === "graph" ? "グラフ" : view === "slides" ? `スライドと論文: ${title || current || ""}` : title || (current ? "読み込んでいます" : "新しいタブ");
   const highlightCount = ann.highlights.length;
 
@@ -658,6 +710,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
               notify={notify}
               isolate={isolateLines}
               setIsolate={setIsolateLines}
+              info={rightPanel}
+              paperJump={paperJump}
               onSlideCount={(n) => {
                 setSlideCount(n);
                 const lost = slides.state.kind === "ready" ? slides.state.deck.markups.filter((m) => m.page > n) : [];
@@ -716,34 +770,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
               slideCount={slideCount}
             />
           ) : current ? (
-            <RightPanel
-              paperId={current}
-              tab={tab}
-              setTab={setTab}
-              ann={ann}
-              update={update}
-              activeId={activeId}
-              setActive={setActiveId}
-              jump={jump}
-              locate={locate}
-              boxFor={boxFor}
-              setBoxFor={setBoxFor}
-              busy={busy}
-              aiReady={aiReady}
-              retry={retry}
-              note={note}
-              noteKey={noteKey}
-              status={status}
-              onField={onField}
-              onStatus={(s) => void onStatus(s)}
-              onOpenSettings={() => setDialog("settings")}
-              onMeta={onMeta}
-              metaError={metaError}
-              notify={notify}
-              focusField={focusField && focusField.paper === loaded ? focusField : null}
-              onFocused={() => setFocusField(null)}
-              sentences={backend.kind === "server"}
-            />
+            rightPanel
           ) : (
             <p className="empty">論文を開くと、訳・用語・数式・記録が表示されます。</p>
           )}

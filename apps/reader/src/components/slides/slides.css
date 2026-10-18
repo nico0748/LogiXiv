@@ -15,7 +15,24 @@
 }
 .app .sv-hint { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); padding: 0 6px; }
 
-.app .sv-split { flex: 1; min-height: 0; display: grid; position: relative; background: var(--pdf-backdrop); }
+/* 見えている枠。線（.sv-lines）と知らせはここに重ね、横に動く中身（.sv-track）には載せない */
+.app .sv-stage { flex: 1; min-height: 0; display: flex; position: relative; }
+.app .sv-split { flex: 1; min-width: 0; min-height: 0; overflow: hidden; position: relative; background: var(--pdf-backdrop); }
+.app .sv-track { display: grid; grid-template-rows: minmax(0, 1fr); height: 100%; width: 100%; }
+/* 三面のとき: 本物の横スクロールにして、[スライド | 論文] と [論文 | 補足情報] の二か所で止める（usePager.ts）。
+ * 横スワイプ・Shift+ホイールでも動く。スクロールバーは出さない（上のタブと [ / ] で切り替える） */
+.app .sv-split.is-pager {
+  overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.app .sv-split.is-pager::-webkit-scrollbar { display: none; }
+.app .sv-split.is-pager .sv-track { width: auto; min-width: 100%; }
+.app .sv-split.is-pager :is(.sv-slides, .sv-paper) { scroll-snap-align: start; }
+.app .sv-info { background: var(--background-primary); border-left: 1px solid var(--background-modifier-border); }
+.app .sv-info-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.app .sv-info-body > .panel { min-height: 0; }
+.app .sv-tabs .btn { min-width: 64px; justify-content: center; }
+.app .sv-tabs .btn:focus-visible { outline: 2px solid var(--md-sys-color-secondary); outline-offset: 1px; }
 .app .sv-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .app .sv-pane-head {
   display: flex; white-space: nowrap; overflow: hidden; align-items: center; gap: 6px; padding: 2px 8px; min-height: 32px;
@@ -219,4 +236,4 @@
   .app .sv-fs-hint { animation: none; }
 }
 /* 消したあとの「元に戻す」の知らせ。画面全体ではなく分割の中の下に出す（この画面だけを全画面にしても見えるように） */
-.app .sv-split .snackbar.sv-snack { position: absolute; bottom: 24px; z-index: 20; max-width: min(560px, calc(100% - 32px)); }
+.app .sv-stage .snackbar.sv-snack { position: absolute; bottom: 24px; z-index: 20; max-width: min(560px, calc(100% - 32px)); }

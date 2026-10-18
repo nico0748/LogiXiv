@@ -6,6 +6,7 @@
 // 4. slides.json と note.md に残ること、MCP の書き込みで線が増えることを確かめる
 // 5. 全画面（発表のとき）: ボタンと P キーで入る・出る、見出しが隠れる、線がずれない、帯が上の端で出る、使えないときはウィンドウいっぱい
 // 6. 名前の札はカーソルを乗せたときだけ出ること、スライド側・論文側・Delete キーのどれで消してもグループごと消え、元に戻せることを確かめる
+// 7. 三面（スライド / 論文 / 補足情報）: タブと [ ] キーで横に送る、論文の幅は変わらない、隠れたスライドの線は引かない、補足情報から論文へ動かせる、選んだ側が残る
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -514,8 +515,185 @@ try {
     await linesOk();
   });
 
+  // --- 三面（スライド / 論文 / 補足情報）-----------------------------------------
+  // 見えるのはいつも二面だけ。[スライド | 論文] と [論文 | 補足情報] を横に送って切り替える。論文の幅は変わらない。
+  const sideTab = (name) => page.getByRole("tab", { name, exact: true });
+  const panes = () =>
+    page.evaluate(() => {
+      const v = document.querySelector(".sv-split").getBoundingClientRect();
+      const r = (q) => {
+        const e = document.querySelector(q);
+        const b = e.getBoundingClientRect();
+        // 画面に出ている幅（欄の枠の中で見える分）
+        const shown = Math.max(0, Math.min(b.right, v.right) - Math.max(b.left, v.left));
+        return { left: b.left, right: b.right, width: b.width, shown, inert: !!e.closest("[inert]") };
+      };
+      return {
+        view: { left: v.left, right: v.right, width: v.width },
+        slides: r(".sv-slides"),
+        paper: r(".sv-paper"),
+        info: r(".sv-info"),
+        lines: document.querySelectorAll(".sv-lines path.sv-line").length,
+        stored: (() => {
+          try {
+            return localStorage.getItem("paperlens.slides.side");
+          } catch {
+            return null;
+          }
+        })(),
+      };
+    });
+  // 横送りが止まって、選んだ側がちょうど枠に収まるまで待つ
+  const waitSide = (side) =>
+    page.waitForFunction(
+      (s) => {
+        const v = document.querySelector(".sv-split").getBoundingClientRect();
+        const pane = document.querySelector(s === "info" ? ".sv-info" : ".sv-slides").getBoundingClientRect();
+        const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => t.textContent.trim() === (s === "info" ? "補足情報" : "スライド"));
+        const fits = s === "info" ? Math.abs(pane.right - v.right) < 2 : Math.abs(pane.left - v.left) < 2;
+        return fits && tab?.getAttribute("aria-selected") === "true";
+      },
+      side,
+      { timeout: 5000 },
+    );
+  let paperWidth = 0;
+  let lineCount = 0;
+
+  await step("三面: 「スライド」「補足情報」のタブがあり、はじめはスライドの側が出ている", async () => {
+    await page.mouse.move(800, 500);
+    await sideTab("スライド").waitFor();
+    await sideTab("補足情報").waitFor();
+    if ((await sideTab("スライド").getAttribute("aria-selected")) !== "true") fail("はじめにスライドの側が選ばれていません");
+    if ((await sideTab("補足情報").getAttribute("aria-selected")) !== "false") fail("補足情報のタブが選ばれています");
+    await waitSide("slides");
+    const st = await panes();
+    if (st.slides.shown < st.slides.width - 2 || st.info.shown > 1) fail(`スライドの側になっていません: ${JSON.stringify(st)}`);
+    if (!st.info.inert) fail("見えていない補足情報の欄が inert になっていません");
+    if (st.slides.inert) fail("見えているスライドの欄が inert です");
+    if (!st.lines) fail("線がありません");
+    paperWidth = st.paper.width;
+    lineCount = st.lines;
+  });
+
+  await step("三面: 「補足情報」を押すと、論文の右に補足情報が出て、スライドは隠れ、論文の幅は変わらない", async () => {
+    await sideTab("補足情報").click();
+    await waitSide("info");
+    const st = await panes();
+    if (st.slides.shown > 1) fail(`スライドが見えたままです: ${JSON.stringify(st)}`);
+    if (st.paper.shown < st.paper.width - 2) fail(`論文が隠れています: ${JSON.stringify(st)}`);
+    if (Math.abs(st.paper.width - paperWidth) > 2) fail(`論文の幅が変わりました: ${paperWidth} → ${st.paper.width}`);
+    if (Math.abs(st.paper.left - st.view.left) > 2) fail(`論文が左の端に来ていません: ${JSON.stringify(st)}`);
+    if (!st.slides.inert || st.info.inert) fail(`inert の付け方が違います: ${JSON.stringify(st)}`);
+    if (st.stored !== "info") fail(`選んだ側が保存されていません: ${st.stored}`);
+    // 補足情報の欄に、論文の画面の右サイドバーと同じタブ（訳・用語など）が出る
+    const info = page.locator(".sv-info");
+    await info.locator(".sv-pane-head", { hasText: "補足情報" }).waitFor();
+    for (const name of ["訳", "用語", "数式", "記録"]) await info.getByRole("tab", { name: new RegExp(`^${name}`) }).waitFor();
+  });
+
+  await step("三面: スライドが隠れているあいだは線を引かず、戻すと元の本数で四角に付いている", async () => {
+    await page.waitForFunction(() => document.querySelectorAll(".sv-lines path.sv-line").length === 0, null, { timeout: 3000 });
+    await page.screenshot({ path: path.join(shotDir, "slides-info.png") });
+    await sideTab("スライド").click();
+    await waitSide("slides");
+    await page.waitForFunction((n) => document.querySelectorAll(".sv-lines path.sv-line").length === n, lineCount, { timeout: 3000 });
+    await linesOk();
+    const st = await panes();
+    if (Math.abs(st.paper.width - paperWidth) > 2) fail(`論文の幅が変わりました: ${paperWidth} → ${st.paper.width}`);
+    if (st.stored !== "slides") fail(`選んだ側が保存されていません: ${st.stored}`);
+  });
+
+  await step("三面: ] キーで補足情報へ、[ キーでスライドへ送る。入力欄の中では切り替わらない", async () => {
+    await page.mouse.move(800, 500);
+    await page.locator("body").evaluate(() => document.activeElement?.blur?.());
+    await page.keyboard.press("]");
+    await waitSide("info");
+    if ((await panes()).lines) fail("補足情報の側で線が出ています");
+    // 用語の入力欄で [ を打っても、側は変わらない
+    const info = page.locator(".sv-info");
+    await info.getByRole("tab", { name: /^用語/ }).click();
+    const input = info.getByPlaceholder("用語を入力");
+    await input.click();
+    await page.keyboard.type("[a]");
+    await page.waitForTimeout(400);
+    if ((await input.inputValue()) !== "[a]") fail(`入力欄に打った文字が入りません: ${await input.inputValue()}`);
+    if ((await sideTab("補足情報").getAttribute("aria-selected")) !== "true") fail("入力欄で打った [ で側が変わりました");
+    await input.fill("");
+    await input.evaluate((e) => e.blur());
+    await page.keyboard.press("[");
+    await waitSide("slides");
+    await page.waitForFunction((n) => document.querySelectorAll(".sv-lines path.sv-line").length === n, lineCount, { timeout: 3000 });
+    await page.keyboard.press("]");
+    await waitSide("info");
+  });
+
+  await step("三面: 補足情報の「訳」のページ番号を押すと、論文がそのページへ動く", async () => {
+    // 2 ページ目のマーカーをほかの書き手として足す（画面に届く）
+    const h = { id: "h-e2e", page: 2, rects: [{ x: 0.1, y: 0.3, w: 0.5, h: 0.02 }], text: "jump target", color: "yellow", translation: "", memo: "", createdAt: new Date().toISOString() };
+    const res = await fetch(`${base}/api/papers/${id}/annotations`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-paperlens-client": "agent" },
+      body: JSON.stringify({ ops: [{ op: "add", list: "highlights", item: h }] }),
+    });
+    if (!res.ok) fail(`マーカーを足せませんでした: ${await res.text()}`);
+    const info = page.locator(".sv-info");
+    await info.getByRole("tab", { name: /^訳/ }).click();
+    const jump = info.getByRole("button", { name: "p.2", exact: true });
+    await jump.waitFor({ timeout: 5000 });
+    await page.evaluate(() => {
+      document.querySelector(".sv-paper .pp-scroll").scrollTop = 0;
+    });
+    await page.waitForTimeout(200);
+    await jump.click();
+    // 2 ページ目の 3 割あたり（マーカーの位置）が、論文の枠の中に見えている
+    await page.waitForFunction(
+      () => {
+        const box = document.querySelector(".sv-paper .pp-scroll").getBoundingClientRect();
+        const p2 = document.querySelectorAll(".sv-paper .pp-page")[1].getBoundingClientRect();
+        const y = p2.top + p2.height * 0.3;
+        return y >= box.top && y <= box.bottom;
+      },
+      null,
+      { timeout: 5000 },
+    );
+    // 論文の面へ送ったあとも、補足情報の側のまま
+    if ((await sideTab("補足情報").getAttribute("aria-selected")) !== "true") fail("ページへ動かしたら側が変わりました");
+  });
+
+  await step("三面: 補足情報の側のまま全画面にしても、論文と補足情報が並ぶ", async () => {
+    await page.mouse.move(800, 500);
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => document.querySelector(".slides-view.is-fullscreen"));
+    await waitSide("info");
+    const st = await panes();
+    if (st.slides.shown > 1 || st.paper.shown < st.paper.width - 2 || st.info.shown < st.info.width - 2) fail(`全画面での並びが違います: ${JSON.stringify(st)}`);
+    // 全画面に入ると枠の大きさが変わるので、線を描き直すのを少し待つ
+    await page
+      .waitForFunction(() => document.querySelectorAll(".sv-lines path.sv-line").length === 0, null, { timeout: 3000 })
+      .catch(() => fail("全画面の補足情報の側で線が出ています"));
+    await page.keyboard.press("p");
+    await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
+    await waitSide("info");
+  });
+
+  await step("三面: 選んだ側は読み込み直しても残り、[ でスライドの側に戻す", async () => {
+    await page.reload();
+    await page.getByRole("navigation", { name: "主要メニュー" }).getByRole("button", { name: "発表スライドと論文の対応" }).click();
+    await page.locator(".sv-slides .pp-page").first().waitFor();
+    await page.locator(".sv-paper .pp-page .textLayer span").first().waitFor();
+    await waitSide("info");
+    const st = await panes();
+    if (st.slides.shown > 1) fail(`読み込み直したらスライドの側に戻りました: ${JSON.stringify(st)}`);
+    await page.mouse.move(800, 500);
+    await page.keyboard.press("[");
+    await waitSide("slides");
+    if ((await panes()).stored !== "slides") fail("スライドの側が保存されていません");
+    await page.waitForFunction(() => document.querySelectorAll(".sv-lines path.sv-line").length > 0, null, { timeout: 5000 });
+    await linesOk();
+  });
+
   if (errors.length) fail(`コンソールのエラー:\n${errors.join("\n")}`);
-  console.log(`スクリーンショット: ${path.join(shotDir, "slides-split.png")}, ${path.join(shotDir, "slides-fullscreen.png")}`);
+  console.log(`スクリーンショット: ${path.join(shotDir, "slides-split.png")}, ${path.join(shotDir, "slides-fullscreen.png")}, ${path.join(shotDir, "slides-info.png")}`);
   console.log("papers:", readdirSync(path.join(data, "papers")).join(", "));
 } finally {
   await browser?.close();
