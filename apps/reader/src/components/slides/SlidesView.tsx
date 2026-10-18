@@ -10,9 +10,11 @@
 // - 間: グループの色の線でつなぐ。片方が画面の外にあるときは、端まで点線で引く。
 // - 名前の札は、グループにカーソルかフォーカスがあるときだけ出す（いつも出すとスライドや論文の文字を隠すため）。
 //   論文側は札の代わりに小さな色の点を置き、点に乗ると札に広がる。札の消すボタンでグループごと（両側とも）消せる。
+// - 補足情報（info）を渡されたときは、論文の右に三面目（対訳・訳・用語など）を置き、二面ずつ横にめくって見せる
+//   （[スライド | 論文] か [論文 | 補足情報]。論文はいつも見える。usePager.ts）。渡されないときはこれまでの二分割のまま。
 
 import { Frame, Maximize, Minimize, MousePointer2, Spline, SquareDashed, Trash2, Upload } from "lucide-react";
-import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Rect } from "../../lib/model.ts";
 import { newId } from "../../lib/model.ts";
 import {
@@ -34,10 +36,12 @@ import { Snackbar, type Snack } from "../Snackbar.tsx";
 import { PdfPages, type PdfPagesHandle } from "./PdfPages.tsx";
 import "./slides.css";
 import { useFullscreen } from "./useFullscreen.ts";
+import { GUTTER, type SlidesSide, usePager } from "./usePager.ts";
 import type { Slides } from "./useSlides.ts";
 
 export type SlideTool = "select" | "box";
 export type PaperTool = "text" | "figure" | "equation";
+export type { SlidesSide };
 
 /** 右サイドバーなど画面の外から、マークアップ（とそのリンク先）を見せる指示 */
 export interface SlideFocus {
@@ -60,6 +64,10 @@ interface Props {
   setIsolate: (v: boolean) => void;
   /** スライドのページ数が分かったとき（右サイドバーで、無いページのグループを示すため） */
   onSlideCount?: (n: number) => void;
+  /** 右の補足情報の面に出す中身（App が RightPanel を渡す）。無いときは三面目を作らず、これまでの二分割のまま */
+  info?: ReactNode;
+  /** 補足情報から「論文のこの場所を見せる」指示。n が変わるたびに論文の面を page / y（0..1 のページ内の縦位置）へ動かす */
+  paperJump?: { page: number; y: number; n: number } | null;
 }
 
 const ACCEPT = ".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation";
@@ -186,6 +194,8 @@ function Split({
   isolate,
   setIsolate,
   onSlideCount,
+  info,
+  paperJump,
   onReplace,
   fullscreen,
   onFullscreen,
@@ -208,19 +218,31 @@ function Split({
 
   // --- 線 -------------------------------------------------------------------
   const frame = useRef(0);
+  /** 横めくりが最後に測った枠の幅 */
+  const pagerWidth = useRef(0);
   const measure = useCallback(() => {
     const split = splitRef.current;
     const L = slideRef.current?.el;
     const R = paperRef.current?.el;
     if (!split || !L || !R) return;
+    // 三面のとき、枠の幅が変わったばかりで測り直す前（全画面に入る・出る直後など）は、位置がまだ戻っていないので引かない
+    if (info !== undefined && Math.abs(split.clientWidth - pagerWidth.current) > 0.5) {
+      setLines((v) => (v.length ? [] : v));
+      return;
+    }
     const S = split.getBoundingClientRect();
     const lr = L.getBoundingClientRect();
     const rr = R.getBoundingClientRect();
-    // スクロールバーの内側を、それぞれの枠の端にする
-    const lLeft = lr.left;
-    const lRight = lr.left + L.clientWidth;
-    const rLeft = rr.left;
-    const rRight = rr.left + R.clientWidth;
+    // スクロールバーの内側を、それぞれの枠の端にする。横にめくっている途中は、見えている幅（分割の枠）の内側に切り詰める
+    const lLeft = Math.max(lr.left, S.left);
+    const lRight = Math.min(lr.left + L.clientWidth, S.right);
+    const rLeft = Math.max(rr.left, S.left);
+    const rRight = Math.min(rr.left + R.clientWidth, S.right);
+    // スライドの面がすっかり見えない（補足情報の側にいる）ときは、線を引かない
+    if (lRight - lLeft < 1 || rRight - rLeft < 1) {
+      setLines((v) => (v.length ? [] : v));
+      return;
+    }
     const top1 = lr.top + 6;
     const bot1 = lr.top + L.clientHeight - 6;
     const top2 = rr.top + 6;
@@ -261,7 +283,7 @@ function Split({
       }
     }
     setLines(out);
-  }, [deck, isolate, active]);
+  }, [deck, isolate, active, info]);
   // 待っている間に条件（deck・選択）が変わっても、測るときの最新の measure を使う
   const measureRef = useRef(measure);
   measureRef.current = measure;
@@ -273,9 +295,13 @@ function Split({
     });
   }, []);
   useEffect(() => () => cancelAnimationFrame(frame.current), []);
+  const hasInfo = info !== undefined;
+  const pager = usePager(splitRef, hasInfo, ratio, schedule);
+  pagerWidth.current = pager.width;
+  const toSlides = () => pager.side !== "slides" && pager.go("slides");
   useLayoutEffect(() => {
     schedule();
-  }, [schedule, measure, slideZoom, paperZoom, ratio, slideCount, paperCount]);
+  }, [schedule, measure, slideZoom, paperZoom, ratio, slideCount, paperCount, pager.slidesOff, pager.width]);
   useEffect(() => {
     const el = splitRef.current;
     if (!el) return;
@@ -291,12 +317,19 @@ function Split({
     if (!focus) return;
     const m = deck.markups.find((x) => x.id === focus.id);
     if (!m) return;
+    toSlides();
     showMarkup(m);
     const l = m.links.find((x) => x.id === focus.link) ?? m.links[0];
     if (l) showLink(l);
     // 指示が来たとき（nonce）だけ動かす
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.nonce]);
+  // 補足情報から論文の場所を見せる指示（論文はどちらの面でも見えているので、面は変えない）
+  useEffect(() => {
+    if (paperJump) paperRef.current?.goTo(paperJump.page, paperJump.y);
+    // 指示が来たとき（n）だけ動かす
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paperJump?.n]);
 
   // --- 編集 -----------------------------------------------------------------
   const addMarkup = (page: number, rect: Rect) => {
@@ -406,7 +439,8 @@ function Split({
     [removed],
   );
 
-  // キー操作: R で囲む、V で選ぶ、F/E/T で論文側の道具、Esc で道具を戻す、Delete で選んだグループを消す、⌘Z で消したのを戻す
+  // キー操作: R で囲む、V で選ぶ、F/E/T で論文側の道具、Esc で道具を戻す、Delete で選んだグループを消す、⌘Z で消したのを戻す、
+  // [ / ] でスライドの面・補足情報の面へめくる
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => undefined);
   keyRef.current = (e: KeyboardEvent) => {
     const t = e.target as HTMLElement | null;
@@ -422,7 +456,11 @@ function Split({
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if ((e.key === "Delete" || e.key === "Backspace") && activeMarkup) removeGroup(activeMarkup);
-    else if (k === "r") setSlideTool("box");
+    else if (k === "r") {
+      setSlideTool("box");
+      toSlides();
+    } else if (e.key === "[" && hasInfo) pager.go("slides");
+    else if (e.key === "]" && hasInfo) pager.go("info");
     else if (k === "v") setSlideTool("select");
     else if (k === "t" && active) setPaperTool("text");
     else if (k === "f" && active) setPaperTool("figure");
@@ -561,6 +599,7 @@ function Split({
                   title={`${markupName(m)} の${LINK_KIND_LABEL[l.kind]}。押すとスライドへ移ります`}
                   onClick={() => {
                     setActive(m.id);
+                    toSlides();
                     showMarkup(m);
                   }}
                 >
@@ -588,7 +627,8 @@ function Split({
     const g = e.currentTarget;
     g.setPointerCapture(e.pointerId);
     const r = el.getBoundingClientRect();
-    const move = (ev: PointerEvent) => setRatio(clampRatio((ev.clientX - r.left) / r.width));
+    // つまみの真ん中がカーソルの下に来るようにする（三面のときも、見えている幅の中で決める）
+    const move = (ev: PointerEvent) => setRatio(clampRatio((ev.clientX - r.left - GUTTER / 2) / (el.clientWidth - GUTTER)));
     const up = () => {
       g.removeEventListener("pointermove", move);
       g.removeEventListener("pointerup", up);
@@ -618,6 +658,45 @@ function Split({
           ? "四角を押すとグループを選べます。選んでいる間、論文の該当箇所をリンクできます"
           : "「囲む」（R）でスライドの一部を四角で囲むと、グループ（Markup-ページ.番号）ができます";
 
+  // 横にめくるタブ。矢印キーでも隣のタブへ移る
+  const sides: { id: SlidesSide; label: string; key: string }[] = [
+    { id: "slides", label: "スライド", key: "[" },
+    { id: "info", label: "補足情報", key: "]" },
+  ];
+  const tabs = hasInfo && (
+    <div className="sv-group sv-tabs" role="tablist" aria-label="論文の横に出す面">
+      {sides.map((t) => (
+        <button
+          key={t.id}
+          id={`sv-tab-${t.id}`}
+          role="tab"
+          type="button"
+          className={`btn text sm${pager.side === t.id ? " is-on" : ""}`}
+          aria-selected={pager.side === t.id}
+          aria-controls={`sv-pane-${t.id}`}
+          tabIndex={pager.side === t.id ? 0 : -1}
+          title={`${t.label}を論文の${t.id === "slides" ? "左" : "右"}に出す（${t.key}）`}
+          onClick={() => pager.go(t.id)}
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+            e.preventDefault();
+            const next: SlidesSide = e.key === "ArrowLeft" ? "slides" : "info";
+            pager.go(next);
+            document.getElementById(`sv-tab-${next}`)?.focus();
+          }}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+  const W = pager.width;
+  const columns =
+    hasInfo && W
+      ? `${pager.slidesW}px ${GUTTER}px ${(1 - ratio) * (W - GUTTER)}px ${pager.slidesW + GUTTER}px`
+      : `minmax(0, ${ratio}fr) ${GUTTER}px minmax(0, ${1 - ratio}fr)${hasInfo ? " 0px" : ""}`;
+  const trackW = hasInfo && W ? W + pager.slidesW + GUTTER : undefined;
+
   return (
     <div className="sv">
       <div className="pdf-toolbar sv-toolbar" role="toolbar" aria-label="スライドと論文の操作">
@@ -625,7 +704,10 @@ function Split({
           <button className={`btn text sm${slideTool === "select" ? " is-on" : ""}`} aria-pressed={slideTool === "select"} title="選ぶ（V）" onClick={() => setSlideTool("select")}>
             <MousePointer2 size={14} aria-hidden="true" /> 選ぶ
           </button>
-          <button className={`btn text sm${slideTool === "box" ? " is-on" : ""}`} aria-pressed={slideTool === "box"} title="スライドの一部を四角で囲む（R）" onClick={() => setSlideTool((t) => (t === "box" ? "select" : "box"))}>
+          <button className={`btn text sm${slideTool === "box" ? " is-on" : ""}`} aria-pressed={slideTool === "box"} title="スライドの一部を四角で囲む（R）" onClick={() => {
+            setSlideTool((t) => (t === "box" ? "select" : "box"));
+            if (slideTool !== "box") toSlides();
+          }}>
             <SquareDashed size={14} aria-hidden="true" /> 囲む
           </button>
         </div>
@@ -651,84 +733,104 @@ function Split({
         <button className="btn text sm sv-fs-btn" title={fullscreen ? "全画面を終える（P / Esc）" : "スライドと論文を全画面で表示する（P）"} onClick={onFullscreen}>
           {fullscreen ? <Minimize size={14} aria-hidden="true" /> : <Maximize size={14} aria-hidden="true" />} {fullscreen ? "全画面を終える" : "全画面"}
         </button>
+        {tabs}
       </div>
-      <div ref={splitRef} className="sv-split" style={{ gridTemplateColumns: `minmax(0, ${ratio}fr) 56px minmax(0, ${1 - ratio}fr)` }}>
-        <section className={`sv-pane sv-slides${slideTool === "box" ? " is-drawing" : ""}`} aria-label="発表スライド">
-          <div className="sv-pane-head">
-            <span className="sv-pane-title" title={deck.source}>スライド</span>
-            <span>{slidePage} / {slideCount || "-"}</span>
-            <span className="spacer" />
-            {zoomBtns(slideZoom, setSlideZoom, "スライド")}
-            <button className="btn text sm" onClick={onReplace} title={`今のスライド: ${deck.source}。差し替えても四角は残ります`}>差し替える</button>
-          </div>
-          <PdfPages
-            handle={slideRef}
-            data={slidePdf}
-            zoom={slideZoom}
-            overlay={slideOverlay}
-            onScroll={schedule}
-            onLayout={schedule}
-            onPage={setSlidePage}
-            onLoaded={(n) => {
-              setSlideCount(n);
-              onSlideCount?.(n);
-            }}
-            label="スライドのページ"
-          />
-        </section>
-        <div
-          className="sv-gutter"
-          role="separator"
-          tabIndex={0}
-          aria-orientation="vertical"
-          aria-label="スライドと論文の幅"
-          aria-valuemin={25}
-          aria-valuemax={75}
-          aria-valuenow={Math.round(ratio * 100)}
-          onPointerDown={onGutterDown}
-          onDoubleClick={() => setRatio(0.5)}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-              e.preventDefault();
-              setRatio((v) => clampRatio(v + (e.key === "ArrowLeft" ? -0.05 : 0.05)));
-            }
-          }}
-        />
-        <section className={`sv-pane sv-paper${active && paperTool !== "text" ? " is-drawing" : ""}`} aria-label="論文">
-          <div className="sv-pane-head">
-            <span className="sv-pane-title">論文</span>
-            <span>{paperPage} / {paperCount || "-"}</span>
-            <span className="spacer" />
-            {zoomBtns(paperZoom, setPaperZoom, "論文")}
-          </div>
-          <PdfPages
-            handle={paperRef}
-            data={paperPdf}
-            zoom={paperZoom}
-            textLayer
-            overlay={paperOverlay}
-            onScroll={() => {
-              schedule();
-              if (selMenu) setSelMenu(null);
-            }}
-            onLayout={schedule}
-            onPage={setPaperPage}
-            onLoaded={setPaperCount}
-            onMouseUp={onPaperMouseUp}
-            label="論文のページ"
-          >
-            {selMenu && activeMarkup && (
-              <div className="sel-menu menu-surface sv-sel" style={{ left: selMenu.x, top: selMenu.y }} onMouseUp={(e) => e.stopPropagation()} role="toolbar" aria-label="選んだ文をリンクする">
-                <span className="sv-sel-label"><span className="mu-dot" style={color(activeMarkup)} aria-hidden="true" />{markupName(activeMarkup)} に</span>
-                {(["text", "equation", "figure"] as LinkKind[]).map((k) => (
-                  <button key={k} className="btn" onClick={() => linkSelection(k)}>
-                    {LINK_KIND_LABEL[k]}としてリンク
-                  </button>
-                ))}
+      {/* 線と知らせは、横に動く中身ではなく見えている枠（.sv-stage）に重ねる */}
+      <div className="sv-stage">
+        <div ref={splitRef} className={`sv-split${hasInfo ? " is-pager" : ""}`}>
+          <div className="sv-track" style={{ gridTemplateColumns: columns, width: trackW }}>
+            <section
+              id="sv-pane-slides"
+              className={`sv-pane sv-slides${slideTool === "box" ? " is-drawing" : ""}`}
+              aria-label="発表スライド"
+              inert={pager.slidesOff || undefined}
+              aria-hidden={pager.slidesOff || undefined}
+            >
+              <div className="sv-pane-head">
+                <span className="sv-pane-title" title={deck.source}>スライド</span>
+                <span>{slidePage} / {slideCount || "-"}</span>
+                <span className="spacer" />
+                {zoomBtns(slideZoom, setSlideZoom, "スライド")}
+                <button className="btn text sm" onClick={onReplace} title={`今のスライド: ${deck.source}。差し替えても四角は残ります`}>差し替える</button>
               </div>
+              <PdfPages
+                handle={slideRef}
+                data={slidePdf}
+                zoom={slideZoom}
+                overlay={slideOverlay}
+                onScroll={schedule}
+                onLayout={schedule}
+                onPage={setSlidePage}
+                onLoaded={(n) => {
+                  setSlideCount(n);
+                  onSlideCount?.(n);
+                }}
+                label="スライドのページ"
+              />
+            </section>
+            <div
+              className="sv-gutter"
+              role="separator"
+              tabIndex={0}
+              aria-orientation="vertical"
+              aria-label="スライドと論文の幅"
+              aria-valuemin={25}
+              aria-valuemax={75}
+              aria-valuenow={Math.round(ratio * 100)}
+              onPointerDown={onGutterDown}
+              onDoubleClick={() => setRatio(0.5)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                  e.preventDefault();
+                  setRatio((v) => clampRatio(v + (e.key === "ArrowLeft" ? -0.05 : 0.05)));
+                }
+              }}
+            />
+            <section className={`sv-pane sv-paper${active && paperTool !== "text" ? " is-drawing" : ""}`} aria-label="論文">
+              <div className="sv-pane-head">
+                <span className="sv-pane-title">論文</span>
+                <span>{paperPage} / {paperCount || "-"}</span>
+                <span className="spacer" />
+                {zoomBtns(paperZoom, setPaperZoom, "論文")}
+              </div>
+              <PdfPages
+                handle={paperRef}
+                data={paperPdf}
+                zoom={paperZoom}
+                textLayer
+                overlay={paperOverlay}
+                onScroll={() => {
+                  schedule();
+                  if (selMenu) setSelMenu(null);
+                }}
+                onLayout={schedule}
+                onPage={setPaperPage}
+                onLoaded={setPaperCount}
+                onMouseUp={onPaperMouseUp}
+                label="論文のページ"
+              >
+                {selMenu && activeMarkup && (
+                  <div className="sel-menu menu-surface sv-sel" style={{ left: selMenu.x, top: selMenu.y }} onMouseUp={(e) => e.stopPropagation()} role="toolbar" aria-label="選んだ文をリンクする">
+                    <span className="sv-sel-label"><span className="mu-dot" style={color(activeMarkup)} aria-hidden="true" />{markupName(activeMarkup)} に</span>
+                    {(["text", "equation", "figure"] as LinkKind[]).map((k) => (
+                      <button key={k} className="btn" onClick={() => linkSelection(k)}>
+                        {LINK_KIND_LABEL[k]}としてリンク
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </PdfPages>
+            </section>
+            {hasInfo && (
+              <section id="sv-pane-info" className="sv-pane sv-info" aria-label="補足情報" inert={pager.infoOff || undefined} aria-hidden={pager.infoOff || undefined}>
+                <div className="sv-pane-head">
+                  <span className="sv-pane-title">補足情報</span>
+                </div>
+                <div className="sv-info-body">{info}</div>
+              </section>
             )}
-          </PdfPages>
-        </section>
+          </div>
+        </div>
         <svg className="sv-lines" aria-hidden="true">
           {lines.map((ln) => {
             const on = hov ? hov === ln.markup : active ? active === ln.markup : true;
