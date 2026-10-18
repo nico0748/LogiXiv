@@ -1,5 +1,4 @@
-import katex from "katex";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { termNeedles } from "../lib/findText.ts";
 import type { Annotations, Equation, Highlight, MathSymbol, SymbolKind, Term } from "../lib/model.ts";
 import { MARKER_LABEL, SYMBOL_KIND_LABEL, sortEquationsByPage, sortTermsByPage } from "../lib/model.ts";
@@ -9,6 +8,7 @@ import { type FmValue, fmText, parseFrontmatter, readFrontmatter } from "../lib/
 import { type FieldDef, parseFields } from "../lib/template.ts";
 import { EmptyState } from "./EmptyState.tsx";
 import { StatusChips } from "./StatusChips.tsx";
+import { Tex, TexInline } from "./Tex.tsx";
 import { SentencePanel } from "./sentences/SentencePanel.tsx";
 
 export type Tab = "sentences" | "translate" | "terms" | "math" | "record";
@@ -56,6 +56,19 @@ interface Props {
 }
 
 export function RightPanel(p: Props) {
+  // 対訳の数式の行から開いた式。数式タブでその式までスクロールして目立たせる
+  const [eqFocus, setEqFocus] = useState<{ id: string; n: number } | null>(null);
+  const openEquation = useCallback(
+    (id: string) => {
+      const e = p.ann.equations.find((x) => x.id === id);
+      if (!e) return;
+      p.setTab("math");
+      setEqFocus((f) => ({ id, n: (f?.n ?? 0) + 1 }));
+      if (e.page && e.rects?.length) p.locate({ page: e.page, rects: e.rects });
+      else if (e.page) p.jump(e.page, 0);
+    },
+    [p.ann.equations, p.setTab, p.locate, p.jump],
+  );
   const tabs: { id: Tab; label: string; count?: number }[] = [
     ...(p.sentences === false ? [] : [{ id: "sentences" as const, label: "対訳" }]),
     { id: "translate", label: "訳", count: p.ann.highlights.length },
@@ -88,10 +101,10 @@ export function RightPanel(p: Props) {
             <button className="btn tonal sm" onClick={p.onOpenSettings}>API キーを設定する</button>
           </div>
         )}
-        {p.tab === "sentences" && <SentencePanel paperId={p.paperId ?? null} />}
+        {p.tab === "sentences" && <SentencePanel paperId={p.paperId ?? null} equations={p.ann.equations} onOpenEquation={openEquation} />}
         {p.tab === "translate" && <TranslateList {...p} />}
         {p.tab === "terms" && <TermList {...p} />}
-        {p.tab === "math" && <MathList {...p} />}
+        {p.tab === "math" && <MathList {...p} focus={eqFocus} />}
         {p.tab === "record" && (
           <>
             <BiblioSection key={`b-${p.noteKey}`} note={p.note} paperId={p.paperId} onMeta={p.onMeta} metaError={p.metaError} notify={p.notify} />
@@ -309,33 +322,20 @@ function TermCard({ t, set, busy, update, aiReady, retry, locate }: Props & { t:
 
 // --- 数式 -----------------------------------------------------------------
 
-function Tex({ tex }: { tex: string }) {
-  const html = useMemo(() => {
-    try {
-      return { ok: true, html: katex.renderToString(tex || "\;", { displayMode: true, throwOnError: true, strict: "ignore" }) };
-    } catch (e) {
-      return { ok: false, html: e instanceof Error ? e.message : String(e) };
-    }
-  }, [tex]);
-  if (!html.ok) return <div className="katex-box"><span className="err-msg">TeX を表示できません: {html.html.replace(/^KaTeX parse error: /, "")}</span></div>;
-  return <div className="katex-box" dangerouslySetInnerHTML={{ __html: html.html }} />;
-}
-
-/** 行の中の短い TeX（記号）。書きかけで崩れていても、そのまま文字で見せる。 */
-function TexInline({ tex }: { tex: string }) {
-  const html = useMemo(() => {
-    try {
-      return katex.renderToString(tex, { displayMode: false, throwOnError: true, strict: "ignore" });
-    } catch {
-      return null;
-    }
-  }, [tex]);
-  if (html === null) return <code>{tex}</code>;
-  return <span className="tex-inline" dangerouslySetInnerHTML={{ __html: html }} />;
-}
-
-function MathList(p: Props) {
+function MathList(p: Props & { focus: { id: string; n: number } | null }) {
   const [sort, setSort] = useSortMode("math");
+  const [lit, setLit] = useState<string | null>(null);
+  const focusN = p.focus?.n;
+  useEffect(() => {
+    const id = p.focus?.id;
+    if (!id) return;
+    const el = document.querySelector<HTMLElement>(`[data-eq-card="${CSS.escape(id)}"]`);
+    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    setLit(id);
+    const t = setTimeout(() => setLit(null), 1600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusN]);
   const set = (id: string, patch: Partial<Equation>) =>
     p.update((a) => ({ ...a, equations: a.equations.map((e) => (e.id === id ? { ...e, ...patch } : e)) }));
   const add = () =>
@@ -368,7 +368,7 @@ function MathList(p: Props) {
           p.setBoxFor(e.id);
         };
         return (
-          <div key={e.id} className={`card${boxing ? " active" : ""}`}>
+          <div key={e.id} data-eq-card={e.id} className={`card${boxing || lit === e.id ? " active" : ""}`}>
             <div className="card-head">
               {e.page ? (
                 <button className="btn text sm" style={{ padding: 0, minHeight: 0 }} onClick={() => (where ? p.locate(where) : p.jump(e.page!, 0))} title={where ? "論文中の場所を表示" : "ページを表示"}>p.{e.page}</button>

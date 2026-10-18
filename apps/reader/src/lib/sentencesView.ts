@@ -14,6 +14,7 @@ import type {
   Sentence,
 } from "@paperlens/core";
 import { placeNonBody } from "../../../../packages/core/src/nonbody.ts";
+import type { Equation } from "./model.ts";
 
 /** PaperLens 側の矩形（ページに対する割合、左上原点）。 */
 export interface FracRect {
@@ -170,14 +171,61 @@ export function filterNonBody(structure: DocumentStructure, f: SentenceFilter): 
 export type Row =
   | { kind: "heading"; key: string; title: string }
   | { kind: "sentence"; key: string; sentence: Sentence; next: Sentence | null; repeat: boolean; mergeCount: number; splitCount: number }
-  | { kind: "nonbody"; key: string; item: NonBodySentence };
+  | { kind: "nonbody"; key: string; item: NonBodySentence }
+  | { kind: "formula"; key: string; item: NonBodySentence; equation: Equation };
+
+/**
+ * 対訳に載せない「訳さない行」。訳せず、読んでも意味の取れない断片（PDF から崩れて取れた式・表のセル・柱・ページ番号）。
+ * 数式だけは、数式タブに登録した式と対応が付けば、その式（TeX）として差し込む。
+ */
+const HIDDEN_NONBODY = new Set<NonBodySentence["kind"]>(["formula", "table", "runningHead", "pageNumber"]);
+
+/** 式番号（「(10)」「(3a)」）。行の中で最後に出てきたもの。 */
+export function equationNumber(text: string): string | null {
+  const all = [...text.matchAll(/\((\d{1,3}[a-z]?)\)/g)];
+  return all.length ? all[all.length - 1]![1]! : null;
+}
+
+/**
+ * 解析で数式と判断した行に対応する、数式タブの式。
+ * 1. 同じページで位置が重なる式（PDF で選択・囲んで登録した式）
+ * 2. 同じページ（ページ不明の式も含む）で式番号が同じ式。番号は見出しの「(10)」か、登録時の元の文字列から取る
+ *    （見出しの既定値「式3」は登録した順の番号なので使わない）
+ * どちらも無ければ null。
+ */
+export function matchEquation(item: NonBodySentence, equations: readonly Equation[], pageSizes: readonly PageSize[]): Equation | null {
+  const rects = item.rects.map((r) => toPageFraction(r, pageSizes)).filter((r): r is NonNullable<typeof r> => r !== null);
+  const overlaps = (e: Equation) =>
+    e.page === item.page &&
+    (e.rects ?? []).some((a) =>
+      rects.some((b) => {
+        const v = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+        return v > 0.3 * Math.min(a.h, b.h);
+      }),
+    );
+  const byPlace = equations.find((e) => e.tex.trim() && overlaps(e)) ?? equations.find(overlaps);
+  if (byPlace) return byPlace;
+  const no = equationNumber(item.text);
+  if (!no) return null;
+  const numberOf = (e: Equation) => {
+    const m = e.label.match(/\((\d{1,3}[a-z]?)\)/);
+    return m ? m[1]! : equationNumber(e.source);
+  };
+  const same = equations.filter((e) => numberOf(e) === no);
+  return same.find((e) => e.page === item.page) ?? same.find((e) => e.page === undefined) ?? null;
+}
 
 /**
  * カードの並び。本文の並びでたどり、節が変わるところに見出しを、
  * 本文として扱わなかった行を本来の位置に差し込む。
  * 結合の相手は絞り込み後ではなく本文の並びで決める（見えている次のカードと結合すると結果が食い違う）。
  */
-export function buildRows(document: PaperDocument, visible: readonly Sentence[], visibleNonBody: readonly NonBodySentence[]): Row[] {
+export function buildRows(
+  document: PaperDocument,
+  visible: readonly Sentence[],
+  visibleNonBody: readonly NonBodySentence[],
+  equations: readonly Equation[] = [],
+): Row[] {
   const { sentences, sections, nonBody } = document.structure;
   const titles = new Map(sections.map((s) => [s.id, s.title]));
   const visibleIds = new Set(visible.map((s) => s.id));
@@ -195,7 +243,13 @@ export function buildRows(document: PaperDocument, visible: readonly Sentence[],
 
   const rows: Row[] = [];
   const pushNb = (items: readonly NonBodySentence[] | undefined) => {
-    for (const item of items ?? []) if (nbIds.has(item.id)) rows.push({ kind: "nonbody", key: `nb-${item.id}`, item });
+    for (const item of items ?? []) {
+      if (!nbIds.has(item.id)) continue;
+      if (item.kind === "formula") {
+        const equation = matchEquation(item, equations, document.structure.pageSizes);
+        if (equation) rows.push({ kind: "formula", key: `eq-${item.id}`, item, equation });
+      } else if (!HIDDEN_NONBODY.has(item.kind)) rows.push({ kind: "nonbody", key: `nb-${item.id}`, item });
+    }
   };
   pushNb(placement.head);
   const seen = new Set<string>();

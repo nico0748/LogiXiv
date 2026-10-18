@@ -183,6 +183,10 @@
 }
 .sl-card.is-skipped { opacity: .6; }
 .sl-card.is-nonbody { cursor: default; background: var(--background-primary-alt); border-style: dashed; }
+.sl-card.is-formula { cursor: default; background: var(--background-primary-alt); }
+.sl-card.is-formula .sl-kind .grow { flex: 1; }
+.sl-card.is-formula .katex-box { margin: 0; }
+.sl-formula-link { padding: 0; min-height: 0; }
 .sl-card.is-match { border-color: var(--background-modifier-border-hover); }
 .sl-kind { margin: 0 0 4px; font-size: var(--font-ui-smaller); color: var(--text-faint); display: flex; gap: 6px; align-items: center; }
 .sl-orig {
