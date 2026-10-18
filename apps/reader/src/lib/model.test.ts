@@ -35,3 +35,13 @@ test("消えた項目は削除し、無い項目への更新は無視する", ()
   const out = applyOps(base, [{ op: "remove", list: "terms", id: "x" }, { op: "update", list: "terms", id: "nope", patch: { short: "?" } }]);
   assert.deepEqual(out.terms.map((x) => x.id), ["y"]);
 });
+
+test("数式はページ順、同じページは見出しの番号順、ページの無いものは先頭", async () => {
+  const { sortEquationsByPage, renderEquations } = await import("./model.ts");
+  const e = (id: string, label: string, page?: number) => ({ id, label, tex: id, explanation: "", source: "", page, createdAt: "" });
+  const list = [e("c", "式(10)", 5), e("a", "式(2)", 2), e("hand", "式31"), e("b", "式(9)", 5), e("z", "式(1)", 2)];
+  assert.deepEqual(sortEquationsByPage(list).map((x) => x.id), ["hand", "z", "a", "b", "c"]);
+  assert.deepEqual(list.map((x) => x.id), ["c", "a", "hand", "b", "z"], "元の配列は並べ替えない");
+  const md = renderEquations(list);
+  assert.ok(md.indexOf("式(9)") < md.indexOf("式(10)"));
+});

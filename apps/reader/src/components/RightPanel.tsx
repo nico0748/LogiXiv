@@ -1,7 +1,7 @@
 import katex from "katex";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Annotations, Equation, Highlight, Term } from "../lib/model.ts";
-import { MARKER_LABEL } from "../lib/model.ts";
+import { MARKER_LABEL, sortEquationsByPage } from "../lib/model.ts";
 import { toBibtex } from "../lib/bibtex.ts";
 import { type FmValue, fmText, parseFrontmatter, readFrontmatter } from "../lib/frontmatter.ts";
 import { type FieldDef, parseFields } from "../lib/template.ts";
@@ -292,7 +292,7 @@ function MathList(p: Props) {
         <EmptyState title="数式はまだありません">PDF で数式を選択して「数式にする」を押してください。</EmptyState>
       )}
       <div style={{ marginBottom: 12 }}><button className="btn sm" onClick={add}>数式を手で追加</button></div>
-      {p.ann.equations.map((e) => {
+      {sortEquationsByPage(p.ann.equations).map((e) => {
         const b = p.busy[e.id];
         return (
           <div key={e.id} className="card">

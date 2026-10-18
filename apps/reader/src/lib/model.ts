@@ -103,8 +103,21 @@ export function renderTerms(list: Term[]): string {
     .join("\n\n");
 }
 
+// numeric: "式(2)" が "式(10)" より前に来る。
+const labelCollator = new Intl.Collator("ja", { sensitivity: "base", numeric: true });
+
+/**
+ * 数式を論文のページ順に並べる（同じページなら見出しの番号順）。
+ * ページの無いもの（手入力したばかりの数式）は、すぐ書き始められるよう先頭に置く。
+ */
+export function sortEquationsByPage(list: Equation[]): Equation[] {
+  return [...list].sort(
+    (a, b) => (a.page ?? -Infinity) - (b.page ?? -Infinity) || labelCollator.compare(a.label, b.label),
+  );
+}
+
 export function renderEquations(list: Equation[]): string {
-  return list
+  return sortEquationsByPage(list)
     .map((e) => {
       const head = `### ${e.label || "数式"}${e.page ? `（p.${e.page}）` : ""}`;
       const parts = [head, "", "$$", e.tex.trim(), "$$"];
