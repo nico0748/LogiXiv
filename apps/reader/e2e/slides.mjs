@@ -5,8 +5,10 @@
 // 3. 論文の文を選んで「文章としてリンク」、図を囲んでリンクする → 線が 2 本引かれる
 // 4. slides.json と note.md に残ること、MCP の書き込みで線が増えることを確かめる
 // 5. 全画面（発表のとき）: ボタンと P キーで入る・出る、見出しが隠れる、線がずれない、帯が上の端で出る、使えないときはウィンドウいっぱい
-// 6. 名前の札はカーソルを乗せたときだけ出ること、スライド側・論文側・Delete キーのどれで消してもグループごと消え、元に戻せることを確かめる
-// 7. 三面（スライド / 論文 / 補足情報）: タブと [ ] キーで横に送る、論文の幅は変わらない、隠れたスライドの線は引かない、補足情報から論文へ動かせる、選んだ側が残る
+// 6. 名前の札はカーソルを乗せたときだけ出ること、スライド側と Delete キーではグループごと、論文側ではそのリンクだけが消え、元に戻せること、
+//    つまみで四角の大きさを直せること、消して空いた番号を次のグループが使うことを確かめる
+// 7. 三面（スライド / 論文 / 補足情報）: タブと [ ] キーで横に送る、論文の幅は変わらない、隠れたスライドの線は引かない、補足情報から論文へ動かせる、
+//    対訳で選んだ文に論文の面で枠が付く、選んだ側が残る
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -192,14 +194,46 @@ try {
     if (!note) fail("note.md に戻っていません");
   });
 
-  await step("論文側の点から消しても、スライドの四角ごと消える。すぐ ⌘Z（Ctrl+Z）で戻せる", async () => {
+  await step("論文側の点から消すと、そのリンクだけが外れ、スライドの四角ともう 1 本のリンクは残る。⌘Z（Ctrl+Z）で戻せる", async () => {
     await page.mouse.move(5, 5);
     await page.locator(".ln-pin").first().hover();
-    await page.locator(".ln-pin").first().getByRole("button", { name: /^Markup-02\.01 を消す/ }).click();
-    await gone();
-    // 保存を待たずに戻す（消す → 戻すが保存の前に済む）
+    await page.locator(".ln-pin").first().getByRole("button", { name: /^Markup-02\.01 から、この.+のリンクを外す/ }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".ln-pin").length === 1 && document.querySelectorAll(".sv-lines path.sv-line").length === 1);
+    if (!(await page.locator('.mu-box[aria-label^="Markup-02.01"]').count())) fail("スライドの四角まで消えました");
+    await page.locator(".sv-snack", { hasText: "Markup-02.01 から" }).waitFor();
+    await savedDeck((d) => d.markups.length === 1 && d.markups[0].links.length === 1);
+    // 保存したあとでも、同じリンクのまま戻る
+    await page.mouse.move(5, 5);
     await page.keyboard.press("ControlOrMeta+z");
     await restoredAll();
+  });
+
+  await step("選んだグループの四角は、角のつまみで大きさを直せる（論文の図の囲みも）", async () => {
+    await page.mouse.move(5, 5);
+    if ((await page.locator(".mu-box").getAttribute("aria-pressed")) !== "true") await page.locator(".mu-box").click();
+    const before = (await savedDeck(() => true)).markups[0];
+    const h = await page.locator(".sv-slides .rz-se").boundingBox();
+    if (!h) fail("スライドの四角につまみがありません");
+    await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(h.x + 60, h.y + 40, { steps: 6 });
+    await page.mouse.up();
+    const after = (await savedDeck((d) => d.markups[0].rect.w > before.rect.w + 0.01)).markups[0];
+    if (Math.abs(after.rect.x - before.rect.x) > 1e-6 || Math.abs(after.rect.y - before.rect.y) > 1e-6) fail(`左上の角が動きました: ${JSON.stringify(after.rect)}`);
+    if (after.index !== before.index || after.links.length !== 2) fail(`名前かリンクが変わりました: ${JSON.stringify(after)}`);
+    // 論文側の図の囲みも、左上の角を内側へ寄せて小さくできる
+    const fig = before.links.find((l) => l.kind === "figure");
+    const fh = await page.locator(".sv-paper .rz-nw").boundingBox();
+    if (!fh) fail("論文の図の囲みにつまみがありません");
+    await page.mouse.move(fh.x + fh.width / 2, fh.y + fh.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(fh.x + 20, fh.y + 20, { steps: 4 });
+    await page.mouse.up();
+    await savedDeck((d) => {
+      const l = d.markups[0].links.find((x) => x.id === fig.id);
+      return l && l.rects[0].x > fig.rects[0].x + 0.005 && l.rects[0].w < fig.rects[0].w;
+    });
+    await page.waitForFunction(() => document.querySelectorAll(".sv-lines path.sv-line").length === 2);
   });
 
   await step("グループを選んで Delete を押すと消える", async () => {
@@ -297,7 +331,7 @@ try {
     if (l.page !== 1 || l.rects.some((r) => r.h > 0.1) || /Markup-|\s1\s/.test(l.text)) fail(`ページをまたいだ選択: ${JSON.stringify(l)}`);
   });
 
-  await step("最後の番号のグループを消して足し直しても、同じ名前にならない", async () => {
+  await step("最後の番号のグループを消して足し直すと、空いた番号（同じ名前）を使う", async () => {
     // 右サイドバーの消すボタンは 1 回押しで消す（元に戻せるため）
     await page.locator(".mp-item.is-active .mp-delete").click();
     await page.waitForFunction(() => !document.querySelector(".mu-box"));
@@ -307,21 +341,22 @@ try {
     await page.mouse.down();
     await page.mouse.move(slide2.x + slide2.width * 0.4, slide2.y + slide2.height * 0.7, { steps: 5 });
     await page.mouse.up();
-    await page.locator('.mu-box[aria-label^="Markup-02.02"]').waitFor();
+    await page.locator('.mu-box[aria-label^="Markup-02.01"]').waitFor();
   });
 
   await step("メモを打ってすぐ別の論文を開いても、メモは保存される", async () => {
     // 前の段階の保存（少し待ってから送る）が終わってから読み直す
     for (let i = 0; i < 30; i++) {
       const d = JSON.parse(readFileSync(path.join(data, "papers", id, "slides.json"), "utf8"));
-      if (d.markups.some((m) => m.page === 2 && m.index === 2)) break;
+      // 消したグループと同じ名前（空いた番号）を使うので、リンクの無い新しいグループに替わったことで見分ける
+      if (d.markups.length === 1 && d.markups[0].page === 2 && d.markups[0].index === 1 && !d.markups[0].links.length) break;
       await new Promise((r) => setTimeout(r, 100));
     }
     await fetch(`${base}/api/papers?name=other.pdf`, { method: "POST", body: sample });
     await page.reload();
     await page.getByRole("navigation", { name: "主要メニュー" }).getByRole("button", { name: "発表スライドと論文の対応" }).click();
     await page.locator(".sv-slides .pp-page").first().waitFor();
-    await page.locator(".mp-title", { hasText: "Markup-02.02" }).click();
+    await page.locator(".mp-title", { hasText: "Markup-02.01" }).click();
     await page.locator(".mp-item.is-active textarea").fill("すぐ切り替える");
     // 保存を待たずに、左の論文一覧から別の論文を開く
     if ((await page.locator("aside.sidebar.left").getAttribute("aria-hidden")) === "true") await page.keyboard.press("Control+Backslash");
@@ -658,6 +693,46 @@ try {
     );
     // 論文の面へ送ったあとも、補足情報の側のまま
     if ((await sideTab("補足情報").getAttribute("aria-selected")) !== "true") fail("ページへ動かしたら側が変わりました");
+  });
+
+  await step("三面: 補足情報の対訳で文を押すと、論文の面でその文に枠が付き、そこまで動く", async () => {
+    const res = await fetch(`${base}/api/papers/${id}/sentences/parse`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-paperlens-client": "agent" },
+      body: JSON.stringify({ parser: "fallback" }),
+    });
+    if (!res.ok) fail(`文に分けられませんでした: ${await res.text()}`);
+    for (let i = 0; i < 100; i++) {
+      const st = await (await fetch(`${base}/api/papers/${id}/sentences`)).json();
+      if (st.status === "ready") break;
+      if (st.status === "failed") fail(`解析に失敗しました: ${JSON.stringify(st)}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const info = page.locator(".sv-info");
+    await info.getByRole("tab", { name: /^対訳/ }).click();
+    // 2 ページ目の文を選ぶ（論文の面を 1 ページ目の上に置いておき、動くことを確かめる）
+    const card = info.locator("[data-sl-card]:not(.is-nonbody):not(.is-formula)").last();
+    await card.waitFor({ timeout: 10000 });
+    await page.evaluate(() => {
+      document.querySelector(".sv-paper .pp-scroll").scrollTop = 0;
+    });
+    await page.waitForTimeout(200);
+    if (await page.locator(".sv-paper .sl-mark.is-active").count()) fail("選ぶ前から論文に文の枠があります");
+    await card.click();
+    await page.waitForFunction(
+      () => {
+        const box = document.querySelector(".sv-paper .pp-scroll").getBoundingClientRect();
+        const marks = [...document.querySelectorAll(".sv-paper .sl-mark.is-active")];
+        return marks.length > 0 && marks.some((m) => {
+          const r = m.getBoundingClientRect();
+          return r.bottom > box.top && r.top < box.bottom;
+        });
+      },
+      null,
+      { timeout: 5000 },
+    );
+    await page.screenshot({ path: path.join(shotDir, "slides-sentence.png") });
+    if ((await sideTab("補足情報").getAttribute("aria-selected")) !== "true") fail("文を選んだら側が変わりました");
   });
 
   await step("三面: 補足情報の側のまま全画面にしても、論文と補足情報が並ぶ", async () => {

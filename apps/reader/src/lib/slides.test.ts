@@ -17,6 +17,7 @@ import {
   parseMarkupOps,
   putSlides,
   renderSlideLinks,
+  restoreLink,
   restoreMarkup,
 } from "./slides.ts";
 import { MemoryVault } from "./vault.ts";
@@ -49,9 +50,10 @@ test("名前・短い形・ID のどれでも探せる", () => {
   assert.equal(findMarkup(d, "Markup-04.01"), undefined);
 });
 
-test("番号はページごとに数え、消した番号は使い直さない", () => {
+test("番号はページごとに数え、消して空いた番号から使う", () => {
   const ms = [mk(3, 1), mk(3, 3), mk(5, 1)];
-  assert.equal(nextIndex(ms, 3), 4);
+  assert.equal(nextIndex(ms, 3), 2);
+  assert.equal(nextIndex([...ms, mk(3, 2)], 3), 4);
   assert.equal(nextIndex(ms, 5), 2);
   assert.equal(nextIndex(ms, 7), 1);
 });
@@ -183,12 +185,38 @@ test("並べて書いても、リンクは全部残る", async () => {
   assert.deepEqual((await loadDeck(v, id))?.markups[0].links.map((l) => l.id).sort(), ["a", "b", "c", "d"]);
 });
 
-test("最後の番号のグループを消しても、その番号は使い直さない", () => {
-  const d = applyMarkupOps(deckOf([]), [{ op: "add", item: mk(3, 1) }, { op: "add", item: mk(3, 2) }, { op: "remove", id: "m-3-2" }]);
-  assert.equal(nextIndex(d.markups, 3, d.used), 3);
-  // 同じ名前で足し直されても、次の番号にずらす
+test("途中のグループを消すと、ほかの名前はずらさず、次に作るものが空いた番号を使う", () => {
+  const d = applyMarkupOps(deckOf([]), [{ op: "add", item: mk(3, 1) }, { op: "add", item: mk(3, 2) }, { op: "add", item: mk(3, 3) }, { op: "remove", id: "m-3-2" }]);
+  assert.deepEqual(d.markups.map(markupName), ["Markup-03.01", "Markup-03.03"]);
+  assert.equal(nextIndex(d.markups, 3), 2);
   const again = applyMarkupOps(d, [{ op: "add", item: { ...mk(3, 2), id: "new" } }]);
-  assert.equal(markupName(again.markups[1]), "Markup-03.03");
+  assert.equal(markupName(again.markups.at(-1)!), "Markup-03.02");
+  // 最後の番号を消したときも、その番号を使い直す
+  const last = applyMarkupOps(deckOf([]), [{ op: "add", item: mk(4, 1) }, { op: "add", item: mk(4, 2) }, { op: "remove", id: "m-4-2" }]);
+  assert.equal(nextIndex(last.markups, 4), 2);
+  // 以前の版の used（使った最大の番号）は読まない
+  assert.equal(nextIndex(applyMarkupOps({ ...deckOf([]), used: { 3: 5 } }, []).markups, 3), 1);
+  assert.equal(applyMarkupOps({ ...deckOf([]), used: { 3: 5 } }, []).used, undefined);
+});
+
+test("リンクだけを消して戻す。グループとほかのリンクは残る", () => {
+  const base = deckOf([mk(3, 1, { links: [link("a"), link("b"), link("c")] })]);
+  const without = { ...base, markups: [{ ...base.markups[0], links: base.markups[0].links.filter((l) => l.id !== "b") }] };
+  assert.deepEqual(diffMarkups(base, without), [{ op: "removeLink", id: "m-3-1", link: "b" }]);
+  const back = restoreLink(without, "m-3-1", link("b"), 1);
+  assert.deepEqual(back.markups[0].links.map((l) => l.id), ["a", "b", "c"]);
+  assert.equal(restoreLink(back, "m-3-1", link("b"), 0), back);
+  assert.equal(restoreLink(without, "none", link("b"), 0), without);
+});
+
+test("リンクの範囲を直すと updateLink の操作になり、送られた範囲は確かめる", () => {
+  const base = deckOf([mk(3, 1, { links: [link("a")] })]);
+  const rects = [{ x: 0.25, y: 0.25, w: 0.5, h: 0.125 }];
+  const next = { ...base, markups: [{ ...base.markups[0], links: [{ ...link("a"), rects }] }] };
+  const ops = diffMarkups(base, next);
+  assert.deepEqual(ops, [{ op: "updateLink", id: "m-3-1", link: "a", patch: { rects } }]);
+  assert.deepEqual(applyMarkupOps(base, parseMarkupOps(JSON.parse(JSON.stringify(ops)))).markups[0].links[0].rects, rects);
+  assert.throws(() => parseMarkupOps([{ op: "updateLink", id: "m-3-1", link: "a", patch: { rects: [] } }]), /patch\.rects/);
 });
 
 test("消したグループを元に戻すと、同じ ID・番号・リンクのまま、元の位置に戻る", () => {
@@ -211,7 +239,6 @@ test("消したことを保存したあとに元に戻しても、名前は変�
   const gone = mk(3, 2, { links: [link("a")] });
   const saved = (await changeMarkups(v, id, [{ op: "add", item: mk(3, 1) }, { op: "add", item: gone }])).deck;
   const afterRemove = (await changeMarkups(v, id, diffMarkups(saved, { ...saved, markups: saved.markups.filter((m) => m.id !== gone.id) }))).deck;
-  assert.equal(afterRemove.used?.[3], 2);
   const local = restoreMarkup(afterRemove, gone, 1);
   const ops = diffMarkups(afterRemove, local, new Set([gone.id]));
   assert.deepEqual(ops, [{ op: "restore", item: gone }]);
@@ -223,9 +250,10 @@ test("消したことを保存したあとに元に戻しても、名前は変�
   assert.match(r.note, /### Markup-03\.02/);
   // 同じ操作をもう一度当てても増えない
   assert.equal(applyMarkupOps(r.deck, ops).markups.length, r.deck.markups.length);
-  // 戻す操作でなく足す操作（ほかの部分を足す）なら、これまでどおり次の番号にずらす
+  // 消したあとに別の部分が空いた番号を使っていたら、戻すものを空いている番号にずらす
   const other = applyMarkupOps(afterRemove, [{ op: "add", item: { ...gone, id: "other" } }]);
-  assert.equal(markupName(other.markups.at(-1)!), "Markup-03.03");
+  assert.equal(markupName(other.markups.at(-1)!), "Markup-03.02");
+  assert.equal(markupName(restoreMarkup(other, gone, 1).markups[1]), "Markup-03.03");
   // 戻すときでも、同じ名前が既にあればずらす
   const clash = applyMarkupOps(r.deck, parseMarkupOps([{ op: "restore", item: { ...gone, id: "x" } }]));
   assert.equal(markupName(clash.markups.at(-1)!), "Markup-03.03");

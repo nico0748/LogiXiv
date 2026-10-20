@@ -1,6 +1,7 @@
 // 右サイドバー: スライドのグループ（マークアップ）の一覧。選ぶと、スライドと論文の該当箇所へ移る。
 // メモ、色、リンクの種類を直したり、リンクやグループを消したりできる。
-// グループを消すと、論文側のリンク（ペア先）も一緒に消える。元に戻す知らせは中央の画面（SlidesView）に出る。
+// グループを消すと、論文側のリンク（ペア先）も一緒に消える。リンクを外しても、グループ（スライド側の四角）は残る。
+// 元に戻す知らせは中央の画面（SlidesView）に出る。
 
 import { Trash2, X } from "lucide-react";
 import type { CSSProperties } from "react";
@@ -114,7 +115,7 @@ export function MarkupPanel({ slides, active, setActive, setHover, reveal, slide
                               className="icon-btn"
                               aria-label={`p.${l.page} のリンクを外す`}
                               title="リンクを外す"
-                              onClick={() => patch(m.id, { links: m.links.filter((x) => x.id !== l.id) })}
+                              onClick={() => slides.removeLink(m.id, l.id)}
                             >
                               <X size={14} aria-hidden="true" />
                             </button>

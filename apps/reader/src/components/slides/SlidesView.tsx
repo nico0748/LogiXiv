@@ -9,7 +9,10 @@
 // - 右: 論文。マークアップを選んでいる間、文章はドラッグで選んで、図・数式は四角で囲んでリンクする。
 // - 間: グループの色の線でつなぐ。片方が画面の外にあるときは、端まで点線で引く。
 // - 名前の札は、グループにカーソルかフォーカスがあるときだけ出す（いつも出すとスライドや論文の文字を隠すため）。
-//   論文側は札の代わりに小さな色の点を置き、点に乗ると札に広がる。札の消すボタンでグループごと（両側とも）消せる。
+//   論文側は札の代わりに小さな色の点を置き、点に乗ると札に広がる。
+//   スライド側の札の消すボタンはグループごと（両側とも）消し、論文側の札の消すボタンはそのリンク 1 本だけを外す。
+// - 選んでいるグループの四角（スライド側）と、図・数式の囲み（論文側）は、四隅と四辺のつまみで大きさを直せる。
+// - 補足情報の対訳で文を選ぶと、論文の面でその文に枠を付けて、そこまで動かす（論文の画面の PdfView と同じ）。
 // - 補足情報（info）を渡されたときは、論文の右に三面目（対訳・訳・用語など）を置き、二面ずつ横にめくって見せる
 //   （[スライド | 論文] か [論文 | 補足情報]。論文はいつも見える。usePager.ts）。渡されないときはこれまでの二分割のまま。
 
@@ -32,7 +35,11 @@ import {
   normalizeRect,
   overlapRatio,
 } from "../../lib/slides.ts";
+import { useSentenceFocus } from "../../lib/sentenceFocus.ts";
+import { type SentenceMark, marksByPage, sentenceAnchor } from "../../lib/sentencesView.ts";
 import { Snackbar, type Snack } from "../Snackbar.tsx";
+import { SentenceMarkLayer } from "../sentences/SentenceMarks.tsx";
+import { useSentences } from "../sentences/useSentences.ts";
 import { PdfPages, type PdfPagesHandle } from "./PdfPages.tsx";
 import "./slides.css";
 import { useFullscreen } from "./useFullscreen.ts";
@@ -52,6 +59,8 @@ export interface SlideFocus {
 
 interface Props {
   slides: Slides;
+  /** 開いている論文の ID（補足情報の対訳で選んだ文を、論文の面に出すため） */
+  paperId?: string | null;
   paperPdf: ArrayBuffer | null;
   active: string | null;
   setActive: (id: string | null) => void;
@@ -182,6 +191,7 @@ type Line = { key: string; markup: string; color: string; d: string; dashed: boo
 
 function Split({
   slides,
+  paperId,
   deck,
   slidePdf,
   paperPdf,
@@ -215,6 +225,26 @@ function Split({
   const slideRef = useRef<PdfPagesHandle>(null);
   const paperRef = useRef<PdfPagesHandle>(null);
   const activeMarkup = deck.markups.find((m) => m.id === active) ?? null;
+  /** つまみで大きさを直している途中の四角（離すまで保存しない）。link が無ければスライド側の四角 */
+  const [resizing, setResizing] = useState<{ markup: string; link?: string; rect: Rect } | null>(null);
+  const rectOfMarkup = (m: SlideMarkup) => (resizing && resizing.markup === m.id && !resizing.link ? resizing.rect : m.rect);
+  const rectsOfLink = (l: SlideLink) => (resizing?.link === l.id ? [resizing.rect] : l.rects);
+
+  // --- 対訳で選んだ文 ---------------------------------------------------------
+  // 論文の画面では PdfView が文の枠を描くが、ここには PdfView が無いので、選んだ文の枠だけを論文の面に描く
+  const sentences = useSentences(paperId);
+  const sdoc = sentences.state?.status === "ready" ? sentences.state.document : null;
+  const sFocus = useSentenceFocus();
+  const activeSentence = paperId && sFocus.paperId === paperId ? sFocus.id : null;
+  const sentenceMarks = useMemo(() => {
+    const by = new Map<number, SentenceMark[]>();
+    if (!sdoc || !activeSentence) return by;
+    for (const [page, ms] of marksByPage(sdoc)) {
+      const mine = ms.filter((m) => m.id === activeSentence);
+      if (mine.length) by.set(page, mine);
+    }
+    return by;
+  }, [sdoc, activeSentence]);
 
   // --- 線 -------------------------------------------------------------------
   const frame = useRef(0);
@@ -301,7 +331,7 @@ function Split({
   const toSlides = () => pager.side !== "slides" && pager.go("slides");
   useLayoutEffect(() => {
     schedule();
-  }, [schedule, measure, slideZoom, paperZoom, ratio, slideCount, paperCount, pager.slidesOff, pager.width]);
+  }, [schedule, measure, slideZoom, paperZoom, ratio, slideCount, paperCount, pager.slidesOff, pager.width, resizing]);
   useEffect(() => {
     const el = splitRef.current;
     if (!el) return;
@@ -324,6 +354,14 @@ function Split({
     // 指示が来たとき（nonce）だけ動かす
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.nonce]);
+  // 補足情報の対訳で文を選んだら、論文の面をその文まで動かす（PdfView と同じく、PDF の上で選んだときは動かさない）
+  useEffect(() => {
+    if (!sdoc || !paperId || sFocus.paperId !== paperId || !sFocus.id || sFocus.origin === "pdf") return;
+    const at = sentenceAnchor(sdoc, sFocus.id);
+    if (at) paperRef.current?.goTo(at.page, at.y, sFocus.origin === "panel");
+    // 選び直したとき（nonce）だけ動かす。訳が届いて文書が変わっただけでは動かさない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sFocus.nonce]);
   // 補足情報から論文の場所を見せる指示（論文はどちらの面でも見えているので、面は変えない）
   useEffect(() => {
     if (paperJump) paperRef.current?.goTo(paperJump.page, paperJump.y);
@@ -335,9 +373,9 @@ function Split({
   const addMarkup = (page: number, rect: Rect) => {
     const id = newId("m");
     slides.update((d) => {
-      const m: SlideMarkup = { id, page, index: nextIndex(d.markups, page, d.used), rect, color: nextColor(d.markups), memo: "", links: [], createdAt: new Date().toISOString() };
+      const m: SlideMarkup = { id, page, index: nextIndex(d.markups, page), rect, color: nextColor(d.markups), memo: "", links: [], createdAt: new Date().toISOString() };
       notify(`${markupName(m)} を作りました。論文の該当箇所を選んでリンクしてください`);
-      return { ...d, used: { ...d.used, [page]: m.index }, markups: [...d.markups, m] };
+      return { ...d, markups: [...d.markups, m] };
     });
     setActive(id);
     setSlideTool("select");
@@ -350,9 +388,23 @@ function Split({
     slides.update((d) => ({ ...d, markups: d.markups.map((m) => (m.id === active ? { ...m, links: [...m.links, link] } : m)) }));
   };
 
-  /** 論文のページで四角く囲んだとき（図・数式）。囲んだ範囲の文字も添える */
-  const onPaperBox = (page: number, rect: Rect) => {
-    if (paperTool === "text") return;
+  /** スライド側の四角の大きさを直したとき */
+  const resizeMarkup = (id: string, rect: Rect) => {
+    setResizing(null);
+    slides.update((d) => ({ ...d, markups: d.markups.map((m) => (m.id === id ? { ...m, rect } : m)) }));
+  };
+  /** 論文側の図・数式の囲みの大きさを直したとき。囲んだ範囲の文字も取り直す */
+  const resizeLink = (id: string, link: string, page: number, rect: Rect) => {
+    setResizing(null);
+    const text = textIn(page, rect);
+    slides.update((d) => ({
+      ...d,
+      markups: d.markups.map((m) => (m.id === id ? { ...m, links: m.links.map((l) => (l.id === link ? { ...l, rects: [rect], text } : l)) } : m)),
+    }));
+  };
+
+  /** 論文のページの、四角の中にある文字 */
+  const textIn = (page: number, rect: Rect) => {
     const el = paperRef.current?.el?.querySelector<HTMLElement>(`:scope > .pp-page[data-page="${page}"]`);
     let text = "";
     if (el) {
@@ -367,7 +419,13 @@ function Split({
         .replace(/\s+/g, " ")
         .trim();
     }
-    addLink(paperTool, page, [rect], text);
+    return text;
+  };
+
+  /** 論文のページで四角く囲んだとき（図・数式）。囲んだ範囲の文字も添える */
+  const onPaperBox = (page: number, rect: Rect) => {
+    if (paperTool === "text") return;
+    addLink(paperTool, page, [rect], textIn(page, rect));
   };
 
   /** 論文の文字を選んだとき。リンクの種類を選ぶメニューを出す */
@@ -413,12 +471,16 @@ function Split({
   };
 
   // --- 消す・元に戻す ---------------------------------------------------------
-  // 論文側のリンクはグループの中にあるので、どちらの側から消してもグループごと（両側とも）消える。
+  // スライド側から消すとグループごと（論文側のリンクも）消え、論文側から消すとそのリンク 1 本だけが外れる。
   // その場で確かめずに消すので、下の知らせ（と ⌘Z / Ctrl+Z）で元に戻せるようにする
   const removeGroup = (m: SlideMarkup) => {
     slides.remove(m.id);
     if (active === m.id) setActive(null);
     // 消した要素の上では mouseleave が来ないので、ここで外す
+    setHover(null);
+  };
+  const removeLink = (m: SlideMarkup, l: SlideLink) => {
+    slides.removeLink(m.id, l.id);
     setHover(null);
   };
   const undoRemove = () => {
@@ -431,7 +493,9 @@ function Split({
   const removedSnack = useMemo<Snack | null>(
     () =>
       removed && {
-        message: `${markupName(removed.markup)} を消しました${removed.markup.links.length ? `（リンク ${removed.markup.links.length} 件も）` : ""}`,
+        message: removed.link
+          ? `${markupName(removed.markup)} から p.${removed.link.page} の${LINK_KIND_LABEL[removed.link.kind]}のリンクを外しました`
+          : `${markupName(removed.markup)} を消しました${removed.markup.links.length ? `（リンク ${removed.markup.links.length} 件も）` : ""}`,
         action: { label: "元に戻す", onClick: () => undoRef.current() },
         ms: 8000,
         n: removed.n,
@@ -508,7 +572,7 @@ function Split({
   const hov = hover && deck.markups.some((m) => m.id === hover) ? hover : null;
   const dim = (id: string) => (hov ? hov !== id : active ? active !== id : false);
   const color = (m: SlideMarkup) => ({ "--g": GROUP_COLORS[m.color % GROUP_COLORS.length] }) as CSSProperties;
-  /** 札の中の消すボタン。スライド側と論文側のどちらにも置き、どちらで押してもグループごと消す */
+  /** スライド側の札の中の消すボタン。グループごと（論文側のリンクも）消す */
   const delBtn = (m: SlideMarkup) => (
     <button
       type="button"
@@ -523,6 +587,21 @@ function Split({
       <Trash2 size={12} aria-hidden="true" />
     </button>
   );
+  /** 論文側の札の中の消すボタン。このリンクだけを外し、スライド側の四角とほかのリンクは残す */
+  const delLinkBtn = (m: SlideMarkup, l: SlideLink) => (
+    <button
+      type="button"
+      className="mu-del"
+      aria-label={`${markupName(m)} から、この${LINK_KIND_LABEL[l.kind]}のリンクを外す（スライドの四角は残ります）`}
+      title={`この${LINK_KIND_LABEL[l.kind]}のリンクだけを外す（スライドの四角とほかのリンクは残ります。外したあと元に戻せます）`}
+      onClick={(e) => {
+        e.stopPropagation();
+        removeLink(m, l);
+      }}
+    >
+      <Trash2 size={12} aria-hidden="true" />
+    </button>
+  );
 
   const slideOverlay = (n: number) => (
     <>
@@ -532,8 +611,8 @@ function Split({
           // カーソルは包みで見るので、四角から札へ動かしても札は消えない
           <div
             key={m.id}
-            className={`mu${hov === m.id ? " is-hover" : ""}${dim(m.id) ? " is-dim" : ""}${m.rect.y < 0.05 ? " tag-inside" : ""}`}
-            style={{ ...color(m), ...pos(m.rect) }}
+            className={`mu${hov === m.id ? " is-hover" : ""}${dim(m.id) ? " is-dim" : ""}${rectOfMarkup(m).y < 0.05 ? " tag-inside" : ""}`}
+            style={{ ...color(m), ...pos(rectOfMarkup(m)) }}
             onMouseEnter={() => setHover(m.id)}
             onMouseLeave={() => setHover(null)}
             onFocus={() => setHover(m.id)}
@@ -558,25 +637,36 @@ function Split({
           </div>
         ))}
       </div>
+      {slideTool === "select" && activeMarkup?.page === n && (
+        <ResizeFrame
+          key={activeMarkup.id}
+          rect={rectOfMarkup(activeMarkup)}
+          label={`${markupName(activeMarkup)} の四角`}
+          style={color(activeMarkup)}
+          onDraft={(rect) => setResizing(rect && { markup: activeMarkup.id, rect })}
+          onCommit={(rect) => resizeMarkup(activeMarkup.id, rect)}
+        />
+      )}
       {slideTool === "box" && <DrawLayer label={`スライド ${n} ページ目を囲む`} onBox={(r) => addMarkup(n, r)} />}
     </>
   );
 
   const paperOverlay = (n: number) => (
     <>
+      {sentenceMarks.has(n) && <SentenceMarkLayer marks={sentenceMarks.get(n)!} activeId={activeSentence} hoverId={null} />}
       {/* 塗りは紙に multiply で重ねる（文字が霞まない）。札と枠は別の層にして、普通に重ねる */}
       <div className="ln-fills" aria-hidden="true">
         {(byPage.paperBy.get(n) ?? []).map(({ m, l }) =>
           l.kind === "text" ? (
             <div key={l.id} className={`ln${m.id === active ? " is-active" : ""}${dim(m.id) ? " is-dim" : ""}`} style={color(m)}>
-              {l.rects.map((r, i) => <div key={i} className="ln-fill" style={pos(r)} />)}
+              {rectsOfLink(l).map((r, i) => <div key={i} className="ln-fill" style={pos(r)} />)}
             </div>
           ) : null,
         )}
       </div>
       <div className="ln-layer">
         {(byPage.paperBy.get(n) ?? []).map(({ m, l }) => {
-          const b = boundsOf(l.rects);
+          const b = boundsOf(rectsOfLink(l));
           if (!b) return null;
           const cls = `ln-${l.kind}${m.id === active ? " is-active" : ""}${dim(m.id) ? " is-dim" : ""}`;
           return (
@@ -606,12 +696,26 @@ function Split({
                   <span className="mu-dot" aria-hidden="true" />
                   <span className="ln-name">{markupName(m)}</span>
                 </button>
-                {delBtn(m)}
+                {delLinkBtn(m, l)}
               </div>
             </div>
           );
         })}
       </div>
+      {activeMarkup &&
+        paperTool === "text" &&
+        activeMarkup.links
+          .filter((l) => l.page === n && l.kind !== "text" && l.rects.length === 1)
+          .map((l) => (
+            <ResizeFrame
+              key={l.id}
+              rect={rectsOfLink(l)[0]}
+              label={`${markupName(activeMarkup)} の${LINK_KIND_LABEL[l.kind]}の囲み`}
+              style={color(activeMarkup)}
+              onDraft={(rect) => setResizing(rect && { markup: activeMarkup.id, link: l.id, rect })}
+              onCommit={(rect) => resizeLink(activeMarkup.id, l.id, n, rect)}
+            />
+          ))}
       {active && paperTool !== "text" && (
         <DrawLayer label={`論文 ${n} ページ目の${LINK_KIND_LABEL[paperTool]}を囲む`} onBox={(r) => onPaperBox(n, r)} />
       )}
@@ -652,7 +756,7 @@ function Split({
       ? "スライドの上をドラッグして、四角で囲んでください（Esc でやめる）"
       : activeMarkup
         ? paperTool === "text"
-          ? `${markupName(activeMarkup)} にリンクする文を、論文の上でドラッグして選んでください。図・数式は右上の道具で囲みます`
+          ? `${markupName(activeMarkup)} にリンクする文を、論文の上でドラッグして選んでください。図・数式は右上の道具で囲みます。四角の大きさは角と辺のつまみで直せます`
           : `論文の${LINK_KIND_LABEL[paperTool]}をドラッグして囲んでください（Esc でやめる）`
         : deck.markups.length
           ? "四角を押すとグループを選べます。選んでいる間、論文の該当箇所をリンクできます"
@@ -852,6 +956,88 @@ function Split({
 }
 
 const pos = (r: Rect): CSSProperties => ({ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` });
+
+type Edge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+const EDGES: Edge[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+const EDGE_LABEL: Record<Edge, string> = { n: "上の辺", s: "下の辺", e: "右の辺", w: "左の辺", ne: "右上の角", nw: "左上の角", se: "右下の角", sw: "左下の角" };
+/** これより小さくはしない（ページに対する割合） */
+const MIN_SIZE = 0.01;
+
+/** rect の edge の側を (dx, dy) だけ動かす。反対側は動かさず、MIN_SIZE より小さくしない */
+function moveEdge(r: Rect, edge: Edge, dx: number, dy: number): Rect {
+  let x1 = r.x;
+  let y1 = r.y;
+  let x2 = r.x + r.w;
+  let y2 = r.y + r.h;
+  if (edge.includes("w")) x1 = Math.min(x2 - MIN_SIZE, x1 + dx);
+  if (edge.includes("e")) x2 = Math.max(x1 + MIN_SIZE, x2 + dx);
+  if (edge.includes("n")) y1 = Math.min(y2 - MIN_SIZE, y1 + dy);
+  if (edge.includes("s")) y2 = Math.max(y1 + MIN_SIZE, y2 + dy);
+  return normalizeRect({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
+}
+
+/** 選んでいる四角の大きさを直すつまみ。ドラッグの途中は onDraft で見せ、離したときに onCommit で保存する。
+ *  つまみにフォーカスして矢印キーでも動かせる（Shift で大きく） */
+function ResizeFrame({ rect, label, style, onDraft, onCommit }: { rect: Rect; label: string; style: CSSProperties; onDraft: (r: Rect | null) => void; onCommit: (r: Rect) => void }) {
+  const drag = useRef<{ edge: Edge; w: number; h: number; x: number; y: number; start: Rect; last: Rect } | null>(null);
+  const at = (e: React.PointerEvent) => {
+    const d = drag.current!;
+    return moveEdge(d.start, d.edge, (e.clientX - d.x) / d.w, (e.clientY - d.y) / d.h);
+  };
+  const end = (commit: boolean) => {
+    const d = drag.current;
+    drag.current = null;
+    if (d && commit && JSON.stringify(d.last) !== JSON.stringify(d.start)) onCommit(d.last);
+    else onDraft(null);
+  };
+  return (
+    <div className="rz-layer">
+      <div className="rz" style={{ ...style, ...pos(rect) }} role="group" aria-label={`${label}の大きさ`}>
+        {EDGES.map((edge) => (
+          <div
+            key={edge}
+            className={`rz-h rz-${edge}`}
+            role="button"
+            tabIndex={0}
+            aria-label={`${label}の${EDGE_LABEL[edge]}（矢印キーで動かす）`}
+            title="ドラッグして大きさを直す"
+            onPointerDown={(e) => {
+              const page = e.currentTarget.closest<HTMLElement>(".pp-page")?.getBoundingClientRect();
+              if (e.button !== 0 || !page) return;
+              e.preventDefault();
+              e.stopPropagation();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              drag.current = { edge, w: page.width, h: page.height, x: e.clientX, y: e.clientY, start: rect, last: rect };
+            }}
+            onPointerMove={(e) => {
+              if (!drag.current) return;
+              drag.current.last = at(e);
+              onDraft(drag.current.last);
+            }}
+            onPointerUp={(e) => {
+              if (drag.current) drag.current.last = at(e);
+              end(true);
+            }}
+            onPointerCancel={() => end(false)}
+            onLostPointerCapture={() => drag.current && end(true)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              const step = e.shiftKey ? 0.02 : 0.005;
+              const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+              if (!d) return;
+              e.preventDefault();
+              e.stopPropagation();
+              // 辺のつまみは、その辺の向きにだけ動かす
+              const [dx, dy] = d;
+              const next = moveEdge(rect, edge, /[ew]/.test(edge) ? dx : 0, /[ns]/.test(edge) ? dy : 0);
+              if (JSON.stringify(next) !== JSON.stringify(rect)) onCommit(next);
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /** ページの上をドラッグして四角を描く層 */
 function DrawLayer({ onBox, label }: { onBox: (r: Rect) => void; label: string }) {
