@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Backend } from "../../lib/backend.ts";
-import { type SlideDeck, type SlideMarkup, applyMarkupOps, diffMarkups, restoreMarkup } from "../../lib/slides.ts";
+import { type SlideDeck, type SlideLink, type SlideMarkup, applyMarkupOps, diffMarkups, restoreLink, restoreMarkup } from "../../lib/slides.ts";
 
 export type SlidesState =
   | { kind: "loading" }
@@ -16,10 +16,13 @@ export type SlidesState =
   | { kind: "ready"; deck: SlideDeck; pdf: ArrayBuffer }
   | { kind: "error"; message: string };
 
-/** 最後に消したグループ。元に戻すまで（か、知らせが消えるまで）持つ */
+/** 最後に消したグループか、論文側のリンク 1 本。元に戻すまで（か、知らせが消えるまで）持つ */
 export interface RemovedMarkup {
+  /** グループ（リンクを消したときは、そのリンクがあったグループ） */
   markup: SlideMarkup;
-  /** 消す前の並びの位置 */
+  /** リンクだけを消したときの、そのリンク */
+  link?: SlideLink;
+  /** 消す前の並びの位置（リンクを消したときは、グループの中での位置） */
   at: number;
   /** 同じグループを続けて消し戻ししたときも、知らせを出し直すための番号 */
   n: number;
@@ -33,8 +36,10 @@ export interface Slides {
   update(fn: (d: SlideDeck) => SlideDeck): void;
   /** グループを消す。論文側のリンク（ペア先）はグループの中にあるので、一緒に消える */
   remove(id: string): SlideMarkup | null;
+  /** 論文側のリンクを 1 本だけ外す。グループ（スライド側の囲み）とほかのリンクは残す */
+  removeLink(markupId: string, linkId: string): void;
   lastRemoved: RemovedMarkup | null;
-  /** 最後に消したグループを、同じ ID・番号・リンクのまま戻す。戻したグループを返す */
+  /** 最後に消したグループ（かリンク）を、同じ ID・番号のまま戻す。戻したリンクのグループを返す */
   restore(): SlideMarkup | null;
   /** 元に戻す知らせを閉じる */
   dismissRemoved(): void;
@@ -188,11 +193,31 @@ export function useSlides(
     [update],
   );
 
+  const removeLink = useCallback(
+    (markupId: string, linkId: string) => {
+      const markup = deckRef.current?.markups.find((m) => m.id === markupId);
+      const at = markup?.links.findIndex((l) => l.id === linkId) ?? -1;
+      if (!markup || at < 0) return;
+      update((d) => ({ ...d, markups: d.markups.map((m) => (m.id === markupId ? { ...m, links: m.links.filter((l) => l.id !== linkId) } : m)) }));
+      const r = { markup, link: markup.links[at], at, n: (removedRef.current?.n ?? 0) + 1 };
+      removedRef.current = r;
+      setLastRemoved(r);
+    },
+    [update],
+  );
+
   const restore = useCallback(() => {
     const r = removedRef.current;
     removedRef.current = null;
     setLastRemoved(null);
     if (!r || !deckRef.current) return null;
+    if (r.link) {
+      // グループが（別の書き手に）消されていたら、戻す先が無いので何もしない
+      const link = r.link;
+      if (!deckRef.current.markups.some((m) => m.id === r.markup.id)) return null;
+      update((d) => restoreLink(d, r.markup.id, link, r.at));
+      return r.markup;
+    }
     restored.current.add(r.markup.id);
     update((d) => restoreMarkup(d, r.markup, r.at));
     return r.markup;
@@ -223,5 +248,5 @@ export function useSlides(
     [backend, flush, load],
   );
 
-  return { state, importing, importFile, update, remove, lastRemoved, restore, dismissRemoved };
+  return { state, importing, importFile, update, remove, removeLink, lastRemoved, restore, dismissRemoved };
 }

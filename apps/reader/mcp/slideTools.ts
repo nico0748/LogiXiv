@@ -229,14 +229,14 @@ export const SLIDE_WRITE_TOOLS: Tool[] = [
       const item: SlideMarkup = {
         id: newId("m"),
         page: slide_page,
-        index: nextIndex(deck.markups, slide_page, deck.used),
+        index: nextIndex(deck.markups, slide_page),
         rect: box,
         color: nextColor(deck.markups),
         memo: memo?.trim() ?? "",
         links: [],
         createdAt: new Date().toISOString(),
       };
-      // 使った番号（used）は add の操作が上げる。別の書き手と番号がぶつかったときは次の番号にずれる
+      // 別の書き手と番号がぶつかったときは、空いている番号にずれる
       const r = await changeMarkups(v, paper, [{ op: "add", item }]);
       const made = markupIn(r.deck, item.id) ?? item;
       return json({ markup: markupName(made), id: made.id, slidePage: made.page, rect: made.rect, color: made.color, colorHex: GROUP_COLORS[made.color] });
@@ -347,7 +347,7 @@ export const SLIDE_WRITE_TOOLS: Tool[] = [
     config: {
       title: "グループを消す",
       description:
-        "グループを 1 つ消します。論文へのリンクもすべて一緒に消えます。名前の番号は使い直しません（ほかのグループの名前もずれません）。" +
+        "グループを 1 つ消します。論文へのリンクもすべて一緒に消えます。ほかのグループの名前はずれません。空いた番号は、そのページで次に作るグループが使います。" +
         "戻り値の removed は消したグループそのものです。取り消すときは、それを restore_slide_markup の item に渡します。",
       inputSchema: { paper: PAPER, markup: MARKUP },
       annotations: { readOnlyHint: false, destructiveHint: true },

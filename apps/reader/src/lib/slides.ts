@@ -7,6 +7,7 @@
 //
 // マークアップは「スライドのページ番号.そのページで何個目か」で呼ぶ（Markup-03.02 = 3 ページ目の 2 個目）。
 // 番号は作ったときに決めて変えない。途中のものを消しても、ほかの名前はずれない（ノートや会話で名前を使うため）。
+// 消して空いた番号は、そのページで次に作るものに使う（番号が抜けたままにならないように）。
 // 画面・ローカルサーバー・MCP サーバーで同じ処理を使うので、Node.js の機能は使わない。
 
 import type { Rect } from "./model.ts";
@@ -35,7 +36,7 @@ export interface SlideMarkup {
   id: string;
   /** スライドのページ番号（1 から） */
   page: number;
-  /** そのページで何個目か（1 から）。作ったときに決めて変えない */
+  /** そのページで何個目か（1 から）。作ったときに決めて変えない。消して空いた番号は、次に作るものが使う */
   index: number;
   /** スライドのページに対する割合 */
   rect: Rect;
@@ -53,7 +54,7 @@ export interface SlideDeck {
   /** PPTX から変換したときの元の形式 */
   convertedFrom?: "pptx";
   importedAt: string;
-  /** ページごとに、これまでに使った最大の番号。消しても下げない（同じ名前を別の部分に付けないため） */
+  /** 以前の版が書いていた、ページごとに使った最大の番号。今は読まない（消した番号を使い直すため） */
   used?: Record<string, number>;
   markups: SlideMarkup[];
 }
@@ -82,9 +83,12 @@ export function findMarkup(deck: SlideDeck, key: string): SlideMarkup | undefine
   return deck.markups.find((x) => x.page === page && x.index === index);
 }
 
-/** そのページで次に使う番号。消した番号は、最後の番号も含めて使い直さない（同じ名前が別の部分を指さないように） */
-export function nextIndex(markups: SlideMarkup[], page: number, used: Record<string, number> = {}) {
-  return markups.reduce((n, m) => (m.page === page ? Math.max(n, m.index) : n), used[page] ?? 0) + 1;
+/** そのページで次に使う番号。空いている番号のうち最も小さいもの（消した番号を使い直し、抜けたままにしない） */
+export function nextIndex(markups: SlideMarkup[], page: number) {
+  const taken = new Set(markups.filter((m) => m.page === page).map((m) => m.index));
+  let n = 1;
+  while (taken.has(n)) n++;
+  return n;
 }
 
 /** 次のグループの色。使っている数が最も少ない色を、並びの順に選ぶ */
@@ -156,31 +160,29 @@ export function mergeLineRects(rs: Rect[]): Rect[] {
 
 export type MarkupPatch = Partial<Pick<SlideMarkup, "rect" | "color" | "memo">>;
 
+export type LinkPatch = Partial<Pick<SlideLink, "kind" | "rects">>;
+
 export type MarkupOp =
   | { op: "add"; item: SlideMarkup }
-  /** 消したグループを元に戻す。消した番号でも、同じ名前のものが今無ければ番号を変えない（名前を変えない） */
+  /** 消したグループを元に戻す。同じ名前のものが今無ければ番号を変えない（名前を変えない） */
   | { op: "restore"; item: SlideMarkup }
   | { op: "update"; id: string; patch: MarkupPatch }
   | { op: "remove"; id: string }
   | { op: "addLink"; id: string; link: SlideLink }
-  | { op: "updateLink"; id: string; link: string; patch: Partial<Pick<SlideLink, "kind">> }
+  | { op: "updateLink"; id: string; link: string; patch: LinkPatch }
   | { op: "removeLink"; id: string; link: string };
 
 export function applyMarkupOps(deck: SlideDeck, ops: MarkupOp[]): SlideDeck {
   const list = [...deck.markups];
-  const used = { ...(deck.used ?? {}) };
   for (const op of ops) {
     const id = op.op === "add" || op.op === "restore" ? op.item.id : op.id;
     const i = list.findIndex((m) => m.id === id);
     if (op.op === "add" || op.op === "restore") {
       if (i >= 0) continue; // 同じ ID が既にあれば、先に足した側を残す
-      // 同じ名前が既にある（別の書き手が同じページに足した）か、消したグループの番号なら、次の番号にずらす。
-      // 元に戻すときは、消したときと同じ ID の同じ部分なので、消した番号のまま戻す（名前を変えない）
-      const clash =
-        list.some((m) => m.page === op.item.page && m.index === op.item.index) || (op.op === "add" && op.item.index <= (used[op.item.page] ?? 0));
-      const item = clash ? { ...op.item, index: nextIndex(list, op.item.page, used) } : op.item;
-      list.push(item);
-      used[item.page] = Math.max(used[item.page] ?? 0, item.index);
+      // 同じ名前が既にある（別の書き手が同じページに足した、か消した番号を別の部分が使った）なら、空いている番号にずらす。
+      // 元に戻すときも、その番号が空いていれば消した番号のまま戻す（名前を変えない）
+      const clash = list.some((m) => m.page === op.item.page && m.index === op.item.index);
+      list.push(clash ? { ...op.item, index: nextIndex(list, op.item.page) } : op.item);
       continue;
     }
     if (i < 0) continue; // 別の書き手が消したグループへの操作は捨てる
@@ -193,15 +195,27 @@ export function applyMarkupOps(deck: SlideDeck, ops: MarkupOp[]): SlideDeck {
     } else if (op.op === "updateLink") list[i] = { ...m, links: m.links.map((l) => (l.id === op.link ? { ...l, ...op.patch } : l)) };
     else list[i] = { ...m, links: m.links.filter((l) => l.id !== op.link) };
   }
-  return { ...deck, used, markups: list };
+  const { used: _old, ...rest } = deck;
+  return { ...rest, markups: list };
 }
 
-/** 消したグループを、消す前の位置（at 番目）に同じ ID・番号・リンクのまま戻す。既にあれば何もしない */
+/** 消したグループを、消す前の位置（at 番目）に同じ ID・リンクのまま戻す。既にあれば何もしない。
+ *  消したあとに同じ番号を別の部分が使っていたら、空いている番号にずらす */
 export function restoreMarkup(deck: SlideDeck, item: SlideMarkup, at: number): SlideDeck {
   if (deck.markups.some((m) => m.id === item.id)) return deck;
+  const clash = deck.markups.some((m) => m.page === item.page && m.index === item.index);
   const markups = [...deck.markups];
-  markups.splice(Math.min(Math.max(0, at), markups.length), 0, item);
-  return { ...deck, used: { ...deck.used, [item.page]: Math.max(deck.used?.[item.page] ?? 0, item.index) }, markups };
+  markups.splice(Math.min(Math.max(0, at), markups.length), 0, clash ? { ...item, index: nextIndex(deck.markups, item.page) } : item);
+  return { ...deck, markups };
+}
+
+/** 消したリンクを、元のグループの消す前の位置（at 番目）に戻す。グループが無いか、リンクが既にあれば何もしない */
+export function restoreLink(deck: SlideDeck, markupId: string, link: SlideLink, at: number): SlideDeck {
+  const m = deck.markups.find((x) => x.id === markupId);
+  if (!m || m.links.some((l) => l.id === link.id)) return deck;
+  const links = [...m.links];
+  links.splice(Math.min(Math.max(0, at), links.length), 0, link);
+  return { ...deck, markups: deck.markups.map((x) => (x.id === markupId ? { ...x, links } : x)) };
 }
 
 /** base から next への操作。restored に入っている ID のグループを足すときは、元に戻す操作にする */
@@ -225,8 +239,14 @@ export function diffMarkups(base: SlideDeck, next: SlideDeck, restored: Readonly
     for (const l of b.links) if (!now.has(l.id)) ops.push({ op: "removeLink", id: m.id, link: l.id });
     for (const l of m.links) {
       const o = old.get(l.id);
-      if (!o) ops.push({ op: "addLink", id: m.id, link: l });
-      else if (o.kind !== l.kind) ops.push({ op: "updateLink", id: m.id, link: l.id, patch: { kind: l.kind } });
+      if (!o) {
+        ops.push({ op: "addLink", id: m.id, link: l });
+        continue;
+      }
+      const lp: LinkPatch = {};
+      if (o.kind !== l.kind) lp.kind = l.kind;
+      if (JSON.stringify(o.rects) !== JSON.stringify(l.rects)) lp.rects = l.rects;
+      if (Object.keys(lp).length) ops.push({ op: "updateLink", id: m.id, link: l.id, patch: lp });
     }
   }
   return ops;
@@ -307,7 +327,14 @@ export function parseMarkupOps(raw: unknown): MarkupOp[] {
         return { op: "addLink", id: str(o.id, "id"), link: linkOf(o.link) };
       case "updateLink": {
         if (!isObj(o.patch)) return bad("patch はオブジェクトで指定してください。");
-        return { op: "updateLink", id: str(o.id, "id"), link: str(o.link, "link"), patch: o.patch.kind === undefined ? {} : { kind: kindOf(o.patch.kind) } };
+        const p = o.patch;
+        const patch: LinkPatch = {};
+        if (p.kind !== undefined) patch.kind = kindOf(p.kind);
+        if (p.rects !== undefined) {
+          if (!Array.isArray(p.rects) || !p.rects.length) bad("patch.rects を 1 つ以上の四角の配列で指定してください。");
+          patch.rects = (p.rects as unknown[]).map((r) => rectOf(r, "patch.rects"));
+        }
+        return { op: "updateLink", id: str(o.id, "id"), link: str(o.link, "link"), patch };
       }
       case "removeLink":
         return { op: "removeLink", id: str(o.id, "id"), link: str(o.link, "link") };
@@ -357,8 +384,9 @@ export async function loadDeck(vault: Vault, id: string): Promise<SlideDeck | nu
     // 空として扱うと、次の書き込みで中身を消してしまう。直してもらうまで書かない
     throw new Error(`${slidesDataPath(id)} を JSON として読めません。手で直すか、ファイルを消してから開き直してください。`);
   }
-  const used = isObj(raw.used) ? Object.fromEntries(Object.entries(raw.used).filter(([, v]) => Number.isInteger(v))) : {};
-  return { ...emptyDeck("slides.pdf"), ...(isObj(raw) ? raw : {}), version: 1, used: used as Record<string, number>, markups: tidyMarkups(raw?.markups) };
+  // 以前の版の used（使った最大の番号）は読まない。次に書くときに消える
+  const { used: _old, ...rest } = isObj(raw) ? raw : ({} as Partial<SlideDeck>);
+  return { ...emptyDeck("slides.pdf"), ...rest, version: 1, markups: tidyMarkups(raw?.markups) };
 }
 
 export function loadSlidesPdf(vault: Vault, id: string) {
@@ -384,7 +412,7 @@ export async function putSlides(vault: Vault, id: string, fileName: string, pdf:
     const prev = await loadDeck(vault, id);
     await vault.writeBinary(slidesPdfPath(id), pdf);
     if (original) await vault.writeBinary(slidesSourcePath(id), original);
-    const deck: SlideDeck = { ...emptyDeck(fileName, original ? "pptx" : undefined), used: prev?.used ?? {}, markups: prev?.markups ?? [] };
+    const deck: SlideDeck = { ...emptyDeck(fileName, original ? "pptx" : undefined), markups: prev?.markups ?? [] };
     await vault.writeText(slidesDataPath(id), JSON.stringify(deck, null, 2));
     return deck;
   });

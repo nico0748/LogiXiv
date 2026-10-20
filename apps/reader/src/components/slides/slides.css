@@ -237,3 +237,23 @@
 }
 /* 消したあとの「元に戻す」の知らせ。画面全体ではなく分割の中の下に出す（この画面だけを全画面にしても見えるように） */
 .app .sv-stage .snackbar.sv-snack { position: absolute; bottom: 24px; z-index: 20; max-width: min(560px, calc(100% - 32px)); }
+
+/* 選んでいる四角の大きさを直すつまみ。四角（z-index 3）より上、描く層（6）より下に置く */
+.app .rz-layer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+.app .rz { position: absolute; }
+.app .rz-h {
+  position: absolute; width: 10px; height: 10px; translate: -50% -50%; pointer-events: auto; touch-action: none;
+  background: #fff; border: 2px solid var(--g); border-radius: 2px; box-shadow: 0 0 0 1px rgb(0 0 0 / .25);
+}
+.app .rz-h:focus-visible { outline: 2px solid var(--md-sys-color-secondary); outline-offset: 2px; }
+.app .rz-nw { left: 0; top: 0; cursor: nwse-resize; }
+.app .rz-n { left: 50%; top: 0; cursor: ns-resize; }
+.app .rz-ne { left: 100%; top: 0; cursor: nesw-resize; }
+.app .rz-e { left: 100%; top: 50%; cursor: ew-resize; }
+.app .rz-se { left: 100%; top: 100%; cursor: nwse-resize; }
+.app .rz-s { left: 50%; top: 100%; cursor: ns-resize; }
+.app .rz-sw { left: 0; top: 100%; cursor: nesw-resize; }
+.app .rz-w { left: 0; top: 50%; cursor: ew-resize; }
+@media (forced-colors: active) {
+  .app .rz-h { forced-color-adjust: none; background: Canvas; border-color: CanvasText; }
+}

@@ -218,7 +218,7 @@ test("MCP: 文字か範囲でスライドを囲み、名前と色が自動で決
   const b = await tool("add_slide_markup", { paper: id, slide_page: 2, rect: { x: 0.5, y: 0.5, w: 0.3, h: 0.3 }, memo: "図の説明" });
   assert.equal(b.markup, "Markup-02.02");
   const deck = JSON.parse(fs.readFileSync(path.join(data, "papers", id, "slides.json"), "utf8"));
-  assert.equal(deck.used["2"], 2);
+  assert.equal(deck.used, undefined);
   assert.equal(deck.markups.find((m: { id: string }) => m.id === b.id).memo, "図の説明");
   await assert.rejects(tool("add_slide_markup", { paper: id, slide_page: 3, rect: { x: 0, y: 0, w: 0.1, h: 0.1 } }), /スライドは 2 ページです/);
   await assert.rejects(tool("add_slide_markup", { paper: id, slide_page: 1 }), /どちらか一方/);
@@ -258,9 +258,10 @@ test("MCP: グループを消すとリンクも消え、消したものを丸ご
   assert.ok(!g.markups.some((m: { name: string }) => m.name === "Markup-02.02"));
   const note = fs.readFileSync(path.join(data, "papers", id, "note.md"), "utf8");
   assert.doesNotMatch(note, /Markup-02\.02/);
-  // 番号は使い直さない
-  assert.equal((await tool("add_slide_markup", { paper: id, slide_page: 2, rect: { x: 0.1, y: 0.6, w: 0.2, h: 0.2 } })).markup, "Markup-02.03");
   await assert.rejects(tool("delete_slide_markup", { paper: id, markup: "Markup-02.02" }), /グループが見つかりません/);
+  // 空いた番号は、次に作るグループが使う
+  const again = await tool("add_slide_markup", { paper: id, slide_page: 2, rect: { x: 0.1, y: 0.6, w: 0.2, h: 0.2 } });
+  assert.equal(again.markup, "Markup-02.02");
 });
 
 test("MCP: 消したグループを restore_slide_markup で同じ名前のまま戻す", async () => {

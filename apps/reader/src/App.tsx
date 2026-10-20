@@ -701,6 +701,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
           ) : view === "slides" && current ? (
             <SlidesView
               slides={slides}
+              paperId={current}
               paperPdf={pdf}
               active={markupActive}
               setActive={setMarkupActive}
