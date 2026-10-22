@@ -1953,6 +1953,8 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
   const firstPageLines = lines
     .filter((line) => line.page === 1 && line.text.trim().length > 0)
     .sort((a, b) => a.y - b.y || a.left - b.left);
+  /** 段ごとの本文の始まり（文章の行で見つけたもの）。ほかの段の本文で、この段の前付を切らない */
+  const colStart = new Map<number, number>();
   let bodyStartY = Infinity;
   {
     const byCol = new Map<number, Line[]>();
@@ -1989,7 +1991,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         // 文章の行が行送りどおりに 2 行続けば段落（見出しの無い要旨）
         const runs = next !== undefined && next.y - line.y <= Math.max(line.height, next.height) * 2 && proseish(next.text);
         if (closes || runs) {
-          bodyStartY = Math.min(bodyStartY, line.y);
+          colStart.set(line.column, line.y);
           break;
         }
       }
@@ -2014,8 +2016,10 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       else byCol.set(line.column, [line]);
     }
     for (const [column, col] of byCol) {
-      let i = col.findIndex((line) => line.y >= bodyStartY - 0.5);
-      if (i <= 0) continue;
+      const startY = Math.min(bodyStartY, colStart.get(column) ?? Infinity);
+      let i = col.findIndex((line) => line.y >= startY - 0.5);
+      // 見出しの行からは上へたどらない（その上は前付）
+      if (i <= 0 || cutsFrontMatter(col[i]!, bodyHeight)) continue;
       while (i > 0) {
         const above = col[i - 1]!;
         const here = col[i]!;
@@ -2028,11 +2032,11 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         if (gap > limit || above.height > bodyHeight * 1.15) break;
         i--;
       }
-      bandEnd.set(column, Math.min(bodyStartY, col[i]!.y));
+      bandEnd.set(column, Math.min(startY, col[i]!.y));
     }
   }
   const inFrontBand = (line: Line): boolean =>
-    Number.isFinite(bodyStartY) && line.page === 1 && line.y < (bandEnd.get(line.column) ?? bodyStartY) - 0.5;
+    Number.isFinite(bodyStartY) && line.page === 1 && line.y < (bandEnd.get(line.column) ?? Math.min(bodyStartY, colStart.get(line.column) ?? Infinity)) - 0.5;
 
   const frontMatterLines = new Set<number>(titleLines);
   for (const line of firstPageLines) {
@@ -2656,10 +2660,13 @@ function titleBlock(firstPage: readonly Line[], body: number): Line[] {
    * （表題の無い抜き刷り・付録だけの PDF の `Preliminaries and Notation`）。
    */
   const last = block[block.length - 1]!;
-  const next = sorted.find((line) => line.y > last.y + 0.5 && !block.includes(line));
+  // 表題の真下（横に重なる行）だけを見る。隣の段の本文は表題の下にあっても関係がない
+  const overlaps = (line: Line) => line.left < last.right && line.right > last.left;
+  const below = sorted.filter((line) => line.y > last.y + 0.5 && !block.includes(line) && overlaps(line));
+  const next = below[0];
   // 本文と同じ大きさの文章に限る（大きな字のリード文が続く雑誌の体裁では、上の行は表題のまま）
   if (next && next.y - last.y <= largest * 2.5 && proseish(next.text) && next.height <= body * 1.1) {
-    const after = sorted[sorted.indexOf(next) + 1];
+    const after = below[1];
     if (after && proseish(after.text)) return [];
   }
   return block;
