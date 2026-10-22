@@ -1174,7 +1174,7 @@ function romanValue(numeral: string): number | null {
  * `Index Terms—…`、`Keywords: …`）。IEEE・Springer の体裁では要旨の見出しが独立した行にならない。
  * 前付の終わりの目印に使う。
  */
-const RUN_IN_ABSTRACT = /^(?:abstract|index terms|keywords|key words)\s*(?:[—–:.]|-\s)/i;
+const RUN_IN_ABSTRACT = /^(?:(?:abstract|index terms|keywords|key words)\s*(?:[—–:.]|-\s)|(?:概要|要旨|あらまし)[\s　:：])/i;
 
 /**
  * 見出しの語だけを取り出す（番号と約物を落とす）。
@@ -2044,14 +2044,15 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     frontMatterLines.add(line.index);
   }
   /**
-   * ACM の書誌（`ACM Reference Format:` から始まる段落）。表題と著者をもう一度並べた引用の書式で、
+   * ACM の書誌（`ACM Reference Format:` から始まる段落）と分類（`CCS CONCEPTS` から始まる、分類語とキーワード）。
+   * 書誌は表題と著者をもう一度並べた引用の書式で、
    * 要旨の後ろに置かれるので前付の範囲には入らないが、訳す本文ではない。
    * 落とさないと表題が本文の 1 文として出る。次の見出しまでを前付とする。
    */
   {
     const ordered = lines.filter((line) => line.page <= 2).sort((a, b) => a.index - b.index);
-    const at = ordered.findIndex((line) => /^ACM Reference Format\b/i.test(line.text.trim()));
-    if (at >= 0) {
+    const starts = ordered.flatMap((line, k) => (/^(?:ACM Reference Format\b|CCS CONCEPTS$)/i.test(line.text.trim()) ? [k] : []));
+    for (const at of starts) {
       for (let i = at; i < ordered.length; i++) {
         const line = ordered[i]!;
         if (i > at && (cutsFrontMatter(line, bodyHeight) || line.column !== ordered[at]!.column || line.page !== ordered[at]!.page)) break;
@@ -2249,6 +2250,9 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
         !(KNOWN_HEADINGS.has(bareHeading(previous.text)) || headingNumber(previous.text) !== null)
       )
         score -= 1;
+      // 行を升目に置く和文の体裁（jsarticle）は見出しの上を空けない。連番で、本文より少し大きく、
+      // 直前の段落が文として閉じていれば見出し（実測: `2.1 ヘブ学習` が本文に落ちていた）
+      if (score === 1 && monotonic.has(line.index) && line.height > bodyHeight * 1.05 && previous && SENTENCE_END.test(previous.text)) score += 1;
       if (score >= 2) return { ...line, reachesRight: reachesRight(line), role: 'heading' as const };
     }
 
@@ -2582,6 +2586,16 @@ function proseish(text: string): boolean {
   return FUNCTION_WORDS.test(text) && (text.match(/\b\p{Ll}{2,}\b/gu) ?? []).length >= 4;
 }
 
+/**
+ * 副題らしい行か。著者名の行（`Alice CarterBob DylanChen Li`、acmart では 12pt で表題のすぐ下）を
+ * 副題と取り違えないよう、小文字の語（人名の前置詞を除く）か和文の語があることを求める。
+ */
+function looksLikeSubtitle(text: string): boolean {
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]{4,}/u.test(text)) return true;
+  const lower = (text.match(/\b\p{Ll}{2,}\b/gu) ?? []).filter((w) => !/^(?:and|de|van|von|der|da|di|del|la|le|du|dos)$/.test(w));
+  return lower.length >= 1;
+}
+
 function titleBlock(firstPage: readonly Line[], body: number): Line[] {
   if (body <= 0) return [];
   const sorted = [...firstPage].filter((line) => line.text.trim().length > 0).sort((a, b) => a.y - b.y || a.left - b.left);
@@ -2627,7 +2641,9 @@ function titleBlock(firstPage: readonly Line[], body: number): Line[] {
       line.y - last.y <= largest * 1.8 &&
       subtitleLines < 2 &&
       !proseish(line.text) &&
-      !/[,;、]$/.test(line.text.trim())
+      !/[,;、]$/.test(line.text.trim()) &&
+      (!subtitle || Math.abs(line.height - last.height) < 0.5) &&
+      looksLikeSubtitle(line.text)
     ) {
       block.push(line);
       subtitle = true;
@@ -2690,7 +2706,8 @@ export function guessTitleFromChunks(chunks: TextChunk[]): string | null {
   // 和文の行の折り返しは空白なしで繋ぐ（`…を用い た時系列…` にしない）
   const joined = parts.reduce((acc, part) => (acc && /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]$/u.test(acc) && /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(part) ? acc + part : acc ? `${acc} ${part}` : part), '');
   // 表題の脚注記号（llncs の `\thanks` が付ける ⋆ など）は表題の一部ではない
-  const title = joined.replace(/\s+/g, ' ').replace(/[\s⋆∗*†‡§¶]+$/u, '').trim();
+  // xelatex の全角ダッシュは打ち消し線の結合文字（U+0336）として取れることがある
+  const title = joined.replace(/[\u0335\u0336]/g, '').replace(/\s+/g, ' ').replace(/[\s⋆∗*†‡§¶\p{M}]+$/u, '').trim();
   // 文字の取れない PDF で日付や番号だけが残ったもの（`2026 10 10`）は表題にしない
   if ((title.match(/\p{L}/gu) ?? []).length < 4) return null;
   // 短すぎるもの（柱やページ番号）と、長すぎるもの（表題ではない何か）は使わない。
