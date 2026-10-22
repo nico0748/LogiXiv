@@ -1145,7 +1145,9 @@ function romanHeading(text: string): number | null {
   // 語頭大文字は 1 語だと人名（`V. Kumar`）と区別が付かないので、2 語以上か既知の見出し語に限る。
   if (/\p{Ll}/u.test(rest)) {
     const words = rest.split(/\s+/);
-    const titleCase = words.every((w) => /^[\p{Lu}\d]/u.test(w) || /^(?:and|or|of|for|the|in|on|with|to|a|an|via|by)$/.test(w));
+    const small = /^(?:and|or|of|for|the|in|on|with|to|a|an|via|by)$/i;
+    // 見出しの機能語は小文字（`Proposed Method and Results`）。`V. Kumar And Raj Singh` のように大文字なら人名の並び
+    const titleCase = words.every((w, k) => (small.test(w) ? k > 0 && w === w.toLowerCase() : /^[\p{Lu}\d]/u.test(w)));
     if (!titleCase || (words.length < 2 && !KNOWN_HEADINGS.has(rest.toLowerCase()))) return null;
   }
   const value = romanValue(match[1]!);
@@ -1929,7 +1931,11 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
    * 範囲とは別に必ず落とす。
    */
   const titleLines = new Set<number>(
-    titleBlock(lines.filter((line) => line.page === 1 && !edgeCandidate.has(line.index)), bodyHeight).map((line) => line.index),
+    titleBlock(
+      // 外すのは複数ページで繰り返す柱だけ。表題はページの天にあるので、端の帯の行をすべて外すと表題が見えなくなる
+      lines.filter((line) => line.page === 1 && !(edgeCandidate.has(line.index) && (repeated.get(line.text.replace(/\d+/g, '#'))?.size ?? 0) >= 2)),
+      bodyHeight,
+    ).map((line) => line.index),
   );
 
   /**
@@ -1990,7 +1996,43 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
     }
   }
   /** 1 ページ目の、本文が始まるより上にある行か。 */
-  const inFrontBand = (line: Line): boolean => Number.isFinite(bodyStartY) && line.page === 1 && line.y < bodyStartY - 0.5;
+  /**
+   * 段ごとの前付の下端。段の中で本文が bodyStartY より上から始まっているなら、そこまで引き上げる。
+   *
+   * bodyStartY はページ全体で 1 つなので、左の段の見出しで決まった高さが右の段にもそのまま当たる。
+   * 右の段が対話・箇条書き・引用のような「文章の行の手掛かり」の無い本文で始まっていると、
+   * それが前付として丸ごと落ちていた。bodyStartY より下へ行送りどおりに続いている行のかたまりは、
+   * 上へたどって、かたまりの頭からを本文とみなす。
+   */
+  const bandEnd = new Map<number, number>();
+  if (Number.isFinite(bodyStartY)) {
+    const byCol = new Map<number, Line[]>();
+    for (const line of firstPageLines) {
+      if (titleLines.has(line.index)) continue;
+      const list = byCol.get(line.column);
+      if (list) list.push(line);
+      else byCol.set(line.column, [line]);
+    }
+    for (const [column, col] of byCol) {
+      let i = col.findIndex((line) => line.y >= bodyStartY - 0.5);
+      if (i <= 0) continue;
+      while (i > 0) {
+        const above = col[i - 1]!;
+        const here = col[i]!;
+        const gap = here.y - above.y;
+        // 行送りどおりに続き、字の大きさも本文並みなら同じかたまり。段の左端にそろった行（箇条書き・対話）は
+        // 段落の間の空きを挟んでも本文のうち。前付（著者・所属）は中央に寄せて組まれるので左端にはそろわない
+        const left = columnLeft.get(`1:${column}`);
+        const flush = left !== undefined && Math.abs(above.left - left) <= 15;
+        const limit = Math.max(above.height, here.height) * (flush ? 3 : 1.8);
+        if (gap > limit || above.height > bodyHeight * 1.15) break;
+        i--;
+      }
+      bandEnd.set(column, Math.min(bodyStartY, col[i]!.y));
+    }
+  }
+  const inFrontBand = (line: Line): boolean =>
+    Number.isFinite(bodyStartY) && line.page === 1 && line.y < (bandEnd.get(line.column) ?? bodyStartY) - 0.5;
 
   const frontMatterLines = new Set<number>(titleLines);
   for (const line of firstPageLines) {
@@ -2550,7 +2592,12 @@ function titleBlock(firstPage: readonly Line[], body: number): Line[] {
   }
   // 大きさの基準にするのは、語として読める行だけ。図のラベル（`GPT-4`）やロゴの 1 語が
   // 表題より大きく組まれていると、表題が「いちばん大きな字」の 0.9 倍に届かず取りこぼす。
-  const wordy = front.filter((line) => (line.text.match(/\p{L}/gu) ?? []).length >= 8 && /\S\s+\S/.test(line.text.trim()));
+  const wordy = front.filter(
+    (line) =>
+      ((line.text.match(/\p{L}/gu) ?? []).length >= 8 && /\S\s+\S/.test(line.text.trim())) ||
+      // 和文の表題は語の間に空白が無い
+      (line.text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu) ?? []).length >= 6,
+  );
   if (wordy.length === 0) return [];
   const largest = maxOf(wordy.map((line) => line.height));
   if (largest < body * 1.15) return [];
@@ -2558,6 +2605,7 @@ function titleBlock(firstPage: readonly Line[], body: number): Line[] {
   const TOLERANCE = 0.9;
   const block: Line[] = [];
   let subtitle = false;
+  let subtitleLines = 0;
   for (const line of front) {
     const big = line.height >= largest * TOLERANCE;
     if (block.length === 0) {
@@ -2572,11 +2620,19 @@ function titleBlock(firstPage: readonly Line[], body: number): Line[] {
     // 行送りが大きく空いたら、そこから先は表題ではない（著者名・要旨）
     if (line.y - last.y > largest * 2.2) break;
     if (big && !subtitle) block.push(line);
-    // 副題（表題より小さいが本文よりはっきり大きい字で、表題のすぐ下に続く行）
-    else if (line.height >= body * 1.25 && line.y - last.y <= largest * 1.8) {
+    // 副題（表題より小さいが本文よりはっきり大きい字で、表題のすぐ下に続く行）。2 行まで。
+    // 文章の行（大きな字のリード文）や読点で続く行は副題ではない
+    else if (
+      line.height >= body * 1.25 &&
+      line.y - last.y <= largest * 1.8 &&
+      subtitleLines < 2 &&
+      !proseish(line.text) &&
+      !/[,;、]$/.test(line.text.trim())
+    ) {
       block.push(line);
       subtitle = true;
-    }
+      subtitleLines++;
+    } else if (subtitle && line.height >= body * 1.25) break;
   }
   if (block.length === 0) return [];
   /**
@@ -2585,7 +2641,8 @@ function titleBlock(firstPage: readonly Line[], body: number): Line[] {
    */
   const last = block[block.length - 1]!;
   const next = sorted.find((line) => line.y > last.y + 0.5 && !block.includes(line));
-  if (next && next.y - last.y <= largest * 2.5 && proseish(next.text) && next.height < largest * TOLERANCE) {
+  // 本文と同じ大きさの文章に限る（大きな字のリード文が続く雑誌の体裁では、上の行は表題のまま）
+  if (next && next.y - last.y <= largest * 2.5 && proseish(next.text) && next.height <= body * 1.1) {
     const after = sorted[sorted.indexOf(next) + 1];
     if (after && proseish(after.text)) return [];
   }

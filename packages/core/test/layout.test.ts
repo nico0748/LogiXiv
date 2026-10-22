@@ -314,3 +314,36 @@ test('疑問符で終わる表題と副題を表題として拾い、表題の�
   const { sections } = buildSentencesFromChunks(noTitle, [{ page: 1, width: 595, height: 842 }]);
   assert.deepEqual(sections.map((s) => s.title), ['Preliminaries and Notation']);
 });
+
+test('2 段組で右の段が対話や箇条書きで始まっても、前付として落とさない', () => {
+  const pad = (t: string) => t.padEnd(48, ' ').slice(0, 48);
+  const W = [
+    'The method we study here is simple and it works',
+    'well on many of the long inputs that we tried and',
+    'in this section we describe the setting in which',
+    'the method is applied to the data we collected.',
+  ];
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'Block Sparse Attention for Long Documents', x: 120, y: 40, w: 360, h: 18 },
+    { page: 1, text: 'Jane Q. Doe and Alan Roe', x: 220, y: 66, w: 120, h: 11 },
+    line(1, 50, 260, '1 Introduction', 10),
+    ...Array.from({ length: 30 }, (_, i) => line(1, 50, 280 + i * 13, pad(W[i % 4]!))),
+    line(1, 320, 100, 'User: Translate this.'),
+    line(1, 320, 113, 'Model: Sure.'),
+    line(1, 320, 126, 'User: Thanks!'),
+    ...Array.from({ length: 40 }, (_, i) => line(1, 320, 150 + i * 13, pad(W[i % 4]!))),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, [{ page: 1, width: 595, height: 842 }]);
+  const texts = sentences.map((s) => s.text).join(' | ');
+  assert.ok(/Translate this/.test(texts), texts.slice(0, 300));
+  assert.ok(!/Jane Q\. Doe/.test(texts), texts.slice(0, 300));
+});
+
+test('和文の表題（語の間に空白が無い）も表題として拾う', () => {
+  const chunks: TextChunk[] = [
+    { page: 1, text: '長い文書のための疎な注意機構', x: 100, y: 60, w: 252, h: 18 },
+    { page: 1, text: '山田 太郎', x: 220, y: 90, w: 50, h: 11 },
+    ...Array.from({ length: 12 }, (_, i) => ({ page: 1, text: 'これは本文の行であり、提案する手法の説明を続けていくための', x: 60, y: 120 + i * 13, w: 290, h: 10 })),
+  ];
+  assert.equal(guessTitleFromChunks(chunks), '長い文書のための疎な注意機構');
+});
