@@ -35,8 +35,8 @@ import {
   normalizeRect,
   overlapRatio,
 } from "../../lib/slides.ts";
-import { useSentenceFocus } from "../../lib/sentenceFocus.ts";
-import { type SentenceMark, marksByPage, sentenceAnchor } from "../../lib/sentencesView.ts";
+import { setSentenceFocus, useSentenceFocus } from "../../lib/sentenceFocus.ts";
+import { type SentenceMark, hitTest, marksByPage, sentenceAnchor } from "../../lib/sentencesView.ts";
 import { Snackbar, type Snack } from "../Snackbar.tsx";
 import { SentenceMarkLayer } from "../sentences/SentenceMarks.tsx";
 import { useSentences } from "../sentences/useSentences.ts";
@@ -245,6 +245,26 @@ function Split({
     }
     return by;
   }, [sdoc, activeSentence]);
+  // 論文の面で文をクリックしたら、その文を選ぶ（補足情報の対訳がそのカードまで動く）。
+  // 枠は選んだ文の分しか描かないので、当たりはすべての文の枠から座標で取る
+  const allMarks = useMemo(() => (sdoc ? marksByPage(sdoc) : null), [sdoc]);
+  const onPaperClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!allMarks || !paperId) return;
+    if (selMenu) return; // 選択のメニューを閉じるためのクリック
+    if (active && paperTool !== "text") return; // 囲んでいる途中
+    const t = e.target as HTMLElement;
+    if (t.closest("button, a, .sel-menu, .ln-pin")) return;
+    if (e.detail > 1) return; // 語を選ぶダブルクリック
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return; // 文字を選んだだけ（リンクする途中）のときは文を選ばない
+    const pageEl = t.closest<HTMLElement>(".pp-page");
+    const page = Number(pageEl?.dataset.page);
+    const marks = page ? allMarks.get(page) : undefined;
+    if (!pageEl || !marks) return;
+    const r = pageEl.getBoundingClientRect();
+    const m = hitTest(marks, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+    if (m) setSentenceFocus(paperId, m.id, m.hash, "pdf");
+  };
 
   // --- 線 -------------------------------------------------------------------
   const frame = useRef(0);
@@ -356,7 +376,7 @@ function Split({
   }, [focus?.nonce]);
   // 補足情報の対訳で文を選んだら、論文の面をその文まで動かす（PdfView と同じく、PDF の上で選んだときは動かさない）
   useEffect(() => {
-    if (!sdoc || !paperId || sFocus.paperId !== paperId || !sFocus.id || sFocus.origin === "pdf") return;
+    if (!sdoc || !paperId || sFocus.paperId !== paperId || !sFocus.id || sFocus.origin === "pdf" || sFocus.origin === "auto") return;
     const at = sentenceAnchor(sdoc, sFocus.id);
     if (at) paperRef.current?.goTo(at.page, at.y, sFocus.origin === "panel");
     // 選び直したとき（nonce）だけ動かす。訳が届いて文書が変わっただけでは動かさない
@@ -911,6 +931,7 @@ function Split({
                 onPage={setPaperPage}
                 onLoaded={setPaperCount}
                 onMouseUp={onPaperMouseUp}
+                onClick={onPaperClick}
                 label="論文のページ"
               >
                 {selMenu && activeMarkup && (

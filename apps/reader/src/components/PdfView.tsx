@@ -123,7 +123,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
     const gone = prev.structure.sentences.find((x) => x.id === focus.id);
     const next = gone && successorSentence(gone, now);
     // PDF は既にその位置を見せているので動かさず、対訳タブだけ後継のカードへ寄せる
-    if (next) setSentenceFocus(paperId, next.id, next.hash, "pdf");
+    if (next) setSentenceFocus(paperId, next.id, next.hash, "auto");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sdoc]);
 
@@ -247,7 +247,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
 
   // 対訳タブ（やキー操作）で選んだ文まで動かす。PDF 上で選んだときは動かさない。
   useEffect(() => {
-    if (!sdoc || !paperId || focus.paperId !== paperId || !focus.id || focus.origin === "pdf") return;
+    if (!sdoc || !paperId || focus.paperId !== paperId || !focus.id || focus.origin === "pdf" || focus.origin === "auto") return;
     const at = sentenceAnchor(sdoc, focus.id);
     if (at) goTo(at.page, at.y, focus.origin === "panel", 120);
     // 選び直したとき（nonce）だけ動かす。訳が届いて文書が変わっただけでは動かさない。
@@ -591,7 +591,8 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
               highlights={highlights.filter((h) => h.page === n)}
               activeId={activeId}
               onHighlightClick={onHighlightClick}
-              marks={marksVisible ? (markMap?.get(n) ?? NO_MARKS) : NO_MARKS}
+              marks={markMap?.get(n) ?? NO_MARKS}
+              showMarks={marksVisible}
               activeSentence={activeSentence}
               onPickSentence={pickSentence}
               flash={flash?.page === n ? flash : null}
@@ -637,6 +638,7 @@ function PageView({
   activeId,
   onHighlightClick,
   marks,
+  showMarks,
   activeSentence,
   onPickSentence,
   flash,
@@ -649,7 +651,10 @@ function PageView({
   highlights: Highlight[];
   activeId: string | null;
   onHighlightClick: (id: string) => void;
+  /** このページの文の枠。枠を隠していてもクリックの当たりには使う（論文の文から対訳のカードへ移れるように） */
   marks: SentenceMark[];
+  /** 文の枠をすべて描くか。false でも選んだ文の枠だけは描く */
+  showMarks: boolean;
   activeSentence: string | null;
   onPickSentence: (m: SentenceMark) => void;
   /** このページで光らせる場所 */
@@ -665,6 +670,8 @@ function PageView({
   const [hover, setHover] = useState<string | null>(null);
   // 選択中の文がこのページに無ければ null を渡し、他のページの枠を描き直さない
   const pageActive = activeSentence && marks.some((m) => m.id === activeSentence) ? activeSentence : null;
+  // 枠を隠しているときは、選んだ文の枠だけを描く
+  const drawn = useMemo(() => (showMarks ? marks : pageActive ? marks.filter((m) => m.id === pageActive) : NO_MARKS), [showMarks, marks, pageActive]);
 
   // 文の枠はテキスト層の下にあるので、当たりは座標で取る（文字の選択を邪魔しないため）
   const markAt = (e: React.MouseEvent): SentenceMark | null => {
@@ -673,12 +680,19 @@ function PageView({
     return hitTest(marks, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
   };
   const onMove = (e: React.MouseEvent) => {
-    if (!marks.length || e.buttons) return;
+    if (!showMarks || !marks.length || e.buttons) return;
     const id = markAt(e)?.id ?? null;
     if (id !== hover) setHover(id);
   };
+  // 押した時点で文字が選ばれていたら、そのクリックは選択を外すためのもの。文は選ばない
+  const hadSelection = useRef(false);
+  const onMouseDown = () => {
+    const sel = window.getSelection();
+    hadSelection.current = !!sel && !sel.isCollapsed;
+  };
   const onClick = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("button, .sel-menu")) return;
+    if (hadSelection.current || e.detail > 1) return; // 選択を外すクリックと、語を選ぶダブルクリック
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) return; // 文字を選んだだけのときは文を選ばない
     const m = markAt(e);
@@ -759,6 +773,7 @@ function PageView({
       style={{ width: w, height: h, ["--total-scale-factor" as string]: scale }}
       onMouseMove={onMove}
       onMouseLeave={() => hover && setHover(null)}
+      onMouseDown={onMouseDown}
       onClick={onClick}
       data-sl-hover={hover ? "" : undefined}
     >
@@ -774,7 +789,7 @@ function PageView({
           )),
         )}
       </div>
-      {marks.length > 0 && <SentenceMarkLayer marks={marks} activeId={pageActive} hoverId={hover} />}
+      {drawn.length > 0 && <SentenceMarkLayer marks={drawn} activeId={pageActive} hoverId={showMarks ? hover : null} />}
       {/* 選んでいる範囲（グリフに合わせた矩形）。中身は PdfView の updatePreview が直接描く */}
       <div className="sel-preview" aria-hidden="true" />
       <div className="textLayer" ref={textRef} />

@@ -151,6 +151,7 @@ function Ready({ paperId, doc, act, flash, equations, onOpenEquation }: {
   const marks = useSentenceMarksVisible();
   const rootRef = useRef<HTMLDivElement>(null);
   const pending = useRef<{ id: string; smooth: boolean } | null>(null);
+  const settle = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
   const notes = useMemo(() => notesByHash(doc), [doc]);
   const filter = useMemo(() => ({ query, onlyUntranslated }), [query, onlyUntranslated]);
@@ -184,13 +185,29 @@ function Ready({ paperId, doc, act, flash, equations, onOpenEquation }: {
     const root = rootRef.current;
     if (!p || !root) return;
     const el = root.querySelector<HTMLElement>(`[data-sl-card="${CSS.escape(p.id)}"]`);
-    if (!el) return;
+    // 右サイドバーが閉じている（描かれていない）間は待つ。開いたときにそのカードへ動く
+    if (!el || !el.offsetParent) return;
     pending.current = null;
-    el.scrollIntoView({ block: p.smooth ? "center" : "nearest", behavior: p.smooth ? "smooth" : "auto" });
-    // 画面外のカードは高さが見積もりなので、落ち着いてから測り直す
-    const t = setTimeout(() => el.scrollIntoView({ block: "nearest" }), 450);
-    return () => clearTimeout(t);
+    const block = p.smooth ? "center" : "nearest";
+    scrollWithin(el, block, p.smooth);
+    // 画面外のカードは高さが見積もり（content-visibility）なので、描かれると上のカードの高さが変わって
+    // 目当てのカードがずれる。しばらくの間、見えていなければ寄せ直す。
+    // 描き直しのたびに止めないよう、タイマーは ref に持つ（次の文を選んだときと、外れたときに止める）
+    if (settle.current) clearInterval(settle.current);
+    // 読み手が自分でスクロールし始めたら、寄せ直しはやめる
+    const stop = () => {
+      clearInterval(settle.current);
+      settle.current = undefined;
+    };
+    root.addEventListener("wheel", stop, { once: true, passive: true });
+    root.addEventListener("touchstart", stop, { once: true, passive: true });
+    let tries = 0;
+    settle.current = setInterval(() => {
+      if (++tries > 12 || !el.isConnected) return stop();
+      if (tries > 3 || !p.smooth) scrollWithin(el, block, false, true);
+    }, 150);
   });
+  useEffect(() => () => clearInterval(settle.current), []);
 
   // j/k で 1 文ずつ、n で次の未訳へ。入力中は横取りしない。
   useEffect(() => {
@@ -353,3 +370,24 @@ function Ready({ paperId, doc, act, flash, equations, onOpenEquation }: {
 
 const NO_NOTES: never[] = [];
 
+
+/**
+ * カードを、それを包む縦のスクロール枠の中だけで見える位置へ動かす。
+ * scrollIntoView は祖先の枠をすべて動かすので、スライドの三面（横にめくる枠）では
+ * 補足情報の面が横に引き出され、スライドの面が勝手に隠れていた。
+ */
+function scrollWithin(el: HTMLElement, block: "center" | "nearest", smooth: boolean, onlyIfHidden = false): void {
+  let box = el.parentElement;
+  while (box && !/(auto|scroll)/.test(getComputedStyle(box).overflowY)) box = box.parentElement;
+  if (!box) return;
+  const r = el.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  if (onlyIfHidden && r.top >= b.top && r.bottom <= b.bottom) return;
+  const top = r.top - b.top + box.scrollTop;
+  let next: number;
+  if (block === "center") next = top - (box.clientHeight - r.height) / 2;
+  else if (r.top < b.top) next = top;
+  else if (r.bottom > b.bottom) next = top - box.clientHeight + r.height;
+  else return;
+  box.scrollTo({ top: Math.max(0, next), behavior: smooth ? "smooth" : "auto" });
+}

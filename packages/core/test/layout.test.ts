@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildLines, classifyLines, detectColumns } from '../src/layout.ts';
+import { buildLines, classifyLines, detectColumns, guessTitleFromChunks } from '../src/layout.ts';
 import { buildSentencesFromChunks, type TextChunk } from '../src/sentences.ts';
 
 /**
@@ -204,4 +204,146 @@ test('行の分類が buildLines の順序（ページ→段→行）を保つ',
     classified.map((l) => l.text.trim()),
     ['p1 left.', 'p1 right.', 'p2 left.', 'p2 right.'],
   );
+});
+
+/**
+ * IEEE 会議論文の 1 ページ目（IJCNN の実物を写したもの）。
+ * 表題が 2 行で、節見出しはローマ数字の小型大文字、要旨は `Abstract—` で段落に入る。
+ * ローマ数字を読めなかった頃は前付が決まらず、表題の 2 行目 `via Oja’s Plasticity` が
+ * 最初の節の名前になり、著者の所属が本文の文として並んでいた。
+ */
+function ieeeFirstPage(): TextChunk[] {
+  const body = (y: number, text: string, x = 50): TextChunk => ({ page: 1, text, x, y, w: 250, h: 9 });
+  return [
+    { page: 1, text: 'Sculpting Deep Attractors in Reservoir Networks', x: 64, y: 53, w: 484, h: 24 },
+    { page: 1, text: 'via Oja’s Plasticity', x: 209, y: 81, w: 186, h: 24 },
+    { page: 1, text: 'Yuji Kawai', x: 155, y: 122, w: 51, h: 11 },
+    { page: 1, text: 'Symbiotic Intelligent Systems Research Center,', x: 84, y: 135, w: 190, h: 10 },
+    { page: 1, text: 'The University of Osaka', x: 129, y: 148, w: 103, h: 10 },
+    { page: 1, text: 'Hiroshi Atsuta', x: 405, y: 122, w: 65, h: 11 },
+    { page: 1, text: 'Symbiotic Intelligent Systems Research Center,', x: 341, y: 135, w: 190, h: 10 },
+    { page: 1, text: 'The University of Osaka', x: 386, y: 148, w: 103, h: 10 },
+    body(200, 'Abstract—Recurrent neural networks are powerful tools for', 59),
+    body(210, 'learning and generating complex temporal dynamics. We'),
+    body(220, 'propose a novel learning method in this study.'),
+    body(240, 'Index Terms—reservoir computing, echo state networks', 59),
+    { page: 1, text: 'I. INTRODUCTION', x: 136, y: 270, w: 77, h: 10 },
+    body(290, 'Reservoir computing is a framework for training recurrent'),
+    body(300, 'networks and it has been studied by many groups.'),
+    body(200, 'The readout weights are trained while the recurrent', 320),
+    body(210, 'weights stay fixed in the classical formulation.', 320),
+    { page: 1, text: 'II. METHODS', x: 400, y: 240, w: 60, h: 10 },
+    { page: 1, text: 'A. FORCE learning', x: 320, y: 258, w: 83, h: 10 },
+    body(275, 'FORCE learning updates the readout with recursive least', 320),
+    body(285, 'squares so that the output error remains small.', 320),
+  ];
+}
+
+test('IEEE の 2 行の表題を前付として落とし、ローマ数字の節見出しを拾う', () => {
+  const { sentences, sections } = buildSentencesFromChunks(ieeeFirstPage(), [{ page: 1, width: 612, height: 792 }]);
+  const titles = sections.map((s) => s.title);
+  assert.ok(!titles.includes('via Oja’s Plasticity'), JSON.stringify(titles));
+  assert.deepEqual(titles, ['I. INTRODUCTION', 'II. METHODS', 'A. FORCE learning']);
+  const texts = sentences.map((s) => s.text).join(' | ');
+  assert.ok(!/Plasticity|Kawai|Atsuta|Symbiotic|University of Osaka/.test(texts), texts);
+  // 要旨は本文として残る
+  assert.ok(/Recurrent neural networks are powerful tools/.test(texts), texts);
+});
+
+/** 前付の後ろに置く、両端揃えで続く本文（段の幅いっぱい）。 */
+function prose(page: number, y0: number, x = 60, n = 6): TextChunk[] {
+  const text = [
+    'The method we study here is simple and it works well on many of the long inputs that we',
+    'tried, and in this section we describe the setting in which the method is applied to the',
+    'data. We then discuss how the results compare with the strong baselines from the earlier',
+    'work on this topic, and we also report the cost of running the method on large inputs.',
+  ];
+  return Array.from({ length: n }, (_, i) => ({ page, text: text[i % text.length]!, x, y: y0 + i * 13, w: 470, h: 10 }));
+}
+
+test('著者を左右に並べても、右の著者・所属と略語で終わる所属は本文にしない', () => {
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'Stable Unsupervised Feature Learning', x: 150, y: 50, w: 300, h: 20 },
+    { page: 1, text: 'Alice Johnson', x: 120, y: 90, w: 60, h: 11 },
+    { page: 1, text: 'Example Corp.', x: 120, y: 103, w: 60, h: 10 },
+    { page: 1, text: 'Bob Smith', x: 380, y: 90, w: 50, h: 11 },
+    { page: 1, text: 'Department of Physics', x: 380, y: 103, w: 100, h: 10 },
+    { page: 1, text: 'Tohoku University', x: 380, y: 116, w: 80, h: 10 },
+    { page: 1, text: 'Abstract', x: 280, y: 150, w: 40, h: 10 },
+    ...prose(1, 170),
+    { page: 1, text: '1 Introduction', x: 60, y: 260, w: 70, h: 12 },
+    ...prose(1, 280),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, [{ page: 1, width: 595, height: 842 }]);
+  const texts = sentences.map((s) => s.text).join(' | ');
+  assert.ok(!/Corp|Department|Tohoku|Johnson|Smith/.test(texts), texts);
+  assert.ok(texts.startsWith('The method we study here'), texts);
+});
+
+test('小さな字の番号で始まる所属（llncs）を節見出しにしない', () => {
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'Local Plasticity for Continual Learning', x: 150, y: 50, w: 300, h: 14 },
+    { page: 1, text: 'Alice Johnson and Bob Smith', x: 220, y: 80, w: 150, h: 10 },
+    { page: 1, text: '1 University of Somewhere, Tokyo, Japan', x: 200, y: 95, w: 190, h: 6 },
+    { page: 1, text: 'alice@example.edu', x: 250, y: 103, w: 90, h: 6 },
+    ...prose(1, 130),
+    { page: 1, text: '1 Introduction', x: 60, y: 230, w: 70, h: 12 },
+    ...prose(1, 250),
+  ];
+  const { sentences, sections } = buildSentencesFromChunks(chunks, [{ page: 1, width: 595, height: 842 }]);
+  assert.deepEqual(sections.map((s) => s.title), ['1 Introduction']);
+  assert.ok(!sentences.some((s) => /University|Johnson/.test(s.text)), JSON.stringify(sentences.map((s) => s.text).slice(0, 3)));
+});
+
+test('疑問符で終わる表題と副題を表題として拾い、表題の無いページの大きな見出しは見出しのまま', () => {
+  const question = [
+    { page: 1, text: 'Is Attention All You Need for Long Documents?', x: 120, y: 60, w: 380, h: 18 },
+    { page: 1, text: 'Jane Q. Doe and Alan Roe', x: 200, y: 90, w: 120, h: 11 },
+    ...prose(1, 130),
+  ];
+  assert.equal(guessTitleFromChunks(question), 'Is Attention All You Need for Long Documents?');
+  const subtitle = [
+    { page: 1, text: 'Block Sparse Attention', x: 180, y: 60, w: 230, h: 20 },
+    { page: 1, text: 'A Study of Long Document Models', x: 170, y: 88, w: 250, h: 14 },
+    { page: 1, text: 'Jane Q. Doe', x: 250, y: 120, w: 60, h: 11 },
+    ...prose(1, 160),
+  ];
+  assert.equal(guessTitleFromChunks(subtitle), 'Block Sparse Attention A Study of Long Document Models');
+  const noTitle = [{ page: 1, text: 'Preliminaries and Notation', x: 60, y: 60, w: 200, h: 14 }, ...prose(1, 85)];
+  assert.equal(guessTitleFromChunks(noTitle), null);
+  const { sections } = buildSentencesFromChunks(noTitle, [{ page: 1, width: 595, height: 842 }]);
+  assert.deepEqual(sections.map((s) => s.title), ['Preliminaries and Notation']);
+});
+
+test('2 段組で右の段が対話や箇条書きで始まっても、前付として落とさない', () => {
+  const pad = (t: string) => t.padEnd(48, ' ').slice(0, 48);
+  const W = [
+    'The method we study here is simple and it works',
+    'well on many of the long inputs that we tried and',
+    'in this section we describe the setting in which',
+    'the method is applied to the data we collected.',
+  ];
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'Block Sparse Attention for Long Documents', x: 120, y: 40, w: 360, h: 18 },
+    { page: 1, text: 'Jane Q. Doe and Alan Roe', x: 220, y: 66, w: 120, h: 11 },
+    line(1, 50, 260, '1 Introduction', 10),
+    ...Array.from({ length: 30 }, (_, i) => line(1, 50, 280 + i * 13, pad(W[i % 4]!))),
+    line(1, 320, 100, 'User: Translate this.'),
+    line(1, 320, 113, 'Model: Sure.'),
+    line(1, 320, 126, 'User: Thanks!'),
+    ...Array.from({ length: 40 }, (_, i) => line(1, 320, 150 + i * 13, pad(W[i % 4]!))),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, [{ page: 1, width: 595, height: 842 }]);
+  const texts = sentences.map((s) => s.text).join(' | ');
+  assert.ok(/Translate this/.test(texts), texts.slice(0, 300));
+  assert.ok(!/Jane Q\. Doe/.test(texts), texts.slice(0, 300));
+});
+
+test('和文の表題（語の間に空白が無い）も表題として拾う', () => {
+  const chunks: TextChunk[] = [
+    { page: 1, text: '長い文書のための疎な注意機構', x: 100, y: 60, w: 252, h: 18 },
+    { page: 1, text: '山田 太郎', x: 220, y: 90, w: 50, h: 11 },
+    ...Array.from({ length: 12 }, (_, i) => ({ page: 1, text: 'これは本文の行であり、提案する手法の説明を続けていくための', x: 60, y: 120 + i * 13, w: 290, h: 10 })),
+  ];
+  assert.equal(guessTitleFromChunks(chunks), '長い文書のための疎な注意機構');
 });

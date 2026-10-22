@@ -153,7 +153,7 @@ interface Extracted {
   metadataTitle: string | null;
 }
 
-async function extract(input: FallbackWorkerInput): Promise<Extracted> {
+export async function extract(input: FallbackWorkerInput): Promise<Extracted> {
   const require = createRequire(import.meta.url);
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   (pdfjs.GlobalWorkerOptions as { workerSrc: string }).workerSrc = pathToFileURL(
@@ -173,6 +173,11 @@ async function extract(input: FallbackWorkerInput): Promise<Extracted> {
     standardFontDataUrl: pathToFileURL(
       require.resolve('pdfjs-dist/package.json').replace(/package\.json$/, 'standard_fonts/'),
     ).href,
+    // 和文の PDF（platex + dvipdfmx、xelatex）は CID フォントを CMap で文字に戻す。
+    // CMap の置き場を渡さないと pdf.js は和文の字形をすべて捨て、本文も表題も空になる。
+    // Node の pdf.js は CMap をファイルとして読むので、URL ではなくファイルのパスで渡す（file:// だと読めずに黙って捨てる）
+    cMapUrl: require.resolve('pdfjs-dist/package.json').replace(/package\.json$/, 'cmaps/'),
+    cMapPacked: true,
   });
 
   const document = await task.promise;

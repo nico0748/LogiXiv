@@ -5,7 +5,8 @@
 
 import { useSyncExternalStore } from "react";
 
-export type FocusOrigin = "pdf" | "panel" | "keyboard";
+/** auto は利用者が選んだのではなく、結合・分割で消えた文の後継へ選び直したとき。 */
+export type FocusOrigin = "pdf" | "panel" | "keyboard" | "auto";
 
 export interface SentenceFocus {
   paperId: string | null;

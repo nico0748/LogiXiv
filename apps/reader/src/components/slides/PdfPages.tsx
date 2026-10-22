@@ -28,6 +28,7 @@ interface Props {
   onPage?: (page: number) => void;
   onLoaded?: (numPages: number) => void;
   onMouseUp?: (e: React.MouseEvent<HTMLDivElement>) => void;
+  onClick?: (e: React.MouseEvent<HTMLDivElement>) => void;
   className?: string;
   label: string;
   handle?: Ref<PdfPagesHandle>;
@@ -35,7 +36,7 @@ interface Props {
   children?: ReactNode;
 }
 
-export function PdfPages({ data, zoom, textLayer, overlay, onScroll, onLayout, onPage, onLoaded, onMouseUp, className, label, handle, children }: Props) {
+export function PdfPages({ data, zoom, textLayer, overlay, onScroll, onLayout, onPage, onLoaded, onMouseUp, onClick, className, label, handle, children }: Props) {
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [sizes, setSizes] = useState<Size[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -121,7 +122,7 @@ export function PdfPages({ data, zoom, textLayer, overlay, onScroll, onLayout, o
 
   const pages = useMemo(() => (sizes ? sizes.map((_, i) => i + 1) : []), [sizes]);
   return (
-    <div className={`pp-scroll ${className ?? ""}`} ref={scrollRef} onScroll={scrolled} onMouseUp={onMouseUp} aria-label={label}>
+    <div className={`pp-scroll ${className ?? ""}`} ref={scrollRef} onScroll={scrolled} onMouseUp={onMouseUp} onClick={onClick} aria-label={label}>
       {error && <p className="err-msg">PDF を開けませんでした。{error}</p>}
       {doc && sizes && pages.map((n) => <Page key={n} doc={doc} n={n} size={sizes[n - 1]} width={width * zoom} textLayer={!!textLayer} overlay={overlay?.(n)} root={scrollRef} />)}
       {children}
