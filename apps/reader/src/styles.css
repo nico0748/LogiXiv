@@ -795,13 +795,54 @@ dialog.wide { max-width: min(880px, calc(100vw - 32px)); }
 /* --- グラフ ------------------------------------------------------------ */
 .graph { flex: 1; min-height: 0; position: relative; background: var(--background-primary); }
 .graph svg { width: 100%; height: 100%; display: block; }
-.graph .edge { stroke: var(--background-modifier-border-hover); stroke-opacity: 0.9; }
-.graph .n-paper circle { fill: var(--interactive-accent); }
-.graph .n-term circle { fill: var(--md-sys-color-surface); stroke: var(--md-sys-color-on-surface-variant); stroke-width: 1.5; }
-.graph text { font-size: 12px; fill: var(--text-muted); paint-order: stroke; stroke: var(--background-primary); stroke-width: 3px; }
+.graph .edge { stroke: var(--background-modifier-border-hover); stroke-opacity: 0.9; stroke-width: calc(1px / var(--k, 1)); }
+.graph .n-paper circle:not(.hit) { fill: var(--interactive-accent); }
+.graph .n-term circle:not(.hit) { fill: var(--md-sys-color-surface); stroke: var(--md-sys-color-on-surface-variant); stroke-width: calc(1.5px / var(--k, 1)); }
+.graph text { font-size: calc(12px / var(--k, 1)); fill: var(--text-muted); paint-order: stroke; stroke: var(--background-primary); stroke-width: calc(3px / var(--k, 1)); }
 .graph .n-paper { cursor: pointer; }
 .graph .n-paper text { fill: var(--text-normal); font-weight: 600; }
-.graph .n-paper:hover circle { fill: var(--interactive-accent-hover); }
+.graph .n-paper:hover circle:not(.hit) { fill: var(--interactive-accent-hover); }
+.graph { outline: none; touch-action: none; cursor: grab; user-select: none; }
+.graph:active { cursor: grabbing; }
+.graph .n-term { cursor: pointer; }
+.graph circle.hit { fill: transparent; stroke: none; }
+.graph .n-term:hover circle:not(.hit) { stroke: var(--md-sys-color-primary); }
+.graph [data-node]:focus-visible { outline: none; }
+.graph [data-node]:focus-visible circle:not(.hit) { stroke: var(--md-sys-color-primary); stroke-width: calc(3px / var(--k, 1)); }
+.graph .is-selected circle:not(.hit) { stroke: var(--md-sys-color-primary); stroke-width: calc(3px / var(--k, 1)); }
+.graph .n-term.is-selected circle:not(.hit) { fill: var(--md-sys-color-primary-container); }
+.graph .n-term.is-selected text, .graph .n-paper.is-selected text { fill: var(--md-sys-color-on-surface); font-weight: 600; }
+.graph .is-dim { opacity: 0.18; }
+.graph .edge.is-lit { stroke: var(--md-sys-color-primary); stroke-opacity: 1; }
+.graph .n-paper, .graph .n-term, .graph .edge { transition: opacity .15s; }
+.graph-zoom {
+  position: absolute; right: 12px; bottom: 44px; display: flex; flex-direction: column; gap: 2px; padding: 3px;
+  background: var(--md-sys-color-surface-container); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--radius-m, 8px);
+}
+.graph-card {
+  position: absolute; right: 12px; top: 10px; width: min(340px, calc(100% - 24px)); max-height: calc(100% - 150px); overflow: auto;
+  padding: 12px 14px; cursor: auto; user-select: text;
+  background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--radius-m, 8px); box-shadow: var(--shadow-s);
+}
+.graph-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.graph-card h3 { margin: 0; font-size: var(--font-ui-medium, 15px); line-height: 1.35; }
+.graph-card-kind { font-size: var(--font-ui-smaller); color: var(--md-sys-color-on-surface-variant); }
+.graph-card-reading { font-size: var(--font-ui-smaller); color: var(--md-sys-color-on-surface-variant); }
+.graph-card-short { margin: 0 0 4px; font-weight: 600; }
+.graph-card-detail { margin: 0 0 4px; font-size: var(--font-ui-small); color: var(--md-sys-color-on-surface-variant); line-height: 1.6; }
+.graph-card-meaning + .graph-card-meaning { border-top: 1px solid var(--md-sys-color-outline-variant); padding-top: 8px; margin-top: 8px; }
+.graph-card-from { font-size: var(--font-ui-smaller); color: var(--md-sys-color-primary); }
+.graph-card-empty { margin: 0; font-size: var(--font-ui-small); color: var(--md-sys-color-on-surface-variant); }
+.graph-card-sub { margin: 12px 0 6px; font-size: var(--font-ui-smaller); color: var(--md-sys-color-on-surface-variant); }
+.graph-card-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.graph-card .chip {
+  padding: 2px 8px; font-size: var(--font-ui-smaller); border-radius: 999px; cursor: pointer;
+  background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); border: none;
+}
+.graph-card-papers { margin: 0; padding: 0; list-style: none; font-size: var(--font-ui-small); display: grid; gap: 4px; }
+.graph-card .link-btn { background: none; border: none; padding: 0; color: var(--md-sys-color-primary); cursor: pointer; text-align: left; font: inherit; }
+.graph-card .link-btn:hover { text-decoration: underline; }
 .graph-legend {
   position: absolute; left: 12px; top: 10px; font-size: var(--font-ui-smaller); color: var(--text-muted);
   background: var(--background-secondary); padding: 4px 8px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s);
