@@ -123,7 +123,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
     const gone = prev.structure.sentences.find((x) => x.id === focus.id);
     const next = gone && successorSentence(gone, now);
     // PDF は既にその位置を見せているので動かさず、対訳タブだけ後継のカードへ寄せる
-    if (next) setSentenceFocus(paperId, next.id, next.hash, "pdf");
+    if (next) setSentenceFocus(paperId, next.id, next.hash, "auto");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sdoc]);
 
@@ -247,7 +247,7 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
 
   // 対訳タブ（やキー操作）で選んだ文まで動かす。PDF 上で選んだときは動かさない。
   useEffect(() => {
-    if (!sdoc || !paperId || focus.paperId !== paperId || !focus.id || focus.origin === "pdf") return;
+    if (!sdoc || !paperId || focus.paperId !== paperId || !focus.id || focus.origin === "pdf" || focus.origin === "auto") return;
     const at = sentenceAnchor(sdoc, focus.id);
     if (at) goTo(at.page, at.y, focus.origin === "panel", 120);
     // 選び直したとき（nonce）だけ動かす。訳が届いて文書が変わっただけでは動かさない。
@@ -684,8 +684,15 @@ function PageView({
     const id = markAt(e)?.id ?? null;
     if (id !== hover) setHover(id);
   };
+  // 押した時点で文字が選ばれていたら、そのクリックは選択を外すためのもの。文は選ばない
+  const hadSelection = useRef(false);
+  const onMouseDown = () => {
+    const sel = window.getSelection();
+    hadSelection.current = !!sel && !sel.isCollapsed;
+  };
   const onClick = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("button, .sel-menu")) return;
+    if (hadSelection.current || e.detail > 1) return; // 選択を外すクリックと、語を選ぶダブルクリック
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) return; // 文字を選んだだけのときは文を選ばない
     const m = markAt(e);
@@ -766,6 +773,7 @@ function PageView({
       style={{ width: w, height: h, ["--total-scale-factor" as string]: scale }}
       onMouseMove={onMove}
       onMouseLeave={() => hover && setHover(null)}
+      onMouseDown={onMouseDown}
       onClick={onClick}
       data-sl-hover={hover ? "" : undefined}
     >

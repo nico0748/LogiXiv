@@ -184,11 +184,12 @@ function Ready({ paperId, doc, act, flash, equations, onOpenEquation }: {
     const root = rootRef.current;
     if (!p || !root) return;
     const el = root.querySelector<HTMLElement>(`[data-sl-card="${CSS.escape(p.id)}"]`);
-    if (!el) return;
+    // 右サイドバーが閉じている（描かれていない）間は待つ。開いたときにそのカードへ動く
+    if (!el || !el.offsetParent) return;
     pending.current = null;
-    el.scrollIntoView({ block: p.smooth ? "center" : "nearest", behavior: p.smooth ? "smooth" : "auto" });
+    scrollWithin(el, p.smooth ? "center" : "nearest", p.smooth);
     // 画面外のカードは高さが見積もりなので、落ち着いてから測り直す
-    const t = setTimeout(() => el.scrollIntoView({ block: "nearest" }), 450);
+    const t = setTimeout(() => scrollWithin(el, "nearest", false), 450);
     return () => clearTimeout(t);
   });
 
@@ -353,3 +354,23 @@ function Ready({ paperId, doc, act, flash, equations, onOpenEquation }: {
 
 const NO_NOTES: never[] = [];
 
+
+/**
+ * カードを、それを包む縦のスクロール枠の中だけで見える位置へ動かす。
+ * scrollIntoView は祖先の枠をすべて動かすので、スライドの三面（横にめくる枠）では
+ * 補足情報の面が横に引き出され、スライドの面が勝手に隠れていた。
+ */
+function scrollWithin(el: HTMLElement, block: "center" | "nearest", smooth: boolean): void {
+  let box = el.parentElement;
+  while (box && !/(auto|scroll)/.test(getComputedStyle(box).overflowY)) box = box.parentElement;
+  if (!box) return;
+  const r = el.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  const top = r.top - b.top + box.scrollTop;
+  let next: number;
+  if (block === "center") next = top - (box.clientHeight - r.height) / 2;
+  else if (r.top < b.top) next = top;
+  else if (r.bottom > b.bottom) next = top - box.clientHeight + r.height;
+  else return;
+  box.scrollTo({ top: Math.max(0, next), behavior: smooth ? "smooth" : "auto" });
+}

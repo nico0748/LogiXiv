@@ -250,9 +250,11 @@ function Split({
   const allMarks = useMemo(() => (sdoc ? marksByPage(sdoc) : null), [sdoc]);
   const onPaperClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!allMarks || !paperId) return;
+    if (selMenu) return; // 選択のメニューを閉じるためのクリック
     if (active && paperTool !== "text") return; // 囲んでいる途中
     const t = e.target as HTMLElement;
     if (t.closest("button, a, .sel-menu, .ln-pin")) return;
+    if (e.detail > 1) return; // 語を選ぶダブルクリック
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) return; // 文字を選んだだけ（リンクする途中）のときは文を選ばない
     const pageEl = t.closest<HTMLElement>(".pp-page");
@@ -374,7 +376,7 @@ function Split({
   }, [focus?.nonce]);
   // 補足情報の対訳で文を選んだら、論文の面をその文まで動かす（PdfView と同じく、PDF の上で選んだときは動かさない）
   useEffect(() => {
-    if (!sdoc || !paperId || sFocus.paperId !== paperId || !sFocus.id || sFocus.origin === "pdf") return;
+    if (!sdoc || !paperId || sFocus.paperId !== paperId || !sFocus.id || sFocus.origin === "pdf" || sFocus.origin === "auto") return;
     const at = sentenceAnchor(sdoc, sFocus.id);
     if (at) paperRef.current?.goTo(at.page, at.y, sFocus.origin === "panel");
     // 選び直したとき（nonce）だけ動かす。訳が届いて文書が変わっただけでは動かさない

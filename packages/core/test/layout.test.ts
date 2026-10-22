@@ -205,3 +205,47 @@ test('行の分類が buildLines の順序（ページ→段→行）を保つ',
     ['p1 left.', 'p1 right.', 'p2 left.', 'p2 right.'],
   );
 });
+
+/**
+ * IEEE 会議論文の 1 ページ目（IJCNN の実物を写したもの）。
+ * 表題が 2 行で、節見出しはローマ数字の小型大文字、要旨は `Abstract—` で段落に入る。
+ * ローマ数字を読めなかった頃は前付が決まらず、表題の 2 行目 `via Oja’s Plasticity` が
+ * 最初の節の名前になり、著者の所属が本文の文として並んでいた。
+ */
+function ieeeFirstPage(): TextChunk[] {
+  const body = (y: number, text: string, x = 50): TextChunk => ({ page: 1, text, x, y, w: 250, h: 9 });
+  return [
+    { page: 1, text: 'Sculpting Deep Attractors in Reservoir Networks', x: 64, y: 53, w: 484, h: 24 },
+    { page: 1, text: 'via Oja’s Plasticity', x: 209, y: 81, w: 186, h: 24 },
+    { page: 1, text: 'Yuji Kawai', x: 155, y: 122, w: 51, h: 11 },
+    { page: 1, text: 'Symbiotic Intelligent Systems Research Center,', x: 84, y: 135, w: 190, h: 10 },
+    { page: 1, text: 'The University of Osaka', x: 129, y: 148, w: 103, h: 10 },
+    { page: 1, text: 'Hiroshi Atsuta', x: 405, y: 122, w: 65, h: 11 },
+    { page: 1, text: 'Symbiotic Intelligent Systems Research Center,', x: 341, y: 135, w: 190, h: 10 },
+    { page: 1, text: 'The University of Osaka', x: 386, y: 148, w: 103, h: 10 },
+    body(200, 'Abstract—Recurrent neural networks are powerful tools for', 59),
+    body(210, 'learning and generating complex temporal dynamics. We'),
+    body(220, 'propose a novel learning method in this study.'),
+    body(240, 'Index Terms—reservoir computing, echo state networks', 59),
+    { page: 1, text: 'I. INTRODUCTION', x: 136, y: 270, w: 77, h: 10 },
+    body(290, 'Reservoir computing is a framework for training recurrent'),
+    body(300, 'networks and it has been studied by many groups.'),
+    body(200, 'The readout weights are trained while the recurrent', 320),
+    body(210, 'weights stay fixed in the classical formulation.', 320),
+    { page: 1, text: 'II. METHODS', x: 400, y: 240, w: 60, h: 10 },
+    { page: 1, text: 'A. FORCE learning', x: 320, y: 258, w: 83, h: 10 },
+    body(275, 'FORCE learning updates the readout with recursive least', 320),
+    body(285, 'squares so that the output error remains small.', 320),
+  ];
+}
+
+test('IEEE の 2 行の表題を前付として落とし、ローマ数字の節見出しを拾う', () => {
+  const { sentences, sections } = buildSentencesFromChunks(ieeeFirstPage(), [{ page: 1, width: 612, height: 792 }]);
+  const titles = sections.map((s) => s.title);
+  assert.ok(!titles.includes('via Oja’s Plasticity'), JSON.stringify(titles));
+  assert.deepEqual(titles, ['I. INTRODUCTION', 'II. METHODS', 'A. FORCE learning']);
+  const texts = sentences.map((s) => s.text).join(' | ');
+  assert.ok(!/Plasticity|Kawai|Atsuta|Symbiotic|University of Osaka/.test(texts), texts);
+  // 要旨は本文として残る
+  assert.ok(/Recurrent neural networks are powerful tools/.test(texts), texts);
+});
