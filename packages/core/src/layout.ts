@@ -1136,8 +1136,18 @@ function headingNumber(text: string): number[] | null {
  * 数字の後ろが**小文字を含まない**（小型大文字の見出し語）ときだけ見出しとみなす。
  */
 function romanHeading(text: string): number | null {
-  const match = /^([IVX]{1,5})\.\s+(\p{Lu}[^\p{Ll}]{2,})$/u.exec(text.trim());
+  const match = /^([IVX]{1,5})\.\s+(\p{Lu}.{2,})$/u.exec(text.trim());
   if (!match) return null;
+  const rest = match[2]!;
+  // 人名の並び（`V. KUMAR AND R. SINGH, PROC. IEEE`）や文は見出しではない
+  if (/[,;:.]/.test(rest) || rest.length > 60) return null;
+  // 小型大文字（`INTRODUCTION`）か、Word の体裁の語頭大文字（`Proposed Method`）。
+  // 語頭大文字は 1 語だと人名（`V. Kumar`）と区別が付かないので、2 語以上か既知の見出し語に限る。
+  if (/\p{Ll}/u.test(rest)) {
+    const words = rest.split(/\s+/);
+    const titleCase = words.every((w) => /^[\p{Lu}\d]/u.test(w) || /^(?:and|or|of|for|the|in|on|with|to|a|an|via|by)$/.test(w));
+    if (!titleCase || (words.length < 2 && !KNOWN_HEADINGS.has(rest.toLowerCase()))) return null;
+  }
   const value = romanValue(match[1]!);
   // 節の数としてありえる範囲だけ（`XX.` のような略号を拾わない）
   return value !== null && value >= 1 && value <= 20 ? value : null;
@@ -1162,7 +1172,7 @@ function romanValue(numeral: string): number | null {
  * `Index Terms—…`、`Keywords: …`）。IEEE・Springer の体裁では要旨の見出しが独立した行にならない。
  * 前付の終わりの目印に使う。
  */
-const RUN_IN_ABSTRACT = /^(?:abstract|index terms|keywords|key words)\s*[—–:.-]/i;
+const RUN_IN_ABSTRACT = /^(?:abstract|index terms|keywords|key words)\s*(?:[—–:.]|-\s)/i;
 
 /**
  * 見出しの語だけを取り出す（番号と約物を落とす）。
@@ -1911,47 +1921,101 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
   }
 
   /**
-   * 前付（表題・著者・所属）の終わり。1 ページ目で最初に節見出しらしい行が来るところ。
-   *
-   * 著者行は「段の中で中央へ寄っていて、機能語も文末記号も無い」ので、
-   * 版面の規則では表のセルと見分けが付かない。位置を見れば前付だと分かるので、
-   * ここだけは種類を読み手の見え方に合わせる。
-   */
-  let frontMatterUntil = 0;
-  for (const line of [...lines].sort((a, b) => a.index - b.index)) {
-    if (line.page !== 1) break;
-    // 見出しを立てない要旨（`Abstract—…`）も、そこで前付が終わる目印になる
-    if (KNOWN_HEADINGS.has(bareHeading(line.text)) || headingNumber(line.text) !== null || RUN_IN_ABSTRACT.test(line.text)) {
-      frontMatterUntil = line.index;
-      break;
-    }
-  }
-
-  /**
    * 表題の行。1 ページ目の先頭で、本文よりはっきり大きな文字で組まれた行のかたまり。
    *
-   * 表題は前付の一部だが、前付の範囲（frontMatterUntil）は節見出しが見つからないと決まらない。
-   * 見出しの形を知らない体裁で範囲が空になると、表題が本文に残るうえ、
-   * **2 行目以降が大きな文字ゆえに節見出しとして拾われる**（実測: `via Oja’s Plasticity` が節の名前になった）。
-   * 表題は文字の大きさだけで見分けられるので、範囲とは別に必ず落とす。
+   * 表題は前付の一部だが、前付の範囲は本文の始まりが見つからないと決まらない。
+   * 範囲が空になると、表題が本文に残るうえ、**2 行目以降が大きな文字ゆえに節見出しとして拾われる**
+   * （実測: `via Oja’s Plasticity` が節の名前になった）。表題は文字の大きさだけで見分けられるので、
+   * 範囲とは別に必ず落とす。
    */
   const titleLines = new Set<number>(
     titleBlock(lines.filter((line) => line.page === 1 && !edgeCandidate.has(line.index)), bodyHeight).map((line) => line.index),
   );
 
+  /**
+   * 前付（表題・著者・所属）が終わる高さ。1 ページ目で本文が始まる y。
+   *
+   * 本文の始まりの目印は 3 つ — 節見出し（または見出しを立てない `Abstract—`）、
+   * 両端揃えで続く文章の行（見出しの無い要旨）、文として閉じた文章の行。いちばん上のものを採る。
+   *
+   * **行の番号ではなく紙面の高さで決める。** 行の番号は段の読み順（左の段を下まで読んでから右の段）
+   * なので、著者を左右に並べる体裁（IEEE・ACM）では右の段の著者・所属が左の段の要旨より後ろの番号になり、
+   * 番号で範囲を切っていた頃は `Department of Physics` が本文の文になっていた。
+   * また「文末記号で閉じた行」だけで切ると、所属の `Example Corp.` で前付が終わって残りの著者が本文に残る。
+   * 文章として読める行（機能語と小文字の語がある）に限って目印にする。
+   */
+  const firstPageLines = lines
+    .filter((line) => line.page === 1 && line.text.trim().length > 0)
+    .sort((a, b) => a.y - b.y || a.left - b.left);
+  let bodyStartY = Infinity;
+  {
+    const byCol = new Map<number, Line[]>();
+    for (const line of firstPageLines) {
+      const list = byCol.get(line.column);
+      if (list) list.push(line);
+      else byCol.set(line.column, [line]);
+    }
+    for (const line of firstPageLines) {
+      if (titleLines.has(line.index)) continue;
+      if (edgeCandidate.has(line.index) && (repeated.get(line.text.replace(/\d+/g, '#'))?.size ?? 0) >= 2) continue;
+      if (cutsFrontMatter(line, bodyHeight)) {
+        bodyStartY = Math.min(bodyStartY, line.y);
+        break;
+      }
+    }
+    // 見出しの目印が 1 ページ目に無ければ、前付の範囲は作らない（表題の行だけを落とす）。
+    // どこからが本文か分からない文書で、文章の行の手掛かりだけを頼りに上を丸ごと落とすと、
+    // 1 ページしか無い文書や見出しの無いメモの本文が消える。
+    for (const col of bodyStartY === Infinity ? [] : byCol.values()) {
+      for (let i = 0; i < col.length; i++) {
+        const line = col[i]!;
+        if (line.y >= bodyStartY) break;
+        if (titleLines.has(line.index)) continue;
+        const next = col[i + 1];
+        // 文として閉じた行。所属の末尾の略語（`Example Corp.`）は文の終わりではない
+        const text = line.text.trim();
+        const closes =
+          SENTENCE_END.test(text) &&
+          !/\b(?:Corp|Inc|Ltd|Co|Univ|Dept|Lab|Labs|Inst|St|Jr|Sr|et al)\.$/.test(text) &&
+          !text.includes('@') &&
+          (proseish(text) || (text.match(/\b\p{Ll}{2,}\b/gu) ?? []).length >= 2);
+        if (!closes && !proseish(text)) continue;
+        // 文章の行が行送りどおりに 2 行続けば段落（見出しの無い要旨）
+        const runs = next !== undefined && next.y - line.y <= Math.max(line.height, next.height) * 2 && proseish(next.text);
+        if (closes || runs) {
+          bodyStartY = Math.min(bodyStartY, line.y);
+          break;
+        }
+      }
+    }
+  }
+  /** 1 ページ目の、本文が始まるより上にある行か。 */
+  const inFrontBand = (line: Line): boolean => Number.isFinite(bodyStartY) && line.page === 1 && line.y < bodyStartY - 0.5;
+
   const frontMatterLines = new Set<number>(titleLines);
-  for (const line of lines) {
-    if (line.page !== 1 || line.index >= frontMatterUntil) break;
-    if (RUN_IN_ABSTRACT.test(line.text)) break;
+  for (const line of firstPageLines) {
+    if (!inFrontBand(line)) continue;
     // 複数ページで繰り返される柱とノンブルは版面の付物。表題の上に出ていても
-    // 前付を終わらせない（種類は別のところで決まるので、ここでは読み飛ばす）。
-    // 「端にある行」だけで読み飛ばすと、表題そのものが素通りして本文に残る。
+    // 前付にしない（種類は別のところで決まるので、ここでは読み飛ばす）。
     const repeatedOn = repeated.get(line.text.replace(/\d+/g, '#'))?.size ?? 0;
     if (/^\d{1,4}$/.test(line.text) || (edgeCandidate.has(line.index) && repeatedOn >= 2)) continue;
-    // 文末記号は和文（。！？）も見る。ここを欧文だけにしていると、
-    // 和文のアブストラクトが前付として丸ごと落ちる。
-    if (/[.!?。！？]["'’”)\]）」』]?$/.test(line.text)) break;
     frontMatterLines.add(line.index);
+  }
+  /**
+   * ACM の書誌（`ACM Reference Format:` から始まる段落）。表題と著者をもう一度並べた引用の書式で、
+   * 要旨の後ろに置かれるので前付の範囲には入らないが、訳す本文ではない。
+   * 落とさないと表題が本文の 1 文として出る。次の見出しまでを前付とする。
+   */
+  {
+    const ordered = lines.filter((line) => line.page <= 2).sort((a, b) => a.index - b.index);
+    const at = ordered.findIndex((line) => /^ACM Reference Format\b/i.test(line.text.trim()));
+    if (at >= 0) {
+      for (let i = at; i < ordered.length; i++) {
+        const line = ordered[i]!;
+        if (i > at && (cutsFrontMatter(line, bodyHeight) || line.column !== ordered[at]!.column || line.page !== ordered[at]!.page)) break;
+        frontMatterLines.add(line.index);
+      }
+    }
   }
 
   /**
@@ -1992,7 +2056,7 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       // それは著者行や所属。柱・ノンブル・キャプション・参考文献は、
       // 1 ページ目にあっても種類がはっきりしているのでそのままにする。
       kind:
-        (line.index < frontMatterUntil || titleLines.has(line.index)) && (kind === 'table' || kind === 'formula' || kind === 'other')
+        (inFrontBand(line) || titleLines.has(line.index)) && (kind === 'table' || kind === 'formula' || kind === 'other')
           ? 'frontMatter'
           : kind,
     });
@@ -2118,6 +2182,9 @@ export function classifyLines(lines: Line[], pages: PageSize[]): ClassifiedLine[
       if (monotonic.has(line.index)) score += 1;
       if (APPENDIX_HEADING.test(line.text)) score += 1;
       if (previous && line.y - previous.y > pageStats.spacing * 1.4) score += 1;
+      // 段の先頭（上に行が無い）に来た見出しは、行間の手掛かりが取れない。大きな字か連番なら、
+      // 行間が空いていたのと同じに数える（実測: ページの頭の `2.2. Subspace Methods` が次の文と癒着していた）
+      else if (!previous && (line.height > bodyHeight * 1.12 || monotonic.has(line.index))) score += 1;
       // 直前が文として閉じていなければ段落の途中。見出しではなく箇条書きの可能性が高い。
       //
       // ただし直前の行が**隣接しているとき**だけ。上の行との間が空いていれば、
@@ -2447,31 +2514,80 @@ export function assessReadingOrder(lines: readonly ClassifiedLine[]): StructureQ
  *
  * 本文と同じ大きさの文字しか無ければ表題は見分けられないので、空を返す。
  */
+/**
+ * 前付の終わりの目印になる行か（節見出し、または見出しを立てない要旨）。
+ *
+ * 番号つきの見出しは**本文と同じ大きさ以上**に限る。Springer（llncs）の所属は
+ * `1 University of Somewhere, Tokyo, Japan` と小さな字の番号で始まるので、
+ * 形だけで見ると節見出しに見え、そこで前付が終わって所属が節の名前になっていた。
+ */
+function cutsFrontMatter(line: Line, body: number): boolean {
+  if (RUN_IN_ABSTRACT.test(line.text)) return true;
+  if (line.text.includes('@')) return false;
+  // 見出し語（Abstract・概要）は小さな字で組まれることがある（article の要旨の見出しは本文より小さい）
+  if (KNOWN_HEADINGS.has(bareHeading(line.text))) return true;
+  return line.height >= body * 0.95 && headingNumber(line.text) !== null;
+}
+
+/**
+ * 前付の行ではなく文章の行らしいか（本文の始まりを探すときの、緩い判定）。
+ * 要旨は段より狭く組まれることがあり、右端に届かないので looksLikeProse は使えない。
+ * 所属（`Institute for Open and Transdisciplinary Research Initiatives,`）は機能語を含むが、
+ * 小文字の語が 2 つまでなので外れる。
+ */
+function proseish(text: string): boolean {
+  if ((text.match(/\p{Script=Hiragana}/gu) ?? []).length >= 3) return true;
+  return FUNCTION_WORDS.test(text) && (text.match(/\b\p{Ll}{2,}\b/gu) ?? []).length >= 4;
+}
+
 function titleBlock(firstPage: readonly Line[], body: number): Line[] {
   if (body <= 0) return [];
   const sorted = [...firstPage].filter((line) => line.text.trim().length > 0).sort((a, b) => a.y - b.y || a.left - b.left);
   const front: Line[] = [];
   for (const line of sorted) {
-    if (KNOWN_HEADINGS.has(bareHeading(line.text)) || headingNumber(line.text) !== null || RUN_IN_ABSTRACT.test(line.text)) break;
+    if (cutsFrontMatter(line, body)) break;
     front.push(line);
   }
-  if (front.length === 0) return [];
-  const largest = maxOf(front.map((line) => line.height));
+  // 大きさの基準にするのは、語として読める行だけ。図のラベル（`GPT-4`）やロゴの 1 語が
+  // 表題より大きく組まれていると、表題が「いちばん大きな字」の 0.9 倍に届かず取りこぼす。
+  const wordy = front.filter((line) => (line.text.match(/\p{L}/gu) ?? []).length >= 8 && /\S\s+\S/.test(line.text.trim()));
+  if (wordy.length === 0) return [];
+  const largest = maxOf(wordy.map((line) => line.height));
   if (largest < body * 1.15) return [];
 
   const TOLERANCE = 0.9;
   const block: Line[] = [];
+  let subtitle = false;
   for (const line of front) {
     const big = line.height >= largest * TOLERANCE;
     if (block.length === 0) {
-      // 表題は文末記号で終わらない。大きな文字でも文として閉じた行は本文（本文が 1〜2 行しか無い文書など）
-      if (big && !SENTENCE_END.test(line.text.trim())) block.push(line);
-      else if (big) return [];
+      if (!big || !wordy.includes(line)) continue;
+      // 表題はふつう文末の句点で終わらない。句点で閉じた大きな行は本文（本文が 1〜2 行しか無い文書など）。
+      // `?` や `!` で終わる表題（`Is Attention All You Need?`）はあるので、そちらは止めない
+      if (/[.。]$/.test(line.text.trim())) return [];
+      block.push(line);
       continue;
     }
+    const last = block[block.length - 1]!;
     // 行送りが大きく空いたら、そこから先は表題ではない（著者名・要旨）
-    if (line.y - block[block.length - 1]!.y > largest * 2.2) break;
-    if (big) block.push(line);
+    if (line.y - last.y > largest * 2.2) break;
+    if (big && !subtitle) block.push(line);
+    // 副題（表題より小さいが本文よりはっきり大きい字で、表題のすぐ下に続く行）
+    else if (line.height >= body * 1.25 && line.y - last.y <= largest * 1.8) {
+      block.push(line);
+      subtitle = true;
+    }
+  }
+  if (block.length === 0) return [];
+  /**
+   * 表題のすぐ下に、著者も所属も挟まずに本文の段落が続くなら、それは表題ではなく大きな字の見出し
+   * （表題の無い抜き刷り・付録だけの PDF の `Preliminaries and Notation`）。
+   */
+  const last = block[block.length - 1]!;
+  const next = sorted.find((line) => line.y > last.y + 0.5 && !block.includes(line));
+  if (next && next.y - last.y <= largest * 2.5 && proseish(next.text) && next.height < largest * TOLERANCE) {
+    const after = sorted[sorted.indexOf(next) + 1];
+    if (after && proseish(after.text)) return [];
   }
   return block;
 }
@@ -2513,7 +2629,13 @@ export function guessTitleFromChunks(chunks: TextChunk[]): string | null {
    */
   const parts = titleBlock(lines, body).map((line) => line.text.trim());
 
-  const title = parts.join(' ').replace(/\s+/g, ' ').trim();
+  // 表題の脚注記号（llncs の `\thanks` が付ける ⋆ など）は表題の一部ではない
+  // 和文の行の折り返しは空白なしで繋ぐ（`…を用い た時系列…` にしない）
+  const joined = parts.reduce((acc, part) => (acc && /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]$/u.test(acc) && /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(part) ? acc + part : acc ? `${acc} ${part}` : part), '');
+  // 表題の脚注記号（llncs の `\thanks` が付ける ⋆ など）は表題の一部ではない
+  const title = joined.replace(/\s+/g, ' ').replace(/[\s⋆∗*†‡§¶]+$/u, '').trim();
+  // 文字の取れない PDF で日付や番号だけが残ったもの（`2026 10 10`）は表題にしない
+  if ((title.match(/\p{L}/gu) ?? []).length < 4) return null;
   // 短すぎるもの（柱やページ番号）と、長すぎるもの（表題ではない何か）は使わない。
   if (title.length < 8 || title.length > 300) return null;
   return title;

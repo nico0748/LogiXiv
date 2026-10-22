@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildLines, classifyLines, detectColumns } from '../src/layout.ts';
+import { buildLines, classifyLines, detectColumns, guessTitleFromChunks } from '../src/layout.ts';
 import { buildSentencesFromChunks, type TextChunk } from '../src/sentences.ts';
 
 /**
@@ -248,4 +248,69 @@ test('IEEE の 2 行の表題を前付として落とし、ローマ数字の節
   assert.ok(!/Plasticity|Kawai|Atsuta|Symbiotic|University of Osaka/.test(texts), texts);
   // 要旨は本文として残る
   assert.ok(/Recurrent neural networks are powerful tools/.test(texts), texts);
+});
+
+/** 前付の後ろに置く、両端揃えで続く本文（段の幅いっぱい）。 */
+function prose(page: number, y0: number, x = 60, n = 6): TextChunk[] {
+  const text = [
+    'The method we study here is simple and it works well on many of the long inputs that we',
+    'tried, and in this section we describe the setting in which the method is applied to the',
+    'data. We then discuss how the results compare with the strong baselines from the earlier',
+    'work on this topic, and we also report the cost of running the method on large inputs.',
+  ];
+  return Array.from({ length: n }, (_, i) => ({ page, text: text[i % text.length]!, x, y: y0 + i * 13, w: 470, h: 10 }));
+}
+
+test('著者を左右に並べても、右の著者・所属と略語で終わる所属は本文にしない', () => {
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'Stable Unsupervised Feature Learning', x: 150, y: 50, w: 300, h: 20 },
+    { page: 1, text: 'Alice Johnson', x: 120, y: 90, w: 60, h: 11 },
+    { page: 1, text: 'Example Corp.', x: 120, y: 103, w: 60, h: 10 },
+    { page: 1, text: 'Bob Smith', x: 380, y: 90, w: 50, h: 11 },
+    { page: 1, text: 'Department of Physics', x: 380, y: 103, w: 100, h: 10 },
+    { page: 1, text: 'Tohoku University', x: 380, y: 116, w: 80, h: 10 },
+    { page: 1, text: 'Abstract', x: 280, y: 150, w: 40, h: 10 },
+    ...prose(1, 170),
+    { page: 1, text: '1 Introduction', x: 60, y: 260, w: 70, h: 12 },
+    ...prose(1, 280),
+  ];
+  const { sentences } = buildSentencesFromChunks(chunks, [{ page: 1, width: 595, height: 842 }]);
+  const texts = sentences.map((s) => s.text).join(' | ');
+  assert.ok(!/Corp|Department|Tohoku|Johnson|Smith/.test(texts), texts);
+  assert.ok(texts.startsWith('The method we study here'), texts);
+});
+
+test('小さな字の番号で始まる所属（llncs）を節見出しにしない', () => {
+  const chunks: TextChunk[] = [
+    { page: 1, text: 'Local Plasticity for Continual Learning', x: 150, y: 50, w: 300, h: 14 },
+    { page: 1, text: 'Alice Johnson and Bob Smith', x: 220, y: 80, w: 150, h: 10 },
+    { page: 1, text: '1 University of Somewhere, Tokyo, Japan', x: 200, y: 95, w: 190, h: 6 },
+    { page: 1, text: 'alice@example.edu', x: 250, y: 103, w: 90, h: 6 },
+    ...prose(1, 130),
+    { page: 1, text: '1 Introduction', x: 60, y: 230, w: 70, h: 12 },
+    ...prose(1, 250),
+  ];
+  const { sentences, sections } = buildSentencesFromChunks(chunks, [{ page: 1, width: 595, height: 842 }]);
+  assert.deepEqual(sections.map((s) => s.title), ['1 Introduction']);
+  assert.ok(!sentences.some((s) => /University|Johnson/.test(s.text)), JSON.stringify(sentences.map((s) => s.text).slice(0, 3)));
+});
+
+test('疑問符で終わる表題と副題を表題として拾い、表題の無いページの大きな見出しは見出しのまま', () => {
+  const question = [
+    { page: 1, text: 'Is Attention All You Need for Long Documents?', x: 120, y: 60, w: 380, h: 18 },
+    { page: 1, text: 'Jane Q. Doe and Alan Roe', x: 200, y: 90, w: 120, h: 11 },
+    ...prose(1, 130),
+  ];
+  assert.equal(guessTitleFromChunks(question), 'Is Attention All You Need for Long Documents?');
+  const subtitle = [
+    { page: 1, text: 'Block Sparse Attention', x: 180, y: 60, w: 230, h: 20 },
+    { page: 1, text: 'A Study of Long Document Models', x: 170, y: 88, w: 250, h: 14 },
+    { page: 1, text: 'Jane Q. Doe', x: 250, y: 120, w: 60, h: 11 },
+    ...prose(1, 160),
+  ];
+  assert.equal(guessTitleFromChunks(subtitle), 'Block Sparse Attention A Study of Long Document Models');
+  const noTitle = [{ page: 1, text: 'Preliminaries and Notation', x: 60, y: 60, w: 200, h: 14 }, ...prose(1, 85)];
+  assert.equal(guessTitleFromChunks(noTitle), null);
+  const { sections } = buildSentencesFromChunks(noTitle, [{ page: 1, width: 595, height: 842 }]);
+  assert.deepEqual(sections.map((s) => s.title), ['Preliminaries and Notation']);
 });
