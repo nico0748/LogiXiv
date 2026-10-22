@@ -27,7 +27,9 @@ import { type MarkupOp, type SlideDeck, changeMarkups, loadDeck, loadSlidesPdf, 
 import { openPdf } from "./pdf.ts";
 import type { Vault } from "./vault.ts";
 
-export type Link = { paper: string; term: string };
+import type { GraphLink } from "./papers.ts";
+
+export type Link = GraphLink;
 
 /** 保存先で起きた変更。paper が無いものは論文一覧やテンプレートの変更。 */
 export interface ChangeEvent {

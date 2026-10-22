@@ -310,11 +310,24 @@ export async function searchNotes(vault: Vault, query: string, limit = 50): Prom
 }
 
 /** 保管庫全体の用語リンクを集める。グラフ表示に使う。 */
+/** グラフの 1 本の線（論文 → 用語）。意味は用語そのものの線にだけ付く。 */
+export type GraphLink = { paper: string; term: string; reading?: string; short?: string; detail?: string; inPaper?: string };
+
 export async function collectGraph(vault: Vault, papers: PaperSummary[]) {
-  const links: { paper: string; term: string }[] = [];
+  const links: GraphLink[] = [];
   for (const p of papers) {
     const a = await loadAnnotations(vault, p.id);
-    for (const t of a.terms) links.push({ paper: p.id, term: t.term });
+    // 用語そのものの線には意味も載せる（グラフで用語を押したときに出す）。関連語の線は名前だけ
+    for (const t of a.terms) {
+      links.push({
+        paper: p.id,
+        term: t.term,
+        ...(t.reading ? { reading: t.reading } : {}),
+        ...(t.short ? { short: t.short } : {}),
+        ...(t.detail ? { detail: t.detail } : {}),
+        ...(t.inPaper ? { inPaper: t.inPaper } : {}),
+      });
+    }
     for (const t of a.terms) for (const r of t.related) links.push({ paper: p.id, term: r });
   }
   return links;
