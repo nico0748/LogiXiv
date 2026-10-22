@@ -35,6 +35,7 @@ import { type Snack, Snackbar } from "./components/Snackbar.tsx";
 import { type Annotations, applyOps, diffAnnotations, emptyAnnotations, newId, type Rect } from "./lib/model.ts";
 import type { PaperSummary, SearchHit } from "./lib/papers.ts";
 import { openPdf } from "./lib/pdf.ts";
+import { useSentenceFocus } from "./lib/sentenceFocus.ts";
 import { getFrontmatter } from "./lib/template.ts";
 
 type SaveState = { kind: "idle" | "saving" | "saved" } | { kind: "error"; msg: string };
@@ -64,6 +65,13 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [noteKey, setNoteKey] = useState("0");
   const [tab, setTab] = useState<Tab>(backend.kind === "server" ? "sentences" : "translate");
   const [activeId, setActiveId] = useState<string | null>(null);
+  // 論文の上で文を選んだら、補足情報を対訳のタブにする（開いた対訳タブがそのカードまで動く）
+  const sentenceFocus = useSentenceFocus();
+  useEffect(() => {
+    if (sentenceFocus.origin === "pdf" && sentenceFocus.id && sentenceFocus.paperId === current) setTab("sentences");
+    // 選び直したとき（nonce）だけ。論文を切り替えただけでは変えない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sentenceFocus.nonce]);
   const [busy, setBusy] = useState<Busy>({});
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
   const [ai, setAi] = useState<AiSettings>(loadAiSettings);

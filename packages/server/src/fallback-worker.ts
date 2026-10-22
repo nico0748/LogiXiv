@@ -153,7 +153,7 @@ interface Extracted {
   metadataTitle: string | null;
 }
 
-async function extract(input: FallbackWorkerInput): Promise<Extracted> {
+export async function extract(input: FallbackWorkerInput): Promise<Extracted> {
   const require = createRequire(import.meta.url);
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   (pdfjs.GlobalWorkerOptions as { workerSrc: string }).workerSrc = pathToFileURL(
