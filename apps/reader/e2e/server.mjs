@@ -27,6 +27,8 @@ await new Promise((resolve, reject) => {
 
 const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" }).catch(() => chromium.launch());
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+// 初回の画面の案内（ツアー）が画面を覆わないようにする。案内は e2e/help.mjs で確かめる
+await page.addInitScript(() => { window.__PAPERLENS_NO_TOUR = true; });
 const errors = [];
 page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 page.on("pageerror", (e) => errors.push(String(e)));
@@ -179,12 +181,37 @@ await step("対訳タブを開く", async () => {
 await step("設定画面に MCP の登録方法が出る", async () => {
   await ribbon("設定").click();
   await page.getByRole("dialog", { name: "設定" }).waitFor();
+  await page.getByRole("navigation", { name: "設定の項目" }).getByRole("button", { name: "AI エージェント（MCP）" }).click();
   await page.getByRole("heading", { name: "AI エージェント（MCP）" }).waitFor();
   const cmd = await page.getByLabel("Claude Code のコマンド").textContent();
   if (!cmd.startsWith("claude mcp add paperlens") || !cmd.includes("dist-server/mcp.js")) throw new Error(`コマンドが違う: ${cmd}`);
   await page.locator("section", { has: page.getByRole("heading", { name: "AI エージェント（MCP）" }) }).screenshot({ path: `${shotDir}/12-settings-mcp.png` });
   await page.getByLabel("読み取りだけを許可する").check();
   if (!(await page.getByLabel("Claude Code のコマンド").textContent()).includes("PAPERLENS_MCP_READONLY=1")) throw new Error("読み取り専用の設定にならない");
+});
+
+await step("設定の「画面の配置」のリセットは workspace.json も戻し、閉じるときに古い配置を書き戻さない", async () => {
+  const settings = page.getByRole("dialog", { name: "設定" });
+  await settings.getByRole("button", { name: "閉じる" }).click();
+  await settings.waitFor({ state: "detached" });
+  const remote = () => page.evaluate(() => fetch("/api/workspace").then((r) => r.json()));
+  if (!(await remote()).leftOpen) {
+    await page.keyboard.press("Control+Backslash");
+    await page.waitForFunction(() => document.querySelector("aside.sidebar.left")?.getAttribute("aria-hidden") !== "true");
+  }
+  await page.waitForTimeout(800); // 配置の保存は 400ms 後
+  if (!(await remote()).leftOpen) throw new Error("左サイドバーを開いた配置が保存されない");
+  await ribbon("設定").click();
+  await settings.getByRole("navigation", { name: "設定の項目" }).getByRole("button", { name: "データ" }).click();
+  await settings.locator("#set-reset").getByRole("button", { name: "初期に戻す" }).nth(1).click();
+  await settings.getByRole("button", { name: "戻す", exact: true }).click();
+  await settings.getByText("画面の配置を初期に戻しました。").waitFor();
+  await page.waitForTimeout(500);
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await page.waitForTimeout(500);
+  const ws = await remote();
+  if (ws.leftOpen) throw new Error(`workspace.json が古い配置のまま: ${JSON.stringify(ws)}`);
+  if (!ws.openPaper) throw new Error("開いている論文まで消えた");
 });
 
 await step("読み直すと、前回の位置から表示する", async () => {
@@ -220,12 +247,12 @@ await step("URL から取り込む（新しい論文は書誌情報の欄を開�
   };
   await add();
   await page.screenshot({ path: `${shotDir}/14-url-dialog.png` });
-  await page.getByRole("button", { name: "取り込む" }).click();
+  await page.getByRole("button", { name: "取り込む", exact: true }).click();
   await page.getByRole("dialog").waitFor({ state: "detached" });
   await page.locator(".biblio[open]").waitFor();
   if (count() !== before + 1) throw new Error(`論文が増えていない: ${count()}`);
   await add();
-  await page.getByRole("button", { name: "取り込む" }).click();
+  await page.getByRole("button", { name: "取り込む", exact: true }).click();
   await page.locator(".snackbar", { hasText: "この論文は既に取り込んでいます。開きました。" }).waitFor();
   if (count() !== before + 1) throw new Error("同じ URL で論文が増えた");
 });

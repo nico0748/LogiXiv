@@ -42,6 +42,7 @@ import { SentenceMarkLayer } from "../sentences/SentenceMarks.tsx";
 import { useSentences } from "../sentences/useSentences.ts";
 import { PdfPages, type PdfPagesHandle } from "./PdfPages.tsx";
 import "./slides.css";
+import { HelpButton } from "../help/HelpButton.tsx";
 import { useFullscreen } from "./useFullscreen.ts";
 import { GUTTER, type SlidesSide, usePager } from "./usePager.ts";
 import type { Slides } from "./useSlides.ts";
@@ -177,6 +178,9 @@ export function SlidesView(props: Props) {
           <button className="btn primary" onClick={() => fileRef.current?.click()}>
             <Upload size={16} aria-hidden="true" /> スライドを追加
           </button>
+          <p className="sv-none-help">
+            <HelpButton chapter="slides" /> 囲み方とリンクのしかた
+          </p>
         </div>
       ) : !props.paperPdf ? (
         <div className="drop-hint" aria-busy="true"><h2>論文を読み込んでいます</h2></div>
@@ -858,6 +862,7 @@ function Split({
           {fullscreen ? <Minimize size={14} aria-hidden="true" /> : <Maximize size={14} aria-hidden="true" />} {fullscreen ? "全画面を終える" : "全画面"}
         </button>
         {tabs}
+        <HelpButton chapter="slides" />
       </div>
       {/* 線と知らせは、横に動く中身ではなく見えている枠（.sv-stage）に重ねる */}
       <div className="sv-stage">

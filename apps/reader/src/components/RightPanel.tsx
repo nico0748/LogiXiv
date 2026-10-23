@@ -10,6 +10,7 @@ import { EmptyState } from "./EmptyState.tsx";
 import { StatusChips } from "./StatusChips.tsx";
 import { Tex, TexInline } from "./Tex.tsx";
 import { SentencePanel } from "./sentences/SentencePanel.tsx";
+import { HelpButton } from "./help/HelpButton.tsx";
 
 export type Tab = "sentences" | "translate" | "terms" | "math" | "record";
 
@@ -93,6 +94,8 @@ export function RightPanel(p: Props) {
             {t.count ? <span className="count">{t.count}</span> : null}
           </button>
         ))}
+        {/* 開いているタブの説明の章を開く */}
+        <HelpButton chapter={p.tab === "sentences" ? "sentences" : "record"} className="tabs-help" />
       </div>
       <div className="panel" role="tabpanel" id={`panel-${p.tab}`} aria-labelledby={`tab-${p.tab}`}>
         {!p.aiReady && p.tab !== "record" && p.tab !== "sentences" && (

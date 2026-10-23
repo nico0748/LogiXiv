@@ -55,6 +55,8 @@ try {
   // 手元の Playwright の版に合うブラウザが無いときは、PW_CHROMIUM で実行ファイルを指定する
   browser = await chromium.launch(process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {});
   const page = await browser.newPage({ viewport: { width: 1600, height: 960 } });
+  // 初回の画面の案内（ツアー）が画面を覆わないようにする。案内は e2e/help.mjs で確かめる
+  await page.addInitScript(() => { window.__PAPERLENS_NO_TOUR = true; });
   const errors = [];
   page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(String(e)));

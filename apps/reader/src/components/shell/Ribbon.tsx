@@ -15,17 +15,20 @@ const BOTTOM: { id: RibbonItem; label: string; icon: LucideIcon }[] = [
   { id: "help", label: "ヘルプ", icon: CircleHelp },
 ];
 
-export function Ribbon({ active, onItem }: { active: Partial<Record<RibbonItem, boolean>>; onItem: (id: RibbonItem) => void }) {
+/** badges: 印を付ける項目（ヘルプの「新しい更新情報」など）。読み上げ名は変えず、ツールチップで知らせる */
+export function Ribbon({ active, onItem, badges = {} }: { active: Partial<Record<RibbonItem, boolean>>; onItem: (id: RibbonItem) => void; badges?: Partial<Record<RibbonItem, string>> }) {
   const btn = ({ id, label, icon: Icon }: (typeof TOP)[number]) => (
     <button
       key={id}
       className={`ribbon-item clickable-icon${active[id] ? " is-active" : ""}`}
       aria-label={label}
-      title={label}
+      title={badges[id] ? `${label}（${badges[id]}）` : label}
       aria-pressed={active[id] ?? false}
+      aria-describedby={badges[id] ? `ribbon-badge-${id}` : undefined}
       onClick={() => onItem(id)}
     >
       <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
+      {badges[id] && <span id={`ribbon-badge-${id}`} className="ribbon-badge"><span className="visually-hidden">{badges[id]}</span></span>}
     </button>
   );
   return (

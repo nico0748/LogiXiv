@@ -1,0 +1,230 @@
+/*
+ * ヘルプ・キーボード操作の早見表・画面の案内（ツアー）。
+ * 色は styles.css の変数（Obsidian の名前 → M3 のロール）だけを使い、明暗の両方に合わせる。
+ */
+
+/* --- ヘルプの枠 ------------------------------------------------------------ */
+.modal-container .modal.mod-help.help-modal { max-width: 1040px; }
+.help { display: flex; height: 100%; min-height: 0; }
+.help-nav {
+  width: 25%; min-width: 210px; max-width: 260px; flex: none; overflow: auto;
+  display: flex; flex-direction: column; gap: 10px;
+  background: var(--background-secondary); padding: 12px;
+  border-right: 1px solid var(--background-modifier-border);
+}
+.help-search {
+  position: relative; display: flex; align-items: center;
+  color: var(--text-faint);
+}
+.help-search > svg { position: absolute; left: 8px; pointer-events: none; }
+.help-search-input {
+  width: 100%; padding: 5px 8px 5px 28px; font-size: var(--font-ui-small);
+  background: var(--background-modifier-form-field); color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m);
+}
+.help-search-input:hover { border-color: var(--background-modifier-border-hover); }
+.help-search-input:focus { outline: 2px solid var(--md-sys-color-secondary); outline-offset: -1px; border-color: transparent; }
+.help-select-wrap { display: none; }
+.help-nav-item { display: flex; align-items: center; gap: 6px; }
+.help-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--md-sys-color-error);
+}
+.help-body { flex: 1; min-width: 0; overflow: auto; background: var(--background-primary); }
+.help-page { max-width: 720px; margin: 0 auto; padding: 28px 40px 64px; }
+
+/* --- 中身 ---------------------------------------------------------------- */
+.help-title { font-size: var(--font-ui-large); font-weight: 600; margin: 0 0 6px; padding-right: 32px; line-height: 1.4; }
+.help-lead { font-size: var(--font-ui-small); color: var(--text-muted); margin: 0 0 18px; line-height: 1.7; }
+.help-prose { font-size: var(--font-ui-small); line-height: 1.8; color: var(--text-normal); }
+.help-prose h2 {
+  font-size: var(--font-ui-medium); font-weight: 600; margin: 26px 0 8px; padding-top: 14px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.help-prose p { margin: 0 0 10px; }
+.help-prose ul, .help-prose ol { margin: 0 0 12px; padding-left: 1.4em; }
+.help-prose li { margin: 0 0 6px; }
+.help-prose li::marker { color: var(--text-faint); }
+.help-steps { counter-reset: help-step; list-style: none; padding-left: 0 !important; }
+.help-steps > li { counter-increment: help-step; position: relative; padding-left: 34px; min-height: 24px; }
+.help-steps > li::before {
+  content: counter(help-step); position: absolute; left: 0; top: 1px;
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  font-size: var(--font-ui-smaller); font-weight: 600;
+  background: var(--md-sys-color-primary-container); color: var(--md-sys-color-on-primary-container);
+}
+.help-tip {
+  margin: 4px 0 14px !important; padding: 8px 12px; border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+  border-left: 3px solid var(--interactive-accent); color: var(--text-normal);
+}
+.help-actions { margin: 4px 0 14px !important; }
+.help-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
+.help-link {
+  border: 0; background: none; padding: 0; font: inherit; cursor: pointer;
+  color: var(--text-accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.help-link:hover { text-decoration-thickness: 2px; }
+.help-prose code { word-break: break-word; }
+
+.help-related { margin-top: 28px; padding: 12px 16px; border-radius: var(--radius-m); background: var(--background-secondary); }
+.help-related h2 { font-size: var(--font-ui-small); font-weight: 600; margin: 0 0 6px; }
+.help-related ul { margin: 0; padding-left: 1.2em; font-size: var(--font-ui-small); line-height: 1.8; }
+
+.help-pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 28px; }
+.help-pager-btn {
+  display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 48%;
+  padding: 8px 12px; cursor: pointer; text-align: left;
+  border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m);
+  background: transparent; color: var(--text-normal); font-size: var(--font-ui-small);
+}
+.help-pager-btn:hover { background: var(--background-modifier-hover); border-color: var(--background-modifier-border-hover); }
+.help-pager-btn span { display: flex; flex-direction: column; min-width: 0; }
+.help-pager-btn small { font-size: var(--font-ui-smaller); color: var(--text-faint); }
+.help-pager-btn.is-next { margin-left: auto; text-align: right; }
+.help-pager-btn > svg { flex: none; color: var(--text-faint); }
+
+/* よくある質問 */
+.help-faq { display: grid; gap: 8px; }
+.help-faq-item { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); background: var(--background-primary); scroll-margin-top: 16px; }
+.help-faq-item > summary {
+  cursor: pointer; padding: 10px 14px; font-size: var(--font-ui-small); font-weight: 600;
+  list-style: none; display: flex; align-items: center; gap: 8px; border-radius: var(--radius-m);
+}
+.help-faq-item > summary::-webkit-details-marker { display: none; }
+.help-faq-item > summary::before {
+  content: ""; flex: none; width: 6px; height: 6px; margin: 0 4px 0 2px;
+  border-right: 1.5px solid var(--text-faint); border-bottom: 1.5px solid var(--text-faint);
+  transform: rotate(-45deg); transition: transform 120ms ease;
+}
+.help-faq-item[open] > summary::before { transform: rotate(45deg); }
+.help-faq-item > summary:hover { background: var(--background-modifier-hover); }
+.help-faq-item[open] { border-color: var(--background-modifier-border-hover); }
+.help-faq-item .help-prose { padding: 0 14px 6px 34px; }
+.help-more { color: var(--text-muted); }
+
+/* キーボード操作 */
+.help-keys { display: grid; gap: 18px; }
+.help-keys-group h2 { font-size: var(--font-ui-smaller); font-weight: 600; color: var(--text-faint); margin: 0 0 6px; letter-spacing: 0.02em; }
+.help-keys-group dl { margin: 0; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); overflow: hidden; }
+.help-keys-row {
+  /* 行ごとに別の grid なので、キーの列は決まった幅にしてそろえる */
+  display: grid; grid-template-columns: 12em 1fr; gap: 16px; align-items: baseline;
+  padding: 7px 12px; font-size: var(--font-ui-small);
+}
+.help-keys-row + .help-keys-row { border-top: 1px solid var(--background-modifier-border); }
+.help-keys-row dt { white-space: nowrap; }
+.help-keys-row dd { margin: 0; color: var(--text-muted); line-height: 1.6; }
+.key-combo { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.key-combo kbd { font-size: var(--font-ui-smaller); min-width: 1.6em; text-align: center; line-height: 1.5; }
+.key-plus, .key-sep { color: var(--text-faint); font-size: var(--font-ui-smaller); }
+
+/* 更新情報 */
+.help-changes { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--background-modifier-border); }
+.help-changes > li { position: relative; padding: 0 0 20px 20px; }
+.help-changes > li::before {
+  content: ""; position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--background-primary); border: 2px solid var(--interactive-accent);
+}
+.help-changes > li:first-child::before { background: var(--interactive-accent); }
+.help-change-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.help-change-head time { font-size: var(--font-ui-smaller); color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.help-change-head h2 { font-size: var(--font-ui-medium); font-weight: 600; margin: 0; }
+.help-changes ul { margin: 6px 0 0; padding-left: 1.2em; font-size: var(--font-ui-small); line-height: 1.8; color: var(--text-muted); }
+
+/* 検索結果 */
+.help-hits { list-style: none; margin: 0 0 20px; padding: 0; display: grid; gap: 6px; }
+.help-hit {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; cursor: pointer;
+  padding: 10px 14px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m);
+  background: transparent; color: var(--text-normal);
+}
+.help-hit:hover { background: var(--background-modifier-hover); border-color: var(--background-modifier-border-hover); }
+.help-hit-title { font-size: var(--font-ui-small); font-weight: 600; }
+.help-hit-snippet { font-size: var(--font-ui-smaller); color: var(--text-muted); line-height: 1.6; }
+.help-hits-sub { font-size: var(--font-ui-small); font-weight: 600; margin: 0 0 8px; }
+
+/* 画面の各所の「?」 */
+.help-button { color: var(--text-faint); padding: 3px; flex: none; }
+.help-button:hover { color: var(--text-normal); }
+
+/* リボンのヘルプの「新しい更新」の印 */
+.ribbon-item { position: relative; }
+.ribbon-badge {
+  position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--md-sys-color-error); box-shadow: 0 0 0 2px var(--background-secondary);
+  pointer-events: none;
+}
+
+/* --- 早見表 ---------------------------------------------------------------- */
+.modal-container .modal.help-sheet { width: min(640px, calc(100vw - 32px)); height: auto; max-height: min(80vh, 760px); }
+.help-sheet .vertical-tab-content { overflow: auto; }
+.help-sheet-inner { padding: 22px 26px 18px; }
+.help-sheet-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0 0 16px; padding-right: 28px; }
+.help-sheet-head .help-title { margin: 0; }
+.help-sheet-filter { flex: 1; min-width: 160px; max-width: 260px; font-size: var(--font-ui-small); padding: 4px 8px; }
+.help-sheet-foot { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; margin: 16px 0 0; font-size: var(--font-ui-smaller); color: var(--text-faint); }
+
+/* --- 画面の案内（ツアー） ---------------------------------------------------- */
+.tour { position: fixed; inset: 0; z-index: 80; pointer-events: none; }
+.tour-blocker { position: absolute; inset: 0; pointer-events: auto; }
+.tour-dim { position: absolute; background: light-dark(rgb(0 0 0 / .45), rgb(0 0 0 / .62)); }
+.tour-spot {
+  position: absolute; border-radius: var(--radius-s);
+  box-shadow: 0 0 0 2px var(--interactive-accent), 0 0 0 6px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+}
+.tour-pop {
+  position: absolute; pointer-events: auto; width: min(340px, calc(100vw - 32px));
+  padding: 14px 16px 10px; border-radius: var(--radius-l);
+  background: var(--background-primary); color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border); box-shadow: var(--shadow-l);
+  animation: pop-in 140ms ease-out;
+}
+.tour-pop:focus { outline: none; }
+.tour-pop.is-sheet { width: calc(100vw - 32px); }
+.tour-pop-head { display: flex; align-items: center; justify-content: space-between; margin: -4px -6px 2px 0; }
+.tour-count { font-size: var(--font-ui-smaller); color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.tour-title { font-size: var(--font-ui-medium); font-weight: 600; margin: 0 0 6px; }
+.tour-body p { font-size: var(--font-ui-small); line-height: 1.7; color: var(--text-muted); margin: 0 0 6px; }
+.tour-sample {
+  margin: 8px 0 4px; padding: 10px 12px; border-radius: var(--radius-m);
+  background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container);
+}
+.tour-sample p { font-size: var(--font-ui-smaller); margin: 0 0 8px; line-height: 1.6; }
+.tour-sample p:last-child { margin-bottom: 0; }
+.tour-sample .btn.tonal { background: var(--background-primary); }
+.tour-dots { display: flex; gap: 5px; justify-content: center; margin: 10px 0 8px; }
+.tour-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--background-modifier-border); transition: width 160ms ease; }
+.tour-dots span.is-on { width: 16px; border-radius: 3px; background: var(--interactive-accent); }
+.tour-actions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.tour-actions .spacer { flex: 1; }
+.tour-keys { margin: 8px 0 0; font-size: 11px; color: var(--text-faint); text-align: right; }
+.tour-keys kbd { font-size: 10px; }
+
+/* --- 狭い画面 -------------------------------------------------------------- */
+@media (max-width: 900px) {
+  .help { flex-direction: column; }
+  .help-nav { width: auto; max-width: none; min-width: 0; flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--background-modifier-border); padding: 10px 48px 10px 12px; }
+  .help-search { flex: 1 1 180px; }
+  .help-select-wrap { display: block; flex: 1 1 160px; }
+  .help-select { width: 100%; }
+  .help-nav-list { display: none; }
+  .help-page { padding: 20px 16px 48px; }
+  .help-keys-row { grid-template-columns: 1fr; gap: 2px; }
+  .modal-container .modal.help-sheet { width: 100vw; height: 100vh; max-height: none; }
+}
+@media (max-width: 560px) {
+  .tour-keys { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tour-pop, .tour-dots span { transition: none; animation: none; }
+}
+@media (forced-colors: active) {
+  .tour-spot { outline: 3px solid Highlight; }
+  .help-dot, .ribbon-badge { background: Mark; }
+}
+
+/* 右サイドバーのタブの帯の右端 */
+.tabs > .help-button.tabs-help { margin-left: auto; align-self: center; }
+.list-head > .help-button { margin-left: -4px; }
+.sv-none-help { display: inline-flex; align-items: center; gap: 2px; margin: 12px 0 0; font-size: var(--font-ui-smaller); color: var(--text-faint); }
