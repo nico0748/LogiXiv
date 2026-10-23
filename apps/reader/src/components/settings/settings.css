@@ -11,6 +11,8 @@
   --font-ui-small: calc(13px * var(--pl-fs-sidebar, 1));
   --font-ui-medium: calc(15px * var(--pl-fs-sidebar, 1));
 }
+/* 大きな文字でも、検索欄の案内の文字は欄に収まる大きさまでにする */
+.sidebar.left .input::placeholder { font-size: min(1em, 14px); }
 .panel {
   --font-ui-smaller: calc(12px * var(--pl-fs-body, 1));
   --font-ui-small: calc(13px * var(--pl-fs-body, 1));
@@ -29,7 +31,9 @@
 
 /* --- モーダルの形 ---------------------------------------------------------- */
 .modal.mod-settings { max-width: 1040px; }
-.mod-settings .settings-nav { display: flex; flex-direction: column; gap: 8px; padding-top: 14px; }
+.mod-settings .vertical-tab-header { display: flex; flex-direction: column; gap: 8px; padding-top: 14px; }
+/* 右上の閉じるボタンの列には中身を置かない（スクロールしても重ならないように） */
+.mod-settings .vertical-tab-content { padding-right: 40px; }
 .settings-search { position: relative; }
 .settings-search .input { padding-left: 28px; font-size: var(--font-ui-small); background: var(--background-primary); }
 .settings-search-icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--text-faint); pointer-events: none; }
@@ -121,8 +125,15 @@
 
 /* 読解と AI */
 .key-input { width: 260px; font-family: var(--font-monospace); }
-.key-state { display: block; margin-top: 4px; color: var(--md-sys-color-warning); font-weight: 500; }
-.key-state.is-set { color: var(--text-success); }
+.key-state { display: block; margin-top: 4px; font-weight: 500; color: var(--text-muted); }
+.key-state.is-none { color: var(--md-sys-color-warning); }
+.key-state.is-ok { color: var(--text-success); }
+.key-state.is-err { color: var(--text-error); }
+.billing-note { margin-top: 16px; }
+.ext-link { display: inline-flex; align-items: center; gap: 2px; }
+.link-btn { background: none; border: 0; padding: 0; color: var(--text-accent); cursor: pointer; font: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.gloss-add .input::placeholder, .gloss-table .input::placeholder { color: var(--text-faint); font-style: italic; }
+.gloss-table .input.is-empty { border-color: var(--md-sys-color-warning); }
 .check-ok { color: var(--text-success); font-size: var(--font-ui-smaller); }
 .check-err { color: var(--text-error); font-size: var(--font-ui-smaller); max-width: 280px; }
 .style-editor { font-size: var(--font-ui-smaller); line-height: 1.7; min-height: 150px; }
@@ -135,6 +146,13 @@
 .gloss-add { flex-wrap: nowrap; }
 .gloss-add .input { flex: 1; min-width: 0; }
 .gloss-arrow { color: var(--text-faint); }
+
+/* テンプレート */
+.tpl-syntax { margin-top: 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.tpl-syntax summary { cursor: pointer; color: var(--text-normal); }
+.tpl-syntax p { margin: 6px 0 0; line-height: 1.7; }
+.tpl-dirty { color: var(--md-sys-color-warning); }
+.nav-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-left: 6px; vertical-align: middle; background: var(--md-sys-color-warning); }
 
 /* データ */
 .confirm-row { gap: 6px; }
@@ -170,17 +188,29 @@
   white-space: pre-wrap; word-break: break-all;
 }
 
-/* --- 狭い画面：ナビを上に横並びで出す（ページを切り替えられるように） ------------ */
+/* --- 狭い画面 --------------------------------------------------------------
+ * 900px 以下では styles.css が左の欄を隠すが、設定ではページを選べるように残す。
+ * 700px までは左に細く、それより狭いときは上に横並びのタブ（右端をぼかして続きがあると分かるように）。 */
 @media (max-width: 900px) {
+  .modal.mod-settings .vertical-tab-header { display: flex; width: 190px; min-width: 190px; padding: 14px 10px 12px; }
+  .settings-page { padding: 20px 20px 48px; }
+}
+@media (max-width: 700px) {
   .modal.mod-settings { flex-direction: column; }
   .modal.mod-settings .vertical-tab-header {
-    display: flex; width: 100%; max-width: none; min-width: 0; flex: none; padding: 10px 48px 8px 12px;
+    width: 100%; max-width: none; min-width: 0; flex: none; padding: 10px 48px 8px 12px;
     border-right: 0; border-bottom: 1px solid var(--background-modifier-border); max-height: 45vh;
   }
-  .settings-nav-groups { flex-direction: row; overflow-x: auto; gap: 2px; padding-bottom: 2px; }
+  .modal.mod-settings .vertical-tab-content { padding-right: 0; }
+  .settings-nav-groups {
+    flex-direction: row; overflow-x: auto; gap: 2px; padding-bottom: 2px; scrollbar-width: none;
+    mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+  }
+  .settings-nav-groups::-webkit-scrollbar { display: none; }
   .settings-nav-groups .vertical-tab-header-group { display: contents; }
   .settings-nav-groups .vertical-tab-header-group-title { display: none; }
   .settings-nav-groups .vertical-tab-nav-item { width: auto; white-space: nowrap; flex: none; }
+  .settings-nav-groups .vertical-tab-nav-item:last-child { margin-right: 28px; }
   .settings-page { padding: 20px 16px 48px; }
   .setting-item { flex-direction: column; align-items: stretch; gap: 10px; }
   .setting-item-control { max-width: none; justify-content: flex-start; flex-wrap: wrap; }

@@ -37,7 +37,7 @@ export function SettingsPage({ page, backend, onSwitchVault }: Props) {
       {info.id === "data" && <DataPage backend={backend} />}
       {info.id === "mcp" && <McpPage backend={backend} />}
       {info.id === "obsidian" && <ObsidianPage backend={backend} />}
-      {info.id === "shortcuts" && <ShortcutsPage />}
+      {info.id === "shortcuts" && <ShortcutsPage backend={backend} />}
       {info.id === "about" && <AboutPage backend={backend} />}
     </section>
   );

@@ -1,7 +1,12 @@
 // 設定の 1 行（Obsidian の setting-item の形）。左に名前と説明、右に操作を置く。
-import type { ReactNode } from "react";
+// 説明の id は文脈（useSettingDesc）で操作に渡し、aria-describedby で読み上げに含める。
+import { type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes, createContext, useContext, useId } from "react";
 import type { SettingsPageInfo } from "../../lib/settingsIndex.ts";
 import { HelpButton } from "../help/HelpButton.tsx";
+
+const DescContext = createContext<string | undefined>(undefined);
+/** いまの設定の行の説明の id。操作の aria-describedby に使う */
+export const useSettingDesc = () => useContext(DescContext);
 
 export function PageHeader({ page, children }: { page: SettingsPageInfo; children?: ReactNode }) {
   return (
@@ -29,7 +34,8 @@ interface ItemProps {
 }
 
 export function SettingItem({ id, name, desc, children, htmlFor, stacked }: ItemProps) {
-  const descId = id ? `set-${id}-desc` : undefined;
+  const auto = useId();
+  const descId = desc ? `${id ? `set-${id}` : auto}-desc` : undefined;
   return (
     <div className={`setting-item${stacked ? " is-stacked" : ""}`} id={id ? `set-${id}` : undefined}>
       <div className="setting-item-info">
@@ -40,7 +46,11 @@ export function SettingItem({ id, name, desc, children, htmlFor, stacked }: Item
         )}
         {desc && <div className="setting-item-description" id={descId}>{desc}</div>}
       </div>
-      {children && <div className="setting-item-control">{children}</div>}
+      {children && (
+        <DescContext.Provider value={descId}>
+          <div className="setting-item-control">{children}</div>
+        </DescContext.Provider>
+      )}
     </div>
   );
 }
@@ -61,8 +71,9 @@ export function Segmented<T extends string | number>({
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
 }) {
+  const desc = useSettingDesc();
   return (
-    <div className="segmented" role="radiogroup" aria-label={label}>
+    <div className="segmented" role="radiogroup" aria-label={label} aria-describedby={desc}>
       {options.map((o) => (
         <button
           key={String(o.value)}
@@ -80,6 +91,29 @@ export function Segmented<T extends string | number>({
 }
 
 /** オン・オフの切り替え（Obsidian の checkbox-container の形）。中身は普通のチェックボックス */
-export function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
-  return <input type="checkbox" role="switch" className="toggle" aria-label={label} checked={checked} onChange={(e) => onChange(e.target.checked)} />;
+export function Toggle({ label, checked, onChange, disabled }: { label: string; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
+  const desc = useSettingDesc();
+  return (
+    <input
+      type="checkbox"
+      role="switch"
+      className="toggle"
+      aria-label={label}
+      aria-describedby={desc}
+      checked={checked}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.checked)}
+    />
+  );
+}
+
+/** 説明を読み上げに含める select / input / textarea（SettingItem の中で使う） */
+export function Select({ className, ...p }: SelectHTMLAttributes<HTMLSelectElement>) {
+  return <select className={`select${className ? ` ${className}` : ""}`} aria-describedby={useSettingDesc()} {...p} />;
+}
+export function Input({ className, ...p }: InputHTMLAttributes<HTMLInputElement>) {
+  return <input className={`input${className ? ` ${className}` : ""}`} aria-describedby={useSettingDesc()} {...p} />;
+}
+export function TextArea({ className, ...p }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return <textarea className={`textarea${className ? ` ${className}` : ""}`} aria-describedby={useSettingDesc()} {...p} />;
 }

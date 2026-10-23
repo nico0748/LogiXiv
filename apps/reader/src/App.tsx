@@ -602,7 +602,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     } else if (e.key === "Escape" && overlay && !document.querySelector("dialog[open]")) {
       // 閉じた Esc を、ほかの画面（スライドの道具など）に渡さない
       e.preventDefault();
-      setOverlay(null);
+      // 設定の「?」から開いたヘルプは、閉じると設定に戻る
+      setOverlay(overlay === "help" && helpReturn.current ? "settings" : null);
     }
   };
   useEffect(() => {
@@ -621,12 +622,22 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     window.addEventListener(OPEN_SETTINGS_EVENT, on);
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, on);
   }, []);
+  // 閉じたら（Esc・リボンを含む）指定のページを忘れ、次にリボンから開くときは「全般」から
+  useEffect(() => {
+    if (overlay !== "settings") setSettingsAt((x) => (x.page || x.item ? { n: x.n } : x));
+  }, [overlay]);
 
   // ? でキーボード操作の早見表。画面の各所の「?」からは、その章でヘルプを開く
-  useHelpHotkey(() => setOverlay((o) => (o === "keys" ? null : "keys")));
+  // ほかの画面（設定・ヘルプ・リスト）を開いているときは何もしない（入力途中の内容を捨てないように）
+  useHelpHotkey(() => setOverlay((o) => (o === null ? "keys" : o === "keys" ? null : o)));
+  const overlayRef = useRef(overlay);
+  overlayRef.current = overlay;
+  /** 設定から開いたヘルプか。閉じたら設定（同じページ）に戻る */
+  const helpReturn = useRef(false);
   useEffect(() => {
     const on = (e: Event) => {
       const d = (e as CustomEvent<HelpRequest>).detail;
+      helpReturn.current = overlayRef.current === "settings";
       setHelpAt({ ...d, n: Date.now() });
       setOverlay("help");
     };
@@ -635,7 +646,9 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   }, []);
   // ヘルプを閉じたら章の指定を捨てる（リボンから開くときは「はじめに」から）
   useEffect(() => {
-    if (overlay !== "help") setHelpAt(null);
+    if (overlay === "help") return;
+    setHelpAt(null);
+    helpReturn.current = false;
   }, [overlay]);
 
   const saveLabel =
@@ -859,7 +872,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
           key={settingsAt.n}
           initialPage={settingsAt.page}
           initialItem={settingsAt.item}
-          onClose={() => { setOverlay(null); setSettingsAt((x) => ({ ...x, item: undefined })); }}
+          onClose={() => setOverlay(null)}
           onSwitchVault={onClose}
         />
       )}
@@ -868,12 +881,14 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
           key={helpAt?.n}
           page={helpAt?.page}
           anchor={helpAt?.anchor}
-          onClose={() => setOverlay(null)}
+          onClose={() => setOverlay(helpReturn.current ? "settings" : null)}
           onStartTour={() => { setOverlay(null); setTourRun((n) => n + 1); }}
+          server={backend.kind === "server"}
         />
       )}
-      {overlay === "keys" && <ShortcutSheet onClose={() => setOverlay(null)} onOpenHelp={() => { setHelpAt({ page: "keys", n: Date.now() }); setOverlay("help"); }} />}
+      {overlay === "keys" && <ShortcutSheet server={backend.kind === "server"} onClose={() => setOverlay(null)} onOpenHelp={() => { setHelpAt({ page: "keys", n: Date.now() }); setOverlay("help"); }} />}
       <Tour
+        mode={backend instanceof ServerBackend ? (backend.meta.desktop ? "desktop" : "server") : "browser"}
         ready={ready && overlay === null && dialog === null}
         restart={tourRun}
         hasPapers={papers.length > 0}

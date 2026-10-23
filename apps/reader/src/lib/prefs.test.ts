@@ -113,3 +113,18 @@ test("前回の位置だけを消す", () => {
   assert.equal(clearStoredPositions(), 2);
   assert.equal(getPref("theme"), "dark");
 });
+
+test("訳語の行は訳語が空でも、入力途中の空白があっても残す", () => {
+  patchPref("ai", { glossary: [{ en: "layer", ja: "" }, { en: "token", ja: "トー " }, { en: "  ", ja: "空" }] });
+  assert.deepEqual(getPref("ai").glossary, [{ en: "layer", ja: "" }, { en: "token", ja: "トー " }]);
+});
+
+test("取り込み時の段階は決まった段階だけ。未読は空で表す", () => {
+  setPref("importStatus", "精読");
+  assert.equal(getPref("importStatus"), "精読");
+  setPref("importStatus", "未読");
+  assert.equal(getPref("importStatus"), "");
+  const file = JSON.stringify({ app: "PaperLens", kind: "settings", version: 1, prefs: { importStatus: "<script>" } });
+  importPrefs(file);
+  assert.equal(getPref("importStatus"), "");
+});

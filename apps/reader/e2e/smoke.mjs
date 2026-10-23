@@ -101,7 +101,7 @@ await step("API キーを設定", async () => {
   const modal = page.getByRole("dialog", { name: "設定" });
   await modal.getByRole("navigation", { name: "設定の項目" }).getByRole("button", { name: "読解と AI" }).click();
   await modal.getByLabel("API キー", { exact: true }).fill("sk-ant-test");
-  await modal.getByText("API キーは設定済みです。").waitFor();
+  await modal.getByText("保存しました（未確認）", { exact: false }).waitFor();
   await modal.getByRole("button", { name: "閉じる" }).click();
   await modal.waitFor({ state: "detached" });
 });

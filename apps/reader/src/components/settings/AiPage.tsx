@@ -1,13 +1,13 @@
-// 読解と AI: API キーとモデル、接続の確認、訳す言語、文体、訳語の固定、送る範囲。
+// 読解と AI: API キーとモデル、接続の確認、訳文の言語、文体、訳語の固定、送る範囲。
 // 値はこの端末（localStorage）にだけ保存する。保管庫には書かない。
-import { Plus, Trash2 } from "lucide-react";
+import { ExternalLink, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { DEFAULT_STYLE, LANG_LABEL, glossaryItemToPair, mergeGlossary, termToPair } from "../../lib/aiPrompt.ts";
 import { type Backend, ServerBackend } from "../../lib/backend.ts";
 import { checkConnection, describeError } from "../../lib/claude.ts";
 import type { ListsResponse } from "../../lib/lists.ts";
-import { type ContextSize, DEFAULT_MODEL, type GlossPair, type TargetLang, patchPref, usePref } from "../../lib/prefs.ts";
-import { SettingHeading, SettingItem, Segmented } from "./Setting.tsx";
+import { type ContextSize, DEFAULT_MODEL, type GlossPair, type TargetLang, getPref, patchPref, usePref } from "../../lib/prefs.ts";
+import { Input, Select, SettingHeading, SettingItem, Segmented, TextArea } from "./Setting.tsx";
 
 /** モデルの候補。ここに無いものは欄に名前を入力する */
 export const MODEL_CHOICES: { id: string; label: string }[] = [
@@ -17,33 +17,58 @@ export const MODEL_CHOICES: { id: string; label: string }[] = [
   { id: "claude-fable-5-1", label: "Claude Fable 5.1（最も高性能、高価）" },
 ];
 
+const CONSOLE_URL = "https://console.anthropic.com/settings/keys";
+
 const CONTEXT_DESC: Record<ContextSize, string> = {
   less: "前後 250 字ほど",
   normal: "前後 600 字ほど",
   more: "前後 1500 字ほど",
 };
 
+/** 接続の確認の結果。キーやモデルを変えたら捨てる（この画面を開いている間だけ覚える） */
+type Check = { state: "busy" } | { state: "ok" | "err"; text: string; key: string; model: string };
+let lastCheck: Check | null = null;
+
 export function AiPage({ backend }: { backend: Backend }) {
   const ai = usePref("ai");
   const lang: TargetLang = ai.lang ?? "ja";
   const [showKey, setShowKey] = useState(false);
-  const [check, setCheck] = useState<{ state: "busy" } | { state: "ok" | "err"; text: string } | null>(null);
-  const custom = !MODEL_CHOICES.some((m) => m.id === ai.model);
-  const [otherModel, setOtherModel] = useState(custom);
-  const style = ai.style?.[lang] ?? "";
+  const [check, setCheckState] = useState<Check | null>(() => (lastCheck?.state !== "busy" && lastCheck?.key === ai.apiKey && lastCheck.model === ai.model ? lastCheck : null));
+  const setCheck = (c: Check | null) => {
+    lastCheck = c;
+    setCheckState(c);
+  };
+  const listed = MODEL_CHOICES.some((m) => m.id === ai.model);
+  const [otherModel, setOtherModel] = useState(!listed);
+  // 自由入力の欄は入力したままを出す（候補と同じ名前になっても消さない）
+  const [modelDraft, setModelDraft] = useState(listed ? "" : ai.model);
 
   const runCheck = async () => {
+    const key = ai.apiKey;
+    const model = ai.model;
     setCheck({ state: "busy" });
     try {
       const name = await checkConnection(ai);
-      setCheck({ state: "ok", text: `接続できました（${name}）。` });
+      setCheck({ state: "ok", text: `接続できました（${name}）。`, key, model });
     } catch (e) {
-      setCheck({ state: "err", text: describeError(e) });
+      setCheck({ state: "err", text: describeError(e), key, model });
     }
   };
 
+  // キーの状態。確かめるまでは「未確認」とし、確かめたらその結果を出す
+  const keyState = !ai.apiKey
+    ? { cls: "is-none", text: "API キーはまだ設定していません。" }
+    : check?.state === "ok"
+      ? { cls: "is-ok", text: "API キーを確かめました。使えます。" }
+      : check?.state === "err"
+        ? { cls: "is-err", text: "API キーを確かめられませんでした。下の結果を見てください。" }
+        : { cls: "is-saved", text: "保存しました（未確認）。「接続を確かめる」で確かめられます。" };
+
   return (
     <>
+      <p className="settings-text billing-note">
+        PDF を読む・記録するだけなら API キーは要りません。Claude で訳や説明を作るときだけ使います。API の利用料は、使った量に応じて Anthropic から請求されます。
+      </p>
       <SettingHeading>Claude への接続</SettingHeading>
       <SettingItem
         id="api-key"
@@ -51,15 +76,18 @@ export function AiPage({ backend }: { backend: Backend }) {
         htmlFor="api-key"
         desc={
           <>
-            Anthropic Console で発行できます。この端末のブラウザにだけ保存し、保管庫のフォルダには書き込みません。
-            <span className={`key-state${ai.apiKey ? " is-set" : ""}`} role="status">{ai.apiKey ? "API キーは設定済みです。" : "API キーはまだ設定していません。"}</span>
+            <a href={CONSOLE_URL} target="_blank" rel="noreferrer" className="ext-link">
+              Anthropic Console<ExternalLink size={11} aria-hidden="true" />
+            </a>
+            {" "}で発行できます。この端末のブラウザにだけ保存し、保管庫のフォルダには書き込みません。
+            <span className={`key-state ${keyState.cls}`} role="status">{keyState.text}</span>
           </>
         }
       >
         <div className="row nowrap">
-          <input
+          <Input
             id="api-key"
-            className="input key-input"
+            className="key-input"
             type={showKey ? "text" : "password"}
             autoComplete="off"
             spellCheck={false}
@@ -75,30 +103,34 @@ export function AiPage({ backend }: { backend: Backend }) {
       </SettingItem>
       <SettingItem id="model" name="モデル" htmlFor="ai-model" desc={`訳・用語・数式に使うモデルです。初期設定は ${DEFAULT_MODEL} です。`}>
         <div className="stack">
-          <select
+          <Select
             id="ai-model"
-            className="select"
             value={otherModel ? "__other" : ai.model}
             onChange={(e) => {
-              if (e.target.value === "__other") return setOtherModel(true);
+              setCheck(null);
+              if (e.target.value === "__other") {
+                setOtherModel(true);
+                if (modelDraft.trim()) patchPref("ai", { model: modelDraft.trim() });
+                return;
+              }
               setOtherModel(false);
               patchPref("ai", { model: e.target.value });
-              setCheck(null);
             }}
           >
             {MODEL_CHOICES.map((m) => (
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
             <option value="__other">ほかのモデル（名前を入力）</option>
-          </select>
+          </Select>
           {otherModel && (
             <input
               className="input"
               aria-label="モデルの名前"
-              placeholder="claude-..."
+              placeholder="例: claude-..."
               spellCheck={false}
-              value={custom ? ai.model : ""}
+              value={modelDraft}
               onChange={(e) => {
+                setModelDraft(e.target.value);
                 patchPref("ai", { model: e.target.value.trim() || DEFAULT_MODEL });
                 setCheck(null);
               }}
@@ -118,9 +150,9 @@ export function AiPage({ backend }: { backend: Backend }) {
       </SettingItem>
 
       <SettingHeading>訳と説明</SettingHeading>
-      <SettingItem id="lang" name="訳す言語" desc="訳と、用語・数式の説明を書く言語です。">
+      <SettingItem id="lang" name="訳文の言語" desc="訳と、用語・数式の説明を書く言語です。">
         <Segmented
-          label="訳す言語"
+          label="訳文の言語"
           value={lang}
           options={[
             { value: "ja", label: "日本語" },
@@ -129,24 +161,8 @@ export function AiPage({ backend }: { backend: Backend }) {
           onChange={(v) => patchPref("ai", { lang: v })}
         />
       </SettingItem>
-      <SettingItem id="style" name="訳と説明の文体" htmlFor="ai-style" desc={`Claude に渡す書き方の方針です（${LANG_LABEL[lang]}で書くとき）。空にすると初期値を使います。`} stacked>
-        <textarea
-          id="ai-style"
-          className="textarea style-editor"
-          rows={7}
-          value={style || DEFAULT_STYLE[lang]}
-          onChange={(e) => {
-            const v = e.target.value;
-            patchPref("ai", { style: { ...ai.style, [lang]: v.trim() === DEFAULT_STYLE[lang].trim() ? "" : v } });
-          }}
-        />
-        <div className="row">
-          <span className="field-hint">{style ? "変更しています" : "初期値です"}</span>
-          <span className="spacer" />
-          <button type="button" className="btn text sm" disabled={!style} onClick={() => patchPref("ai", { style: { ...ai.style, [lang]: "" } })}>初期値に戻す</button>
-        </div>
-      </SettingItem>
-      <Glossary backend={backend} pairs={ai.glossary ?? []} />
+      <StyleEditor key={lang} lang={lang} style={ai.style?.[lang] ?? ""} />
+      <Glossary backend={backend} pairs={ai.glossary ?? []} lang={lang} />
 
       <SettingHeading>送る内容</SettingHeading>
       <SettingItem id="context" name="送る範囲" desc={`選んだ文の前後の本文を、訳語や意味を文脈に合わせるために添えます。いま: ${CONTEXT_DESC[ai.context ?? "normal"]}`}>
@@ -168,7 +184,27 @@ export function AiPage({ backend }: { backend: Backend }) {
   );
 }
 
-function Glossary({ backend, pairs }: { backend: Backend; pairs: GlossPair[] }) {
+/** 文体の欄。入力の途中で空にしても初期値で埋め直さない（空のまま保存すると初期値を使う） */
+function StyleEditor({ lang, style }: { lang: TargetLang; style: string }) {
+  const [draft, setDraft] = useState(style || DEFAULT_STYLE[lang]);
+  const changed = draft.trim() !== DEFAULT_STYLE[lang].trim();
+  const save = (v: string) => {
+    setDraft(v);
+    patchPref("ai", { style: { ...getPref("ai").style, [lang]: v.trim() === DEFAULT_STYLE[lang].trim() ? "" : v } });
+  };
+  return (
+    <SettingItem id="style" name="訳と説明の文体" htmlFor="ai-style" desc={`Claude に渡す書き方の方針です（${LANG_LABEL[lang]}で書くとき）。空のときは初期値を使います。`} stacked>
+      <TextArea id="ai-style" className="style-editor" rows={7} value={draft} onChange={(e) => save(e.target.value)} />
+      <div className="row">
+        <span className="field-hint">{!draft.trim() ? "空です（初期値を使います）" : changed ? "変更しています" : "初期値です"}</span>
+        <span className="spacer" />
+        <button type="button" className="btn text sm" disabled={!changed} onClick={() => save(DEFAULT_STYLE[lang])}>初期値に戻す</button>
+      </div>
+    </SettingItem>
+  );
+}
+
+function Glossary({ backend, pairs, lang }: { backend: Backend; pairs: GlossPair[]; lang: TargetLang }) {
   const [en, setEn] = useState("");
   const [ja, setJa] = useState("");
   const [msg, setMsg] = useState("");
@@ -225,7 +261,7 @@ function Glossary({ backend, pairs }: { backend: Backend; pairs: GlossPair[] }) 
     <SettingItem
       id="glossary"
       name="訳語の固定"
-      desc="英語の語を、決めた日本語で訳してもらいます。送る文にその語が出てくるときだけ指示に添えます。"
+      desc={`英語の語を、決めた日本語で訳してもらいます。送る文にその語が出てくるときだけ指示に添えます。${lang === "en" ? "訳文の言語が英語のあいだは使いません。" : ""}`}
       stacked
     >
       {pairs.length > 0 && (
@@ -239,10 +275,17 @@ function Glossary({ backend, pairs }: { backend: Backend; pairs: GlossPair[] }) 
           </thead>
           <tbody>
             {pairs.map((p, i) => (
-              <tr key={p.en}>
+              <tr key={`${i}-${p.en}`}>
                 <td>{p.en}</td>
                 <td>
-                  <input className="input sm" aria-label={`${p.en} の訳語`} value={p.ja} onChange={(e) => save(pairs.map((q, j) => (j === i ? { ...q, ja: e.target.value } : q)))} />
+                  <input
+                    className={`input sm${p.ja.trim() ? "" : " is-empty"}`}
+                    aria-label={`${p.en} の訳語`}
+                    placeholder="訳語を入力"
+                    value={p.ja}
+                    onChange={(e) => save(pairs.map((q, j) => (j === i ? { ...q, ja: e.target.value } : q)))}
+                    onBlur={() => p.ja !== p.ja.trim() && save(pairs.map((q, j) => (j === i ? { ...q, ja: q.ja.trim() } : q)))}
+                  />
                 </td>
                 <td>
                   <button type="button" className="clickable-icon" aria-label={`${p.en} を消す`} title="消す" onClick={() => save(pairs.filter((_, j) => j !== i))}>
@@ -261,9 +304,9 @@ function Glossary({ backend, pairs }: { backend: Backend; pairs: GlossPair[] }) 
           add();
         }}
       >
-        <input className="input sm" aria-label="英語の語" placeholder="self-attention" value={en} onChange={(e) => setEn(e.target.value)} spellCheck={false} />
+        <input className="input sm" aria-label="英語の語" placeholder="例: self-attention" value={en} onChange={(e) => setEn(e.target.value)} spellCheck={false} />
         <span aria-hidden="true" className="gloss-arrow">→</span>
-        <input className="input sm" aria-label="訳語" placeholder="自己注意" value={ja} onChange={(e) => setJa(e.target.value)} />
+        <input className="input sm" aria-label="訳語" placeholder="例: 自己注意" value={ja} onChange={(e) => setJa(e.target.value)} />
         <button type="submit" className="btn sm" disabled={!en.trim() || !ja.trim()}>
           <Plus size={14} aria-hidden="true" />足す
         </button>

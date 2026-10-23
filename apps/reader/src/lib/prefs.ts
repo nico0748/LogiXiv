@@ -6,6 +6,7 @@
 // - 壊れた値や知らない値は、読むときに初期値へ戻す
 
 import { useSyncExternalStore } from "react";
+import { STATUSES } from "./defaultTemplate.ts";
 import { SORT_KEYS, type SortKey } from "./paperSort.ts";
 
 // --- 型 ------------------------------------------------------------------
@@ -97,18 +98,19 @@ const DEFAULT_DISPLAY: DisplayPrefs = { fontBody: FONT_DEFAULT, fontNote: FONT_D
 function normalizeAi(u: unknown): AiSettings {
   const r = u && typeof u === "object" ? (u as Record<string, unknown>) : {};
   const style = r.style && typeof r.style === "object" ? (r.style as Record<string, unknown>) : {};
+  // 訳語の行は入力の途中（訳語が空、末尾に空白）でも残す。空白を除くのはプロンプトを作るとき（aiPrompt.ts）
   const glossary = Array.isArray(r.glossary)
     ? r.glossary.flatMap((g) => {
         const p = g && typeof g === "object" ? (g as Record<string, unknown>) : {};
-        const en = str(p.en, 200).trim();
-        const ja = str(p.ja, 200).trim();
-        return en && ja ? [{ en, ja }] : [];
+        const en = str(p.en, 200);
+        const ja = str(p.ja, 200);
+        return en.trim() ? [{ en, ja }] : [];
       })
     : [];
   const out: AiSettings = { apiKey: str(r.apiKey, 400).trim(), model: str(r.model, 200).trim() || DEFAULT_MODEL };
   const s: Partial<Record<TargetLang, string>> = {};
-  if (typeof style.ja === "string" && style.ja.trim()) s.ja = str(style.ja);
-  if (typeof style.en === "string" && style.en.trim()) s.en = str(style.en);
+  if (typeof style.ja === "string" && style.ja) s.ja = str(style.ja);
+  if (typeof style.en === "string" && style.en) s.en = str(style.en);
   if (s.ja || s.en) out.style = s;
   if (glossary.length) out.glossary = glossary;
   const context = oneOf<ContextSize>(["less", "normal", "more"], "normal")(r.context);
@@ -147,7 +149,14 @@ const DEFS: { [K in PrefName]: Def<Prefs[K]> } = {
   sentenceMarks: { key: "paperlens.sentenceMarks", def: true, decode: (r) => r !== "off", encode: (v) => (v ? "on" : "off"), normalize: (u) => u !== false },
   paperSort: { key: "paperlens.ui.paperSort", def: "created", decode: (r) => r, encode: (v) => v, normalize: oneOf<SortKey>(SORT_KEYS, "created") },
   startup: { key: "paperlens.startup", def: "last", decode: (r) => r, encode: (v) => (v === "last" ? null : v), normalize: oneOf<Startup>(["last", "list"], "last") },
-  importStatus: { key: "paperlens.importStatus", def: "", decode: (r) => r, encode: (v) => v || null, normalize: (u) => str(u, 40).trim() },
+  // 「未読」はテンプレートのままなので空で表す。知らない段階は読まない
+  importStatus: {
+    key: "paperlens.importStatus",
+    def: "",
+    decode: (r) => r,
+    encode: (v) => v || null,
+    normalize: (u) => (typeof u === "string" && u !== STATUSES[0] && (STATUSES as readonly string[]).includes(u) ? u : ""),
+  },
   ai: { key: "paperlens.ai", def: { apiKey: "", model: DEFAULT_MODEL }, decode: json, encode: (v) => JSON.stringify(v), normalize: normalizeAi },
 };
 
@@ -228,19 +237,38 @@ export function subscribePrefs(fn: (name: PrefName) => void): () => void {
 /** 別のタブで変えたときも合わせる */
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   window.addEventListener("storage", (e) => {
-    const name = PREF_NAMES.find((n) => DEFS[n].key === e.key);
-    if (!name) return;
-    cache.delete(name);
-    for (const fn of listeners) fn(name);
+    // key が null のときは、ほかのタブで localStorage をまとめて消した
+    const names = e.key === null ? PREF_NAMES : PREF_NAMES.filter((n) => DEFS[n].key === e.key);
+    for (const name of names) {
+      cache.delete(name);
+      for (const fn of listeners) fn(name);
+    }
   });
 }
 
+// 名前ごとに同じ関数を渡し、描画のたびに購読し直さないようにする
+const subscribers = new Map<PrefName, (fn: () => void) => () => void>();
+const getters = new Map<PrefName, () => unknown>();
+function subscriberFor(name: PrefName) {
+  let sub = subscribers.get(name);
+  if (!sub) {
+    sub = (fn: () => void) => subscribePrefs((n) => n === name && fn());
+    subscribers.set(name, sub);
+  }
+  return sub;
+}
+function getterFor<K extends PrefName>(name: K): () => Prefs[K] {
+  let get = getters.get(name);
+  if (!get) {
+    get = () => getPref(name);
+    getters.set(name, get);
+  }
+  return get as () => Prefs[K];
+}
+
 export function usePref<K extends PrefName>(name: K): Prefs[K] {
-  return useSyncExternalStore(
-    (fn) => subscribePrefs((n) => n === name && fn()),
-    () => getPref(name),
-    () => getPref(name),
-  );
+  const get = getterFor(name);
+  return useSyncExternalStore(subscriberFor(name), get, get);
 }
 
 // --- まとめて扱う ------------------------------------------------------------

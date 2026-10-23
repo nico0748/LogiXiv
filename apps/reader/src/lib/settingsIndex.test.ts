@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { appMode, buildReport } from "./appInfo.ts";
+import { appMode, buildReport, maskHome } from "./appInfo.ts";
 import { SETTINGS_PAGES, SETTING_ITEMS, isSettingsPage, searchSettings } from "./settingsIndex.ts";
 import { SHORTCUTS, filterShortcuts } from "./shortcuts.ts";
 
@@ -36,4 +36,19 @@ test("動作モードと不具合報告の文面", () => {
   assert.equal(appMode("server", true), "desktop");
   const r = buildReport({ version: "0.1.0", mode: "server", where: "/data", userAgent: "UA", language: "ja", screen: "1×1" });
   assert.match(r, /^PaperLens 0\.1\.0\n動作モード: ローカルサーバー/);
+});
+
+test("言い換えと隠れた語でも見つかる", () => {
+  assert.equal(searchSettings("ダークモード")[0].id, "theme");
+  assert.equal(searchSettings("APIキー")[0].id, "api-key");
+  assert.ok(searchSettings("バックアップ").some((i) => i.id === "export"));
+  assert.ok(searchSettings("保存場所").some((i) => i.id === "vault"));
+  assert.ok(searchSettings("料金").some((i) => i.id === "api-key"));
+});
+
+test("不具合報告では家のフォルダを ~ にする", () => {
+  assert.equal(maskHome("/Users/nico/Documents/PaperLens"), "~/Documents/PaperLens");
+  assert.equal(maskHome("/home/nico"), "~");
+  assert.equal(maskHome("C:\\Users\\nico\\PaperLens"), "~\\PaperLens");
+  assert.equal(maskHome("/srv/data"), "/srv/data");
 });

@@ -8,6 +8,9 @@ import { DEFAULT_WORKSPACE, type WorkspaceState, normalizeWorkspace } from "./wo
 
 const storageKey = (name: string) => `paperlens.workspace.${name}`;
 
+/** 設定の「画面の配置」のリセット。受け取ると配置を初期に戻して保存する（読み直さない） */
+export const RESET_LAYOUT_EVENT = "paperlens:reset-layout";
+
 function readLocal(name: string): WorkspaceState | null {
   try {
     const s = localStorage.getItem(storageKey(name));
@@ -62,6 +65,9 @@ export function useWorkspace(backend: Backend) {
   }, [backend]);
 
   const flush = useCallback(() => {
+    // 待っている保存はここで済ませる（閉じるときに古い配置をもう一度書かないように）
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
     const cur = latest.current;
     writeLocal(backend.name, cur);
     if (!remote.current) return;
@@ -85,6 +91,21 @@ export function useWorkspace(backend: Backend) {
     },
     [flush],
   );
+
+  // 設定から配置を初期に戻す。いま待っている保存は捨て、初期の配置をすぐに保存する
+  useEffect(() => {
+    const onReset = () => {
+      window.clearTimeout(timer.current);
+      timer.current = undefined;
+      // 開いている論文はそのまま（次に開いたときも同じ論文から）
+      const next = { ...initial(), openPaper: latest.current.openPaper };
+      latest.current = next;
+      setWs(next);
+      flush();
+    };
+    window.addEventListener(RESET_LAYOUT_EVENT, onReset);
+    return () => window.removeEventListener(RESET_LAYOUT_EVENT, onReset);
+  }, [flush]);
 
   // 閉じる前に、まだ保存していない変更を書き出す
   useEffect(() => {

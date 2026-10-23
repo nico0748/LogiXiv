@@ -33,3 +33,8 @@ export function buildReport(r: ReportInput): string {
     `画面: ${r.screen}`,
   ].join("\n");
 }
+
+/** パスの家のフォルダ（/Users/名前、/home/名前、C:\\Users\\名前）を ~ にする。OS の利用者名を報告に出さないため */
+export function maskHome(path: string): string {
+  return path.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=$|[\\/])/, "~");
+}

@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TOUR_CLOSED, TOUR_STEPS, isTourDisabled, placePopover, readRecord, shouldAutoStart, tourReducer } from "./tour.ts";
+import { TOUR_CLOSED, TOUR_STEPS, tourSteps, isTourDisabled, placePopover, readRecord, shouldAutoStart, tourReducer } from "./tour.ts";
 
-test("手順は 5〜8 個で、id は重ならない", () => {
-  assert.ok(TOUR_STEPS.length >= 5 && TOUR_STEPS.length <= 8);
-  assert.equal(new Set(TOUR_STEPS.map((s) => s.id)).size, TOUR_STEPS.length);
-  for (const s of TOUR_STEPS) assert.ok(s.targets.length > 0 && s.body.length > 0, s.id);
+test("手順はどの版でも 5〜8 個で、id は重ならない", () => {
+  for (const mode of ["browser", "server", "desktop"] as const) {
+    const steps = tourSteps(mode);
+    assert.ok(steps.length >= 5 && steps.length <= 8, mode);
+    assert.equal(new Set(steps.map((s) => s.id)).size, steps.length);
+    for (const s of steps) assert.ok(s.targets.length > 0 && s.body.length > 0, s.id);
+  }
+  assert.equal(TOUR_STEPS.length, 7);
+});
+
+test("ブラウザ版では対訳の手順を省き、ブラウザ版だと伝える。サーバー版の言い方を混ぜない", () => {
+  const browser = tourSteps("browser");
+  assert.ok(!browser.some((s) => s.id === "sentences"));
+  const text = browser.flatMap((s) => s.body).join("");
+  assert.ok(text.includes("いま開いているのはブラウザ版です"));
+  assert.ok(!text.includes("URL から追加"));
+  assert.ok(tourSteps("desktop")[0].body.join("").includes("デスクトップ版"));
+  assert.ok(tourSteps("server")[1].body.join("").includes("論文を追加"));
 });
 
 test("自動で始めるのは、記録が無く、あとでを押しておらず、無効の指定も無いときだけ", () => {
@@ -49,8 +63,13 @@ test("吹き出しの位置: 右に入れば右、入らなければ左・下、
   const big = placePopover({ left: 0, top: 0, width: 1200, height: 800 }, pop, view);
   assert.equal(big.placement, "center");
   assert.ok(big.top >= 16 && big.top + pop.height <= view.height);
-  const narrow = placePopover({ left: 0, top: 0, width: 44, height: 600 }, pop, { width: 400, height: 800 });
+  const narrow = placePopover({ left: 0, top: 0, width: 44, height: 300 }, pop, { width: 400, height: 800 });
   assert.equal(narrow.placement, "sheet");
+  assert.equal(narrow.top, 800 - 200 - 16);
+  // 対象が下半分にあれば、帯を上に出して対象を隠さない
+  const lowTarget = placePopover({ left: 0, top: 700, width: 44, height: 80 }, pop, { width: 400, height: 800 });
+  assert.equal(lowTarget.placement, "sheet");
+  assert.equal(lowTarget.top, 16);
   assert.equal(placePopover(null, pop, view).placement, "center");
   // 縦は窓に収める
   const low = placePopover({ left: 0, top: 760, width: 44, height: 40 }, pop, view);

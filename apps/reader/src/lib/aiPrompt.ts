@@ -40,11 +40,21 @@ export function trimAround(around: string, text: string, chars: number): string 
   return around.slice(Math.max(0, i - chars), i + text.length + chars);
 }
 
-/** 訳語の固定のうち、送る文に出てくるものだけ（大文字と小文字は区別しない） */
+/**
+ * 訳語の固定のうち、送る文に語として出てくるものだけ（大文字と小文字は区別しない）。
+ * 英数字の語は前後が英数字でないときだけ当てる（"head" は "ahead" に当てない）。入力の途中の空白は除く。
+ */
 export function glossaryFor(pairs: GlossPair[] | undefined, ...texts: string[]): GlossPair[] {
   if (!pairs?.length) return [];
-  const hay = texts.join("\n").toLowerCase();
-  return pairs.filter((p) => p.en && hay.includes(p.en.toLowerCase()));
+  const hay = texts.join("\n");
+  return pairs.flatMap((p) => {
+    const en = p.en.trim();
+    const ja = p.ja.trim();
+    if (!en || !ja) return [];
+    const esc = en.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, "i");
+    return re.test(hay) ? [{ en, ja }] : [];
+  });
 }
 
 /** システムプロンプトに添える訳語の指示。対象が無ければ空文字 */
@@ -80,10 +90,10 @@ export function glossaryItemToPair(term: string, meaning: string): GlossPair | n
 
 /** 既にある対（英語の語で比べる）を除いて足す。足した数も返す */
 export function mergeGlossary(base: GlossPair[], add: GlossPair[]): { list: GlossPair[]; added: number } {
-  const seen = new Set(base.map((p) => p.en.toLowerCase()));
+  const seen = new Set(base.map((p) => p.en.trim().toLowerCase()));
   const list = [...base];
   for (const p of add) {
-    const k = p.en.toLowerCase();
+    const k = p.en.trim().toLowerCase();
     if (seen.has(k)) continue;
     seen.add(k);
     list.push(p);

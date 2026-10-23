@@ -40,7 +40,8 @@ const reopen = async () => {
   await page.locator(".pdf-page[data-page='1'] .textLayer span").first().waitFor();
 };
 const openPage = async (label) => {
-  await nav.getByRole("button", { name: label, exact: true }).click();
+  // 保存していない変更があるページは、名前の後ろに知らせが付く
+  await nav.getByRole("button", { name: new RegExp(`^${label.replace(/[()（）]/g, "\\$&")}`) }).click();
   await modal.getByRole("heading", { level: 2, name: label }).waitFor();
 };
 
@@ -113,7 +114,7 @@ try {
   await step("文字の大きさを替えると、右サイドバーの文字が大きくなる", async () => {
     const size = () => page.evaluate(() => getComputedStyle(document.querySelector(".panel") ?? document.body).getPropertyValue("--font-ui-small").trim());
     const before = await size();
-    await modal.getByLabel("本文の文字サイズ").fill("17");
+    await modal.getByLabel("補足情報の文字サイズ").fill("17");
     await page.waitForFunction(() => document.documentElement.style.getPropertyValue("--pl-fs-body").startsWith("1.3"));
     const px = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector(".panel .panel-note") ?? document.querySelector(".panel")).fontSize));
     if (!(px > 14)) throw new Error(`本文の文字が大きくならない: ${before} → ${px}px`);
@@ -122,15 +123,61 @@ try {
     await page.waitForFunction(() => document.documentElement.dataset.accent === "green");
   });
 
-  await step("API キーを入力すると「設定済み」になり、接続を確かめられる", async () => {
+  await step("API キーを入力すると「未確認」になり、確かめると結果を出す", async () => {
     await openPage("読解と AI");
     await modal.getByText("API キーはまだ設定していません。").waitFor();
+    await modal.getByRole("link", { name: "Anthropic Console" }).waitFor();
     await modal.getByLabel("API キー", { exact: true }).fill("sk-ant-test");
-    await modal.getByText("API キーは設定済みです。").waitFor();
+    await modal.getByText("保存しました（未確認）", { exact: false }).waitFor();
     await modal.getByRole("button", { name: "接続を確かめる" }).click();
     await modal.getByText("接続できました（Claude Opus 5.5）。").waitFor();
+    await modal.getByText("API キーを確かめました。使えます。").waitFor();
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("paperlens.ai")));
     if (stored.apiKey !== "sk-ant-test") throw new Error("API キーが保存されない");
+  });
+
+  await step("訳語の欄を空にしても行は消えず、空白も打てる", async () => {
+    await modal.getByLabel("英語の語").fill("self-attention");
+    await modal.getByLabel("訳語", { exact: true }).fill("自己注意");
+    await modal.getByRole("button", { name: "足す" }).click();
+    const row = modal.getByLabel("self-attention の訳語");
+    await row.fill("");
+    await row.pressSequentially("自己 注意");
+    if ((await row.inputValue()) !== "自己 注意") throw new Error(`訳語に空白が打てない: ${await row.inputValue()}`);
+    await row.fill("");
+    if (!(await modal.getByLabel("self-attention の訳語").count())) throw new Error("訳語を空にすると行が消える");
+    await modal.getByRole("button", { name: "self-attention を消す" }).click();
+  });
+
+  await step("保存していないテンプレートは、ページを替えても残る", async () => {
+    await openPage("テンプレート");
+    const tpl = modal.locator("#tpl");
+    await page.waitForFunction(() => !document.querySelector("#tpl")?.disabled);
+    await tpl.press("Control+End");
+    await tpl.pressSequentially("\n追記のテスト");
+    await modal.getByText("保存していない変更があります").first().waitFor();
+    await openPage("表示");
+    await openPage("テンプレート");
+    if (!(await tpl.inputValue()).endsWith("追記のテスト")) throw new Error("下書きが消えた");
+    await modal.getByRole("button", { name: "変更を取り消す" }).click();
+  });
+
+  await step("画面の配置のリセットは、読み直さずにその場で戻し、閉じたあとも戻ったまま", async () => {
+    await modal.getByRole("button", { name: "閉じる" }).click();
+    await page.keyboard.press("Control+Backslash");
+    await page.waitForFunction(() => document.querySelector("aside.sidebar.left")?.getAttribute("aria-hidden") !== "true");
+    await ribbon("設定").click();
+    await openPage("データ");
+    await modal.locator("#set-reset").getByRole("button", { name: "初期に戻す" }).nth(1).click();
+    await modal.getByRole("button", { name: "戻す", exact: true }).click();
+    await modal.getByText("画面の配置を初期に戻しました。").waitFor();
+    await page.waitForFunction(() => document.querySelector("aside.sidebar.left")?.getAttribute("aria-hidden") === "true");
+    // お試しの保管庫のまま（最初の画面に戻らない）
+    await page.locator(".pdf-page[data-page='1']").first().waitFor();
+    // 閉じるときの保存（pagehide）でも古い配置を書き戻さない
+    await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+    const saved = await page.evaluate(() => Object.entries(localStorage).filter(([k]) => k.startsWith("paperlens.workspace.")).map(([, v]) => JSON.parse(v)));
+    if (saved.some((w) => w.leftOpen)) throw new Error(`古い配置が残っている: ${JSON.stringify(saved)}`);
   });
 
   await step("ショートカットを検索できる", async () => {
@@ -151,6 +198,11 @@ try {
     await page.getByRole("button", { name: "API キーを設定する" }).first().click();
     await modal.getByRole("heading", { level: 2, name: "読解と AI" }).waitFor();
     await modal.locator("#set-api-key").waitFor();
+    // 閉じてリボンから開き直すと「全般」から
+    await modal.getByRole("button", { name: "閉じる" }).click();
+    await ribbon("設定").click();
+    await modal.getByRole("heading", { level: 2, name: "全般" }).waitFor();
+    await modal.getByRole("button", { name: "閉じる" }).click();
   });
 
   if (shotDir) {
@@ -170,11 +222,16 @@ try {
         await page.screenshot({ path: `${shotDir}/${theme}-search.png` });
         await modal.getByRole("button", { name: "閉じる" }).click();
       }
-      // 狭い画面
-      await page.setViewportSize({ width: 420, height: 800 });
-      await ribbon("設定").click();
-      await openPage("表示");
-      await page.screenshot({ path: `${shotDir}/narrow-display.png` });
+      // 狭い画面（800px は左に細いナビ、420px は上にタブ）
+      for (const w of [800, 420]) {
+        await page.setViewportSize({ width: w, height: 800 });
+        await ribbon("設定").click();
+        await openPage("表示");
+        await page.screenshot({ path: `${shotDir}/narrow-${w}-display.png` });
+        await openPage("読解と AI");
+        await page.screenshot({ path: `${shotDir}/narrow-${w}-ai.png` });
+        await modal.getByRole("button", { name: "閉じる" }).click();
+      }
     });
   }
 

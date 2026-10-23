@@ -1,7 +1,7 @@
 // Obsidian の設定画面と同じ形のモーダル。左に項目の一覧、右に中身を置く。
 // Esc で閉じる処理は App のキーボード操作でまとめて行う。
 import { X } from "lucide-react";
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, type Ref, useEffect, useRef } from "react";
 
 export interface ModalNavItem {
   id: string;
@@ -17,9 +17,15 @@ interface Props {
   onNav?: (id: string) => void;
   children: ReactNode;
   className?: string;
+  /** 項目の一覧の上に置くもの（設定の検索欄など） */
+  navHeader?: ReactNode;
+  /** 項目の一覧の代わりに出すもの（設定の検索の結果など）。nav が無くても左の欄を出す */
+  navBody?: ReactNode;
+  /** 右の中身（スクロールする要素） */
+  contentRef?: Ref<HTMLDivElement>;
 }
 
-export function Modal({ title, onClose, nav, activeNav, onNav, children, className }: Props) {
+export function Modal({ title, onClose, nav, activeNav, onNav, children, className, navHeader, navBody, contentRef }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
@@ -33,12 +39,13 @@ export function Modal({ title, onClose, nav, activeNav, onNav, children, classNa
         <button className="modal-close-button clickable-icon" aria-label="閉じる" onClick={onClose}>
           <X size={18} aria-hidden="true" />
         </button>
-        {nav && (
+        {(nav || navBody) && (
           <nav className="vertical-tab-header" aria-label={`${title}の項目`}>
-            {groups.map((g) => (
+            {navHeader}
+            {navBody ?? groups.map((g) => (
               <div key={g} className="vertical-tab-header-group">
                 {g && <div className="vertical-tab-header-group-title">{g}</div>}
-                {nav
+                {(nav ?? [])
                   .filter((n) => (n.group ?? "") === g)
                   .map((n) => (
                     <button key={n.id} className={`vertical-tab-nav-item${activeNav === n.id ? " is-active" : ""}`} aria-current={activeNav === n.id} onClick={() => onNav?.(n.id)}>
@@ -49,7 +56,7 @@ export function Modal({ title, onClose, nav, activeNav, onNav, children, classNa
             ))}
           </nav>
         )}
-        <div className="vertical-tab-content">{children}</div>
+        <div className="vertical-tab-content" ref={contentRef}>{children}</div>
       </div>
     </div>
   );

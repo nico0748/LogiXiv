@@ -773,7 +773,8 @@ dialog.wide { max-width: min(880px, calc(100vw - 32px)); }
   border-left: 3px solid var(--interactive-accent); background: color-mix(in srgb, var(--interactive-accent) 10%, transparent);
   padding: 8px 12px; font-size: var(--font-ui-small); border-radius: 0 var(--radius-s) var(--radius-s) 0; margin-top: 16px; color: var(--text-normal);
 }
-.notice.warn { border-left-color: var(--md-sys-color-warning); background: var(--md-sys-color-warning-container); color: var(--md-sys-color-on-warning-container); }
+/* 注意。黄色の面は暗い表示で強く出るので、警告色を薄く混ぜた面にする */
+.notice.warn { border-left-color: var(--md-sys-color-warning); background: color-mix(in srgb, var(--md-sys-color-warning) 10%, var(--background-primary)); color: var(--text-normal); }
 
 /* 空の状態（アイコン・見出し・説明） */
 .empty-state { display: grid; justify-items: center; gap: 4px; text-align: center; padding: 40px 16px; color: var(--text-muted); }

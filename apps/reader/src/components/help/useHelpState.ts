@@ -49,8 +49,9 @@ export function useHelpHotkey(onPress: () => void): void {
   const on = useCallback((e: KeyboardEvent) => {
     if (e.key !== "?" || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
     if (isTyping(e.target) || isTyping(document.activeElement)) return;
-    // 開いているダイアログ（<dialog>）と画面の案内（ツアー）の上では使わない
-    if (document.querySelector("dialog[open], .tour")) return;
+    // 開いているダイアログ（設定・ヘルプ・リストなど）と画面の案内（ツアー）の上では使わない。
+    // 早見表（.help-sheet）の上では、もう一度押すと閉じる
+    if (document.querySelector("dialog[open], .tour, [aria-modal='true']:not(.help-sheet)")) return;
     e.preventDefault();
     ref.current();
   }, []);

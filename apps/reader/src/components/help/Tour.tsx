@@ -2,21 +2,22 @@
 // ← → で前後、Esc で「あとで」。手順と始める条件は src/lib/tour.ts。
 // 手順によって左右のサイドバーを開き、終えたら始める前の開き方に戻す。
 import { X } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import sampleUrl from "../../demo/sample.pdf?url";
 import {
   type Box,
   TOUR_CLOSED,
   TOUR_KEY,
   TOUR_LATER_KEY,
-  TOUR_STEPS,
+  type AppMode,
   isTourDisabled,
   placePopover,
   readRecord,
   shouldAutoStart,
   tourReducer,
+  tourSteps,
 } from "../../lib/tour.ts";
-import { markChangesSeen } from "./useHelpState.ts";
+import { isTyping, markChangesSeen } from "./useHelpState.ts";
 import "./help.css";
 
 export interface TourLayout {
@@ -25,6 +26,8 @@ export interface TourLayout {
 }
 
 interface Props {
+  /** 動かし方。手順と言い方を合わせる */
+  mode: AppMode;
   /** 画面の準備ができ、ほかの画面を重ねていないとき true。自動で始めるのはこのときだけ */
   ready: boolean;
   /** 値が変わるたびに最初から始める（ヘルプの「もう一度見る」） */
@@ -37,28 +40,33 @@ interface Props {
   setLayout: (l: Partial<TourLayout>) => void;
 }
 
+// localStorage / sessionStorage は、参照するだけで例外になる環境がある（保存を禁じた設定など）。取り出しも try の中で行う
 const store = {
-  get: (s: Storage, k: string) => {
+  get: (s: () => Storage, k: string) => {
     try {
-      return s.getItem(k);
+      return s().getItem(k);
     } catch {
       return null;
     }
   },
-  set: (s: Storage, k: string, v: string) => {
+  set: (s: () => Storage, k: string, v: string) => {
     try {
-      s.setItem(k, v);
+      s().setItem(k, v);
     } catch {
       // 覚えられなくても、案内は閉じられる
     }
   },
 };
+const local = () => localStorage;
+const session = () => sessionStorage;
 
 const PAD = 6;
 
-export function Tour({ ready, restart, hasPapers, onImport, layout, setLayout }: Props) {
-  const [state, dispatch] = useReducer((s: typeof TOUR_CLOSED, a: Parameters<typeof tourReducer>[1]) => tourReducer(s, a), TOUR_CLOSED);
-  const step = state.open ? TOUR_STEPS[state.index] : null;
+export function Tour({ mode, ready, restart, hasPapers, onImport, layout, setLayout }: Props) {
+  const steps = useMemo(() => tourSteps(mode), [mode]);
+  const [state, dispatch] = useReducer((s: typeof TOUR_CLOSED, a: Parameters<typeof tourReducer>[1] & { total: number }) => tourReducer(s, a, a.total), TOUR_CLOSED);
+  const go = useCallback((a: Parameters<typeof tourReducer>[1]) => dispatch({ ...a, total: steps.length }), [steps.length]);
+  const step = state.open ? steps[state.index] : null;
   const [rect, setRect] = useState<Box | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number; placement: string } | null>(null);
   const [importing, setImporting] = useState<"idle" | "busy" | "done" | "error">("idle");
@@ -74,21 +82,22 @@ export function Tour({ ready, restart, hasPapers, onImport, layout, setLayout }:
   useEffect(() => {
     if (!ready || tried.current) return;
     const env = {
-      record: readRecord(store.get(localStorage, TOUR_KEY)),
-      later: store.get(sessionStorage, TOUR_LATER_KEY) === "1",
+      record: readRecord(store.get(local, TOUR_KEY)),
+      later: store.get(session, TOUR_LATER_KEY) === "1",
       disabled: isTourDisabled(location.search, (window as unknown as { __PAPERLENS_NO_TOUR?: unknown }).__PAPERLENS_NO_TOUR),
     };
     if (!shouldAutoStart(env)) return;
     // 待つ間にほかの画面を開いたら取りやめ、閉じたあとにもう一度待つ
     const t = window.setTimeout(() => {
       tried.current = true;
-      dispatch({ type: "start" });
+      go({ type: "start" });
     }, 600);
     return () => window.clearTimeout(t);
-  }, [ready]);
+  }, [ready, go]);
 
   useEffect(() => {
-    if (restart) dispatch({ type: "start" });
+    if (restart) go({ type: "start" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restart]);
 
   // 開いたときの配置を覚え、手順ごとに必要なサイドバーだけ開く。閉じたら元に戻す
@@ -100,7 +109,7 @@ export function Tour({ ready, restart, hasPapers, onImport, layout, setLayout }:
     }
     if (!before.current) before.current = { ...layoutRef.current };
     const base = before.current;
-    const want = TOUR_STEPS[state.index].open;
+    const want = steps[state.index]?.open;
     // 狭い画面ではサイドバーが中央に重なるので、開くのは片方だけにする
     const narrow = window.innerWidth <= 900;
     setLayout({
@@ -142,39 +151,61 @@ export function Tour({ ready, restart, hasPapers, onImport, layout, setLayout }:
     return () => cancelAnimationFrame(raf);
   }, [step]);
 
-  // 手順が替わったら「次へ」にフォーカスする
+  // 手順が替わったら「次へ」にフォーカスする。閉じたら、開く前にフォーカスしていた所へ戻す
+  const returnFocus = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (step) nextRef.current?.focus({ preventScroll: true });
   }, [step]);
+  useEffect(() => {
+    if (state.open) {
+      returnFocus.current = document.activeElement as HTMLElement | null;
+      return;
+    }
+    returnFocus.current?.focus?.({ preventScroll: true });
+    returnFocus.current = null;
+  }, [state.open]);
 
   const finish = useCallback(() => {
-    store.set(localStorage, TOUR_KEY, "done");
+    store.set(local, TOUR_KEY, "done");
     // 初めての人に、それまでの更新情報の印は出さない
     markChangesSeen();
-    dispatch({ type: "finish" });
-  }, []);
+    go({ type: "finish" });
+  }, [go]);
   const later = useCallback(() => {
-    store.set(sessionStorage, TOUR_LATER_KEY, "1");
-    dispatch({ type: "later" });
-  }, []);
-  const last = state.index === TOUR_STEPS.length - 1;
-  const next = useCallback(() => (last ? finish() : dispatch({ type: "next" })), [last, finish]);
+    store.set(session, TOUR_LATER_KEY, "1");
+    go({ type: "later" });
+  }, [go]);
+  const last = state.index === steps.length - 1;
+  const next = useCallback(() => (last ? finish() : go({ type: "next" })), [last, finish, go]);
 
-  // ← → Esc。ほかの画面のキー操作（Esc で重ねた画面を閉じる等）には渡さない
+  // 開いている間のキー操作。← → Esc で動かし、Tab は吹き出しの中だけを回る。
+  // ほかの画面のキー操作（Esc で重ねた画面を閉じる、j/k、スライドの r/v/Delete など）には渡さない
   useEffect(() => {
     if (!state.open) return;
     const on = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      e.stopImmediatePropagation();
+      const pop = popRef.current;
+      if (e.key === "Tab" && pop) {
+        const items = [...pop.querySelectorAll<HTMLElement>("button:not(:disabled), [href], input, [tabindex]:not([tabindex='-1'])")];
+        if (!items.length) return;
+        const i = items.indexOf(document.activeElement as HTMLElement);
+        const j = i < 0 ? 0 : (i + (e.shiftKey ? -1 : 1) + items.length) % items.length;
+        e.preventDefault();
+        items[j].focus();
+        return;
+      }
+      // 入力欄に打っている文字は横取りしない
+      if (e.metaKey || e.ctrlKey || e.altKey || isTyping(e.target)) return;
       if (e.key === "ArrowRight") next();
-      else if (e.key === "ArrowLeft") dispatch({ type: "prev" });
+      else if (e.key === "ArrowLeft") go({ type: "prev" });
       else if (e.key === "Escape") later();
+      else if (!pop?.contains(e.target as Node)) e.preventDefault();
       else return;
       e.preventDefault();
-      e.stopImmediatePropagation();
     };
     window.addEventListener("keydown", on, true);
     return () => window.removeEventListener("keydown", on, true);
-  }, [state.open, next, later]);
+  }, [state.open, next, later, go]);
 
   const importSample = async () => {
     setImporting("busy");
@@ -215,7 +246,7 @@ export function Tour({ ready, restart, hasPapers, onImport, layout, setLayout }:
         aria-describedby={`${titleId}-body`}
       >
         <div className="tour-pop-head">
-          <span className="tour-count">{state.index + 1} / {TOUR_STEPS.length}</span>
+          <span className="tour-count">{state.index + 1} / {steps.length}</span>
           <button type="button" className="clickable-icon tour-close" aria-label="あとで（Esc）" title="あとで（Esc）" onClick={later}>
             <X size={16} aria-hidden="true" />
           </button>
@@ -240,14 +271,14 @@ export function Tour({ ready, restart, hasPapers, onImport, layout, setLayout }:
           </div>
         )}
         <div className="tour-dots" aria-hidden="true">
-          {TOUR_STEPS.map((s, i) => <span key={s.id} className={i === state.index ? "is-on" : undefined} />)}
+          {steps.map((s, i) => <span key={s.id} className={i === state.index ? "is-on" : undefined} />)}
         </div>
         <div className="tour-actions">
           <button type="button" className="btn text sm" onClick={finish}>スキップ</button>
           <button type="button" className="btn text sm" onClick={later}>あとで</button>
           <span className="spacer" />
-          <button type="button" className="btn sm" disabled={state.index === 0} onClick={() => dispatch({ type: "prev" })}>戻る</button>
-          <button ref={nextRef} type="button" className="btn primary sm" onClick={next}>{last ? "はじめる" : "次へ"}</button>
+          <button type="button" className="btn sm" disabled={state.index === 0} onClick={() => go({ type: "prev" })}>戻る</button>
+          <button ref={nextRef} type="button" className="btn primary sm" onClick={next}>{last ? "使いはじめる" : "次へ"}</button>
         </div>
         <p className="tour-keys" aria-hidden="true"><kbd>←</kbd> <kbd>→</kbd> で移動、<kbd>Esc</kbd> で閉じる</p>
       </div>

@@ -4,14 +4,14 @@ import { useRef, useState } from "react";
 import type { Backend } from "../../lib/backend.ts";
 import { STATUSES } from "../../lib/defaultTemplate.ts";
 import { DISPLAY_PREFS, clearStoredLayout, clearStoredPositions, exportPrefs, importPrefs, resetPref, setPref, usePref } from "../../lib/prefs.ts";
-import { DEFAULT_WORKSPACE } from "../shell/workspaceState.ts";
+import { RESET_LAYOUT_EVENT } from "../shell/useWorkspace.ts";
 import { SettingHeading, SettingItem } from "./Setting.tsx";
 
 type ResetKind = "positions" | "layout" | "display";
 
 const RESET: Record<ResetKind, { name: string; desc: string; confirm: string }> = {
   positions: { name: "前回の位置", desc: "論文ごとに覚えている「前回の位置」を消します。次に開くと先頭から表示します。", confirm: "前回の位置をすべて消します。" },
-  layout: { name: "画面の配置", desc: "サイドバーの開閉と幅、開いている論文を初期に戻します。画面を読み直します。", confirm: "画面の配置を初期に戻し、読み直します。" },
+  layout: { name: "画面の配置", desc: "左右のサイドバーの開閉と幅を初期に戻します。開いている論文はそのままです。", confirm: "画面の配置を初期に戻します。" },
   display: { name: "表示の設定", desc: "テーマ・アクセント色・文字の大きさ・PDF の倍率・文の枠・並び順を初期に戻します。", confirm: "表示の設定を初期に戻します。" },
 };
 
@@ -41,7 +41,7 @@ export function DataPage({ backend }: { backend: Backend }) {
     }
   };
 
-  const reset = async (k: ResetKind) => {
+  const reset = (k: ResetKind) => {
     setAsk(null);
     if (k === "positions") {
       const n = clearStoredPositions();
@@ -50,11 +50,11 @@ export function DataPage({ backend }: { backend: Backend }) {
       for (const n of DISPLAY_PREFS) resetPref(n);
       setDone("表示の設定を初期に戻しました。");
     } else {
+      // 読み直さずにその場で戻す（1 ファイル版のお試しの保管庫はメモリにあり、読み直すと消えるため）。
+      // 保存（localStorage と、サーバー版の workspace.json）は useWorkspace がすぐに行う
       clearStoredLayout();
-      if (backend.kind === "server") {
-        await fetch("/api/workspace", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(DEFAULT_WORKSPACE) }).catch(() => undefined);
-      }
-      location.reload();
+      window.dispatchEvent(new Event(RESET_LAYOUT_EVENT));
+      setDone("画面の配置を初期に戻しました。");
     }
   };
 
@@ -102,7 +102,7 @@ export function DataPage({ backend }: { backend: Backend }) {
               <div className="row nowrap confirm-row" role="group" aria-label={`${RESET[k].name}のリセットの確認`}>
                 <span className="confirm-text">{RESET[k].confirm}</span>
                 <button type="button" className="btn text sm" onClick={() => setAsk(null)}>やめる</button>
-                <button type="button" className="btn danger sm" onClick={() => void reset(k)}>戻す</button>
+                <button type="button" className="btn danger sm" onClick={() => reset(k)}>戻す</button>
               </div>
             ) : (
               <button type="button" className="btn" onClick={() => setAsk(k)}>初期に戻す</button>

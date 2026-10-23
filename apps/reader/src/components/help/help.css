@@ -108,7 +108,8 @@
 .help-keys-group h2 { font-size: var(--font-ui-smaller); font-weight: 600; color: var(--text-faint); margin: 0 0 6px; letter-spacing: 0.02em; }
 .help-keys-group dl { margin: 0; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); overflow: hidden; }
 .help-keys-row {
-  display: grid; grid-template-columns: minmax(150px, max-content) 1fr; gap: 16px; align-items: baseline;
+  /* 行ごとに別の grid なので、キーの列は決まった幅にしてそろえる */
+  display: grid; grid-template-columns: 12em 1fr; gap: 16px; align-items: baseline;
   padding: 7px 12px; font-size: var(--font-ui-small);
 }
 .help-keys-row + .help-keys-row { border-top: 1px solid var(--background-modifier-border); }

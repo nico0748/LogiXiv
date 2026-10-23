@@ -41,3 +41,11 @@ test("既にある語は足さない（大文字と小文字は区別しない�
   assert.equal(r.added, 1);
   assert.deepEqual(r.list.map((p) => p.en), ["Token", "head"]);
 });
+
+test("訳語の固定は語の切れ目で当てる。入力途中の空白や空の訳語は使わない", () => {
+  const pairs = [{ en: "head", ja: "ヘッド" }, { en: "C++", ja: "シープラスプラス" }, { en: "token ", ja: " トークン " }, { en: "layer", ja: "" }];
+  assert.deepEqual(glossaryFor(pairs, "Go ahead."), []);
+  assert.deepEqual(glossaryFor(pairs, "Each head attends."), [{ en: "head", ja: "ヘッド" }]);
+  assert.deepEqual(glossaryFor(pairs, "written in C++ code"), [{ en: "C++", ja: "シープラスプラス" }]);
+  assert.deepEqual(glossaryFor(pairs, "one token per layer"), [{ en: "token", ja: "トークン" }]);
+});

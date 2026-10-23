@@ -6,7 +6,8 @@
 // - {{Ctrl + \}}  … キー（kbd）
 // - [[import|論文を取り込む]] … 別の章へのリンク（id は HelpChapter.id、"faq" / "keys" / "changes" も可）
 
-import type { SettingsPageId } from "./settingsIndex.ts";
+import { type SettingsPageId, openSettings } from "./settingsIndex.ts";
+import { matchesQuery, queryTerms } from "./searchText.ts";
 
 /** 設定画面のページ。SettingsModal の initialPage と同じ値 */
 export type SettingsTarget = SettingsPageId;
@@ -28,6 +29,8 @@ export interface HelpChapter {
   /** 章の一覧と検索結果に出す 1 行の説明 */
   summary: string;
   blocks: HelpBlock[];
+  /** 本文に無いが、この章で探されそうな語（検索だけに使う） */
+  keywords?: string[];
 }
 
 export interface FaqItem {
@@ -36,6 +39,8 @@ export interface FaqItem {
   a: string[];
   /** 詳しく書いてある章 */
   chapter?: string;
+  /** 本文に無いが、この質問で探されそうな語（検索だけに使う） */
+  keywords?: string[];
 }
 
 export interface ChangeEntry {
@@ -56,6 +61,7 @@ const settings = (page: SettingsTarget, label: string): HelpBlock => ({ kind: "s
 export const HELP_CHAPTERS: HelpChapter[] = [
   {
     id: "start",
+    keywords: ["使い方", "初めて", "概要", "ブラウザ版", "サーバー版", "デスクトップ版", "保存場所"],
     title: "はじめに",
     summary: "PaperLens でできることと、画面の見方です。",
     blocks: [
@@ -82,6 +88,7 @@ export const HELP_CHAPTERS: HelpChapter[] = [
   },
   {
     id: "import",
+    keywords: ["PDF を開く", "論文を追加", "URL", "arXiv", "並べ替え", "タグ"],
     title: "論文を取り込む",
     summary: "PDF を選ぶ・ドロップする、URL や arXiv の番号から取り込む方法です。",
     blocks: [
@@ -104,6 +111,7 @@ export const HELP_CHAPTERS: HelpChapter[] = [
   },
   {
     id: "read",
+    keywords: ["PDF が表示されない", "ページ", "倍率", "ズーム", "前回の位置", "サイドバー"],
     title: "読む（PDF の操作）",
     summary: "拡大・縮小、ページの移動、前回の位置、サイドバーの幅です。",
     blocks: [
@@ -112,13 +120,14 @@ export const HELP_CHAPTERS: HelpChapter[] = [
         "ページ番号の欄に数字を入れて Enter を押すと、そのページへ移ります。",
         "論文を開き直すと、前回の位置から表示します。下に出る「先頭に戻る」で 1 ページ目へ戻れます。",
         "サイドバーの端をつまむと幅を変えられます（ダブルクリックで元の幅）。開け閉めと幅は保存先の `.paperlens/workspace.json` に保存します。",
-        "見出しの右の「Obsidian で開く」で、読解ノートを Obsidian で開けます（保存先がフォルダのときだけ出ます）。",
+        "論文の上の帯の右側にある、矢印付きの四角のアイコン（Obsidian で開く）で、読解ノートを Obsidian で開けます（保存先がフォルダのときだけ出ます）。",
       ),
       p("文を選んで記録する方法は [[record|記録する]] を見てください。"),
     ],
   },
   {
     id: "record",
+    keywords: ["翻訳", "訳せない", "ハイライト", "メモ", "API キー"],
     title: "記録する（マーカー・訳・用語・数式・記録欄）",
     summary: "PDF の文を選んで、マーカー・訳・用語・数式を残す方法と、右サイドバーのタブです。",
     blocks: [
@@ -143,6 +152,7 @@ export const HELP_CHAPTERS: HelpChapter[] = [
   },
   {
     id: "sentences",
+    keywords: ["翻訳", "全文の訳", "GROBID", "1 文ずつ"],
     title: "対訳で読む",
     summary: "論文を 1 文ずつに分けて、原文と訳を並べて読む方法です。",
     blocks: [
@@ -162,6 +172,7 @@ export const HELP_CHAPTERS: HelpChapter[] = [
   },
   {
     id: "glossary",
+    keywords: ["単語帳", "数式帳", "つながり"],
     title: "用語集とグラフ",
     summary: "対訳の用語集、すべての論文の単語帳と数式帳（リスト）、論文と用語のグラフです。",
     blocks: [
@@ -179,6 +190,7 @@ export const HELP_CHAPTERS: HelpChapter[] = [
   },
   {
     id: "slides",
+    keywords: ["発表", "プレゼン", "PPTX"],
     title: "スライドと論文を対応させる",
     summary: "論文発表会のスライドの一部を囲み、論文の文章・図・数式にリンクする方法です。",
     blocks: [
@@ -201,13 +213,14 @@ export const HELP_CHAPTERS: HelpChapter[] = [
   },
   {
     id: "export",
+    keywords: ["バックアップ", "エクスポート", "引用", ".bib", "Markdown"],
     title: "書き出す（BibTeX・Markdown）",
     summary: "BibTeX のコピーと .bib ファイル、Markdown の読解ノートの使い方です。",
     blocks: [
       h("BibTeX"),
       list(
         "1 本ずつ: 記録タブの「書誌情報」の「BibTeX をコピー」でコピーします。",
-        "まとめて: 論文一覧の下の「BibTeX を書き出す」で、表示している論文の BibTeX を 1 つの .bib ファイルに保存します。絞り込み中は、表示している論文だけを書き出します。",
+        "まとめて: 論文一覧の下の「すべての BibTeX を書き出す」で、1 つの .bib ファイルに保存します。絞り込み中は「表示中の … 件の BibTeX を書き出す」になり、表示している論文だけを書き出します。",
         "引用キーが重なったときは、2 つ目から末尾に a, b, … を付けます。",
       ),
       h("Markdown（読解ノート）"),
@@ -218,12 +231,13 @@ export const HELP_CHAPTERS: HelpChapter[] = [
   },
   {
     id: "mcp",
+    keywords: ["Claude Desktop", "Claude Code", "エージェント", "つながらない"],
     title: "AI エージェントから使う（MCP）",
     summary: "Claude Desktop や Claude Code から PaperLens を操作する方法です。",
     blocks: [
       p("MCP サーバーを登録すると、Claude Desktop や Claude Code などの AI エージェントが、画面と同じ操作（取り込み、本文の読み取り、全文の対訳、マーカーと訳、用語、数式、記録欄の入力、読解の段階の変更）を行えます。アプリを起動していなくても使えます。"),
       steps(
-        "サーバー版かデスクトップ版で PaperLens を開きます（ブラウザ版からは登録できません）。",
+        "サーバー版かデスクトップ版で PaperLens を開きます。ブラウザ版（1 つの HTML ファイル）からは登録できません。サーバー版は、リポジトリの `apps/reader` で `npm run build` のあと `npm start` を実行し、表示された URL（http://127.0.0.1:5175 ）をブラウザで開きます。デスクトップ版は `npm run app` で開きます。",
         "設定の「AI エージェント（MCP）」を開き、Claude Code のコマンドか Claude Desktop の設定を「コピーする」でコピーします。",
         "Claude Code では端末に貼り付けて実行します。Claude Desktop では設定ファイルの `mcpServers` に加え、Claude Desktop を再起動します。",
       ),
@@ -237,6 +251,7 @@ export const HELP_CHAPTERS: HelpChapter[] = [
   },
   {
     id: "settings",
+    keywords: ["ダークモード", "テーマ", "文字の大きさ", "API キー", "モデル", "保存場所"],
     title: "設定",
     summary: "保存先、表示、Claude、テンプレート、データ、連携の設定です。",
     blocks: [
@@ -258,8 +273,20 @@ export const HELP_CHAPTERS: HelpChapter[] = [
 
 export const HELP_FAQ: FaqItem[] = [
   {
+    id: "faq-cost",
+    q: "お金はかかりますか",
+    a: [
+      "PaperLens そのものは無料です。PDF を読む、マーカーを引く、訳やメモを手で書く、対訳を読む、などは Claude を使わずにできます。",
+      "画面から「訳す」「用語を調べる」「数式にする」で Claude を使うと、Claude の API の利用料が Anthropic からかかります。料金と使った量は Anthropic Console（https://console.anthropic.com ）で確かめられます。",
+      "MCP で Claude Desktop や Claude Code から使うときは、それぞれのプランの範囲で使えます。",
+    ],
+    chapter: "record",
+    keywords: ["料金", "無料", "有料", "課金", "費用"],
+  },
+  {
     id: "faq-select",
     q: "PDF の文を選べない",
+    keywords: ["PDF が表示されない", "文字が選べない", "スキャン"],
     a: [
       "画像だけの PDF（スキャンした PDF）は文字の情報が無いため選べません。OCR をかけてから取り込み直してください。",
       "スライドの画面で「囲む」などの道具を選んでいると、ドラッグは囲む操作になります。「選ぶ」（{{V}}）に戻してください。",
@@ -267,8 +294,19 @@ export const HELP_FAQ: FaqItem[] = [
     chapter: "record",
   },
   {
+    id: "faq-pdf-blank",
+    q: "PDF が表示されない",
+    a: [
+      "論文を選んでいないときは「論文を開いてください」と出ます。左サイドバーの論文一覧から選んでください。",
+      "「読み込んでいます」のまま変わらないときは、PDF が壊れているか、PDF ではないファイルの可能性があります。ほかのアプリで開けるか確かめ、取り込み直してください。",
+    ],
+    chapter: "read",
+    keywords: ["見えない", "真っ白", "開かない"],
+  },
+  {
     id: "faq-ai",
     q: "「訳す」を押しても訳が入らない（AI が動かない）",
+    keywords: ["訳せない", "翻訳できない", "API キー", "エラー"],
     a: [
       "画面から訳・用語の説明・数式の書き起こしを作るには、Claude の API キーが必要です。設定の「読解と AI」で入力してください。",
       "「API キーが正しくありません」と出るときは、キーを入れ直してください。キーはこの端末にだけ保存し、保存先フォルダには書き込みません。",
@@ -289,6 +327,7 @@ export const HELP_FAQ: FaqItem[] = [
   {
     id: "faq-note",
     q: "ノートはどこにありますか",
+    keywords: ["保存場所", "保存先", "フォルダ", "ファイル"],
     a: [
       "保存先フォルダの `papers/<論文ID>/note.md` です。サーバー版とデスクトップ版の保存先は、設定の「全般」で確かめられます。",
       "ブラウザ版の「サンプルの論文で試す」はメモリに保存するため、ページを閉じると消えます。",
@@ -300,13 +339,14 @@ export const HELP_FAQ: FaqItem[] = [
     q: "Obsidian で開くには",
     a: [
       "Obsidian の「フォルダを保管庫として開く」で、PaperLens の保存先フォルダを選んでください。",
-      "論文を開いているときは、見出しの右の「Obsidian で開く」でそのノートを開けます。",
+      "論文を開いているときは、論文の上の帯の右側にある矢印付きの四角のアイコン（Obsidian で開く）で、そのノートを開けます。",
     ],
     chapter: "export",
   },
   {
     id: "faq-move",
     q: "データを別の PC に移したい",
+    keywords: ["バックアップ", "移行", "コピー"],
     a: [
       "保存先フォルダをそのまま新しい PC にコピーし、PaperLens の設定でそのフォルダを選んでください。論文・ノート・テンプレート・画面の配置が移ります。",
       "API キーと表示の設定は端末ごとです。設定の「データ」で書き出して読み込むか、入れ直してください（API キーは書き出しに含めません）。",
@@ -345,6 +385,7 @@ export const HELP_FAQ: FaqItem[] = [
   {
     id: "faq-sidebar",
     q: "サイドバーが消えた",
+    keywords: ["表示されない", "見えない"],
     a: ["左サイドバーは {{⌘/Ctrl + \\}} かリボンの「論文一覧」で、右サイドバーは見出しの右端のボタンで開きます。"],
     chapter: "read",
   },
@@ -441,7 +482,7 @@ export function plainText(s: string): string {
 // --- ヘルプ内検索 ------------------------------------------------------------
 
 export interface HelpHit {
-  /** 開くページ（章の id か "faq"） */
+  /** 開くページ（章の id か "faq" / "keys" / "changes"） */
   page: string;
   /** よくある質問のときは、その項目の id */
   anchor?: string;
@@ -451,7 +492,15 @@ export interface HelpHit {
   score: number;
 }
 
-const fold = (s: string) => s.normalize("NFKC").toLowerCase();
+/** 検索の対象 1 つ分 */
+interface HelpDoc {
+  page: string;
+  anchor?: string;
+  title: string;
+  summary: string;
+  body: string;
+  keywords: string[];
+}
 
 function blockTexts(b: HelpBlock): string[] {
   if (b.kind === "list" || b.kind === "steps") return b.items;
@@ -461,10 +510,10 @@ function blockTexts(b: HelpBlock): string[] {
 
 /** 本文の中で最初に語が当たった場所の前後を切り出す。 */
 function snippetOf(body: string, words: string[], width = 60): string {
-  const f = fold(body);
+  const low = body.normalize("NFKC").toLowerCase();
   let at = -1;
   for (const w of words) {
-    const i = f.indexOf(w);
+    const i = low.indexOf(w);
     if (i >= 0 && (at < 0 || i < at)) at = i;
   }
   if (at < 0) return body.length > width ? `${body.slice(0, width)}…` : body;
@@ -473,36 +522,41 @@ function snippetOf(body: string, words: string[], width = 60): string {
   return `${start > 0 ? "…" : ""}${body.slice(start, end)}${end < body.length ? "…" : ""}`;
 }
 
+/** 特別なページ（よくある質問の一覧・キーボード操作・更新情報）の検索用の説明 */
+export const EXTRA_DOCS: { page: string; title: string; summary: string; keywords: string[] }[] = [
+  { page: "faq", title: "よくある質問・困ったとき", summary: "うまく動かないときの直し方です。", keywords: ["FAQ", "トラブル", "困った", "動かない", "エラー"] },
+  { page: "keys", title: "キーボード操作", summary: "キーボードでできる操作の一覧です。? キーで早見表を開けます。", keywords: ["ショートカット", "キー操作", "キーボード", "早見表"] },
+  { page: "changes", title: "更新情報", summary: "主な機能の追加です。", keywords: ["新機能", "リリース", "変更", "バージョン"] },
+];
+
 /**
- * 章とよくある質問を探す。空白で区切った語がすべて含まれるものだけを返す。
- * 題名に当たったものを先に、次に説明、本文の順に並べる。大文字と小文字、全角と半角は区別しない。
+ * 章・よくある質問・特別なページを探す。空白で区切った語がすべて当たるものだけを返す（言い換えは searchText.ts）。
+ * 題名に当たったものを先に、次に説明と追加の語、本文の順に並べる。
  */
 export function searchHelp(query: string, chapters: HelpChapter[] = HELP_CHAPTERS, faq: FaqItem[] = HELP_FAQ): HelpHit[] {
-  const words = fold(query).split(/\s+/).filter(Boolean);
-  if (!words.length) return [];
+  const terms = queryTerms(query);
+  if (!terms.length) return [];
+  const docs: HelpDoc[] = [
+    ...chapters.map((c) => ({ page: c.id, title: c.title, summary: c.summary, body: c.blocks.flatMap(blockTexts).map(plainText).join(" "), keywords: c.keywords ?? [] })),
+    ...EXTRA_DOCS.map((d) => ({ ...d, body: "" })),
+    ...faq.map((f) => ({ page: FAQ_PAGE, anchor: f.id, title: `よくある質問: ${f.q}`, summary: "", body: f.a.map(plainText).join(" "), keywords: f.keywords ?? [] })),
+  ];
   const hits: HelpHit[] = [];
-  const score = (title: string, summary: string, body: string): number | null => {
-    const [t, s, b] = [fold(title), fold(summary), fold(body)];
-    let n = 0;
-    for (const w of words) {
-      if (t.includes(w)) n += 10;
-      else if (s.includes(w)) n += 4;
-      else if (b.includes(w)) n += 1;
-      else return null;
+  for (const d of docs) {
+    if (!matchesQuery(`${d.title} ${d.summary} ${d.body}`, query, d.keywords)) continue;
+    // 語ごとに、どこで当たったかで点を付ける
+    let score = 0;
+    for (const alts of terms) {
+      const inAny = (t: string) => alts.some((w) => t.includes(w));
+      const norm = (t: string) => t.normalize("NFKC").toLowerCase().replace(/[\s\u3000]+/g, "");
+      if (inAny(norm(d.title))) score += 10;
+      else if (inAny(norm(`${d.summary} ${d.keywords.join(" ")}`))) score += 4;
+      else score += 1;
     }
-    return n;
-  };
-  for (const c of chapters) {
-    const body = c.blocks.flatMap(blockTexts).map(plainText).join(" ");
-    const n = score(c.title, c.summary, body);
-    if (n !== null) hits.push({ page: c.id, title: c.title, snippet: snippetOf(`${c.summary} ${body}`, words), score: n });
+    const snippetSrc = d.body ? (d.summary ? `${d.summary} ${d.body}` : d.body) : d.summary;
+    hits.push({ page: d.page, anchor: d.anchor, title: d.title, snippet: snippetOf(snippetSrc, terms.flat()), score });
   }
-  for (const f of faq) {
-    const body = f.a.map(plainText).join(" ");
-    const n = score(f.q, "", body);
-    if (n !== null) hits.push({ page: FAQ_PAGE, anchor: f.id, title: `よくある質問: ${f.q}`, snippet: snippetOf(body, words), score: n });
-  }
-  // 同じ点数なら元の並び（章 → よくある質問）のまま
+  // 同じ点数なら元の並び（章 → 特別なページ → よくある質問）のまま
   return hits.map((x, i) => ({ x, i })).sort((a, b) => b.x.score - a.x.score || a.i - b.i).map(({ x }) => x);
 }
 
@@ -533,5 +587,5 @@ export function openHelp(page: string, anchor?: string): void {
 
 /** 設定の該当ページを開く。受け取るのは App（設定の担当） */
 export function openSettingsPage(page: SettingsTarget): void {
-  window.dispatchEvent(new CustomEvent("paperlens:settings", { detail: { page } }));
+  openSettings(page);
 }

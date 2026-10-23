@@ -54,6 +54,19 @@ test("検索: 抜粋は書き方の記号を外し、長いときは … で切�
   assert.ok(hit.snippet.startsWith("…"));
 });
 
+test("検索: 初めて使う人の言い方でも当たる", () => {
+  const first = (q: string) => searchHelp(q)[0];
+  assert.ok(searchHelp("訳せない").some((h) => h.anchor === "faq-ai"));
+  assert.ok(searchHelp("翻訳").some((h) => h.page === "record"));
+  assert.ok(searchHelp("保存場所").some((h) => h.anchor === "faq-note"));
+  assert.ok(searchHelp("ダークモード").some((h) => h.page === "settings"));
+  assert.ok(searchHelp("バックアップ").some((h) => h.anchor === "faq-move"));
+  assert.equal(first("料金").anchor, "faq-cost");
+  assert.equal(first("PDFが表示されない").anchor, "faq-pdf-blank");
+  assert.ok(searchHelp("APIキー").some((h) => h.anchor === "faq-ai"));
+  assert.equal(first("ショートカット").page, "keys");
+});
+
 test("更新情報の未読: 最新の id を読んでいなければ未読", () => {
   assert.equal(hasUnreadChanges(null), true);
   assert.equal(hasUnreadChanges("old"), true);

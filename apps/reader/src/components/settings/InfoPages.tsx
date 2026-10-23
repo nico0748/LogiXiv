@@ -1,14 +1,17 @@
 // 情報: ショートカットの一覧（検索つき）と、このアプリについて（バージョン・保存先・動作モード・不具合報告用の情報）。
 import { useMemo, useState } from "react";
 import { type Backend, ServerBackend } from "../../lib/backend.ts";
-import { SHORTCUTS, filterShortcuts } from "../../lib/shortcuts.ts";
-import { appMode, buildReport, MODE_LABEL } from "../../lib/appInfo.ts";
+import { filterShortcuts, shortcutsFor } from "../../lib/shortcuts.ts";
+import { appMode, buildReport, MODE_LABEL, maskHome } from "../../lib/appInfo.ts";
+import { KeyCombo } from "../help/KeyCombo.tsx";
 import { SettingItem } from "./Setting.tsx";
 import pkg from "../../../package.json";
 
-export function ShortcutsPage() {
+export function ShortcutsPage({ backend }: { backend: Backend }) {
   const [q, setQ] = useState("");
-  const list = useMemo(() => filterShortcuts(SHORTCUTS, q), [q]);
+  // 対訳やリストのようにサーバーが要る操作は、ブラウザだけの版では出さない
+  const server = backend.kind === "server";
+  const list = useMemo(() => filterShortcuts(shortcutsFor(server), q), [q, server]);
   const scopes = [...new Set(list.map((s) => s.scope))];
   return (
     <div id="set-shortcuts">
@@ -26,19 +29,7 @@ export function ShortcutsPage() {
                   <div className="setting-item-name">{s.action}</div>
                 </div>
                 <div className="setting-item-control">
-                  <span className="hotkeys">
-                    {s.keys.split(" / ").map((k, i) => (
-                      <span key={k}>
-                        {i > 0 && <span className="hotkey-sep">/</span>}
-                        {k.split(" + ").map((part, j) => (
-                          <span key={j}>
-                            {j > 0 && <span className="hotkey-plus">+</span>}
-                            <kbd>{part}</kbd>
-                          </span>
-                        ))}
-                      </span>
-                    ))}
-                  </span>
+                  <KeyCombo keys={s.keys} />
                 </div>
               </div>
             ))}
@@ -54,7 +45,8 @@ export function AboutPage({ backend }: { backend: Backend }) {
   const mode = appMode(backend.kind, backend instanceof ServerBackend && backend.meta.desktop);
   const version = backend instanceof ServerBackend ? backend.meta.version || pkg.version : pkg.version;
   const where = backend instanceof ServerBackend ? backend.meta.dataRoot : backend.persistent ? `ブラウザで選んだフォルダ「${backend.name}」` : "メモリ（ページを閉じると消えます）";
-  const report = buildReport({ version, mode, where, userAgent: navigator.userAgent, language: navigator.language, screen: `${window.innerWidth}×${window.innerHeight}` });
+  // 不具合報告には、利用者の名前が入る家のフォルダを ~ にして出す
+  const report = buildReport({ version, mode, where: maskHome(where), userAgent: navigator.userAgent, language: navigator.language, screen: `${window.innerWidth}×${window.innerHeight}` });
   return (
     <div id="set-about">
       <dl className="about-list">

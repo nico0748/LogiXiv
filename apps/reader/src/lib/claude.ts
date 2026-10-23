@@ -20,8 +20,16 @@ export class AiUnavailable extends Error {}
 
 /** 文体・訳語の固定をシステムプロンプトの末尾に添える */
 function rules(s: AiSettings, ...texts: string[]) {
-  return `${styleOf(s)}${glossaryRule(glossaryFor(s.glossary, ...texts))}`;
+  // 訳語の固定は英語 → 日本語の対なので、日本語で書くときだけ添える
+  const gloss = langOf(s) === "ja" ? glossaryRule(glossaryFor(s.glossary, ...texts)) : "";
+  return `${styleOf(s)}${gloss}`;
 }
+
+/** 用語の項目の書き方。日本語で書くときは定訳と読みを、英語で書くときは英語の見出しだけを求める */
+const TERM_FIELDS: Record<"ja" | "en", string> = {
+  ja: "- term: 見出し語。英語の用語は英語のまま、日本語の定訳があれば「日本語（English）」の形\n- reading: 日本語の見出し語の読み。不要なら空文字",
+  en: "- term: 見出し語。英語で書く。略語は「略語 (正式名)」の形\n- reading: 空文字",
+};
 
 /** 設定に合わせて前後の本文を切り詰める */
 const aroundOf = (s: AiSettings, ctx: PaperContext, text: string) => trimAround(ctx.around, text, CONTEXT_CHARS[s.context ?? "normal"]);
@@ -105,7 +113,7 @@ export async function explainTerm(s: AiSettings, term: string, ctx: PaperContext
     [
       {
         type: "text",
-        text: `論文: ${ctx.title}\n\n用語が出てくる箇所:\n${around}\n\n用語: ${term}\n\n次の項目を書く。\n- term: 見出し語。英語の用語は英語のまま、日本語の定訳があれば「日本語（English）」の形\n- reading: 日本語の見出し語の読み。不要なら空文字\n- short: 1文の定義\n- detail: 2〜4文の説明。仕組みや前提を含める\n- inPaper: この論文での使われ方。前後の本文から分かる範囲で1〜2文\n- related: 関連する用語を3つまで`,
+        text: `論文: ${ctx.title}\n\n用語が出てくる箇所:\n${around}\n\n用語: ${term}\n\n次の項目を書く。\n${TERM_FIELDS[langOf(s)]}\n- short: 1文の定義\n- detail: 2〜4文の説明。仕組みや前提を含める\n- inPaper: この論文での使われ方。前後の本文から分かる範囲で1〜2文\n- related: 関連する用語を3つまで`,
       },
     ],
     {

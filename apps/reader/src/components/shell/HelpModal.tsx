@@ -16,7 +16,7 @@ import {
   parseInline,
   searchHelp,
 } from "../../lib/help.ts";
-import { SHORTCUTS, type Shortcut, filterShortcuts } from "../../lib/shortcuts.ts";
+import { type Shortcut, filterShortcuts, shortcutsFor } from "../../lib/shortcuts.ts";
 import { KeyCombo } from "../help/KeyCombo.tsx";
 import { markChangesSeen, useUnreadChanges } from "../help/useHelpState.ts";
 import "../help/help.css";
@@ -30,6 +30,8 @@ interface Props {
   anchor?: string;
   /** 画面の案内（ツアー）を始める */
   onStartTour?: () => void;
+  /** サーバー版かデスクトップ版か。ブラウザ版に無い機能のキーボード操作は出さない */
+  server?: boolean;
 }
 
 const SHORT_TITLE = (t: string) => t.replace(/（.*$/, "");
@@ -40,7 +42,8 @@ const EXTRA_PAGES = [
   { id: CHANGES_PAGE, title: "更新情報", group: "お知らせ" },
 ];
 
-export function HelpModal({ onClose, page: initial, anchor: initialAnchor, onStartTour }: Props) {
+export function HelpModal({ onClose, page: initial, anchor: initialAnchor, onStartTour, server = true }: Props) {
+  const shortcuts = useMemo(() => shortcutsFor(server), [server]);
   const [page, setPage] = useState(initial && isHelpPage(initial) ? initial : "start");
   const [anchor, setAnchor] = useState<string | undefined>(initialAnchor);
   const [query, setQuery] = useState("");
@@ -73,7 +76,7 @@ export function HelpModal({ onClose, page: initial, anchor: initialAnchor, onSta
   }, [page]);
 
   const hits = useMemo(() => searchHelp(query), [query]);
-  const keyHits = useMemo(() => (query.trim() ? filterShortcuts(SHORTCUTS, query) : []), [query]);
+  const keyHits = useMemo(() => (query.trim() ? filterShortcuts(shortcuts, query) : []), [query, shortcuts]);
   const searching = query.trim().length > 0;
 
   const chapterIndex = HELP_CHAPTERS.findIndex((c) => c.id === page);
@@ -146,7 +149,7 @@ export function HelpModal({ onClose, page: initial, anchor: initialAnchor, onSta
                 <h1 id="help-page-title" className="help-title">{pageTitle}</h1>
                 {chapterIndex >= 0 && <ChapterPage index={chapterIndex} go={go} onStartTour={onStartTour} />}
                 {page === FAQ_PAGE && <FaqPage go={go} />}
-                {page === KEYS_PAGE && <KeysPage />}
+                {page === KEYS_PAGE && <KeysPage list={shortcuts} />}
                 {page === CHANGES_PAGE && <ChangesPage />}
               </article>
             )}
@@ -293,13 +296,13 @@ export function ShortcutTable({ list }: { list: Shortcut[] }) {
   );
 }
 
-function KeysPage() {
+function KeysPage({ list }: { list: Shortcut[] }) {
   return (
     <>
       <p className="help-lead">
         どの画面でも <KeyCombo keys="?" /> で、この一覧の早見表を開けます（文字の入力中は除きます）。
       </p>
-      <ShortcutTable list={SHORTCUTS} />
+      <ShortcutTable list={list} />
     </>
   );
 }
