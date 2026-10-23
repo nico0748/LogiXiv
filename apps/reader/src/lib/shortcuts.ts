@@ -12,6 +12,8 @@ export interface Shortcut {
   scope: string;
   /** サーバー版とデスクトップ版だけにある機能（対訳・リスト）。ブラウザ版の一覧には出さない */
   serverOnly?: boolean;
+  /** ブラウザ版での説明（対訳など、ブラウザ版に無いものに触れない言い方）。無ければ action のまま */
+  browserAction?: string;
 }
 
 /** Mac では ⌘、それ以外では Ctrl。 */
@@ -28,7 +30,12 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: "0", action: "全体が収まる大きさに戻す", scope: "グラフ" },
   { keys: "r / v", action: "スライドの一部を囲む / 選ぶ", scope: "スライドの画面" },
   { keys: "t / f / e", action: "グループを論文の文章 / 図 / 数式にリンクする道具に替える", scope: "スライドの画面" },
-  { keys: "[ / ]", action: "[スライド | 論文] / [論文 | 補足情報（対訳・訳・用語・数式・記録）] に切り替える", scope: "スライドの画面" },
+  {
+    keys: "[ / ]",
+    action: "[スライド | 論文] / [論文 | 補足情報（対訳・訳・用語・数式・記録）] に切り替える",
+    browserAction: "[スライド | 論文] / [論文 | 補足情報（訳・用語・数式・記録）] に切り替える",
+    scope: "スライドの画面",
+  },
   { keys: "p", action: "スライドと論文を並べたまま全画面にする・戻す（全画面は Esc でも終える）", scope: "スライドの画面" },
   { keys: "Delete / Backspace", action: "選んでいるグループを消す（論文側のリンクも一緒に消える）", scope: "スライドの画面" },
   { keys: `${MOD} + Z`, action: "消したグループを元に戻す（消したあとの知らせが出ている間）", scope: "スライドの画面" },
@@ -36,7 +43,7 @@ export const SHORTCUTS: Shortcut[] = [
 
 /** いまの版で使えるものだけ。server はサーバー版かデスクトップ版のとき true */
 export function shortcutsFor(server: boolean, list: Shortcut[] = SHORTCUTS): Shortcut[] {
-  return server ? list : list.filter((s) => !s.serverOnly);
+  return server ? list : list.filter((s) => !s.serverOnly).map((s) => (s.browserAction ? { ...s, action: s.browserAction } : s));
 }
 
 /** キー・説明・画面のどれかに当たるものだけ残す。空白区切りの語はすべて当たる必要がある（言い換えは searchText.ts）。 */

@@ -6,7 +6,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Backend } from "../../lib/backend.ts";
 import { SETTINGS_PAGES, type SettingsPageId, searchSettings } from "../../lib/settingsIndex.ts";
 import { SettingsPage } from "../SettingsPage.tsx";
-import { hasTemplateDraft } from "../settings/TemplatePage.tsx";
+import { useTemplateDraft } from "../settings/TemplatePage.tsx";
 import "../settings/settings.css";
 import { Modal } from "./Modal.tsx";
 
@@ -18,11 +18,20 @@ interface Props {
   initialPage?: SettingsPageId;
   /** 開いたときに動いて目立たせる項目（set-<id>） */
   initialItem?: string;
+  /** 開いたときの検索の語（ヘルプから戻ったとき） */
+  initialQuery?: string;
+  /** いまのページと検索の語を知らせる（App が覚え、ヘルプから戻ったときに使う） */
+  onState?: (s: { page: SettingsPageId; query: string }) => void;
 }
 
-export function SettingsModal({ backend, onClose, onSwitchVault, initialPage, initialItem }: Props) {
+export function SettingsModal({ backend, onClose, onSwitchVault, initialPage, initialItem, initialQuery, onState }: Props) {
   const [page, setPage] = useState<SettingsPageId>(initialPage ?? "general");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery ?? "");
+  const stateRef = useRef(onState);
+  stateRef.current = onState;
+  useEffect(() => {
+    stateRef.current?.({ page, query });
+  }, [page, query]);
   const [flash, setFlash] = useState<{ id: string; n: number } | null>(initialItem ? { id: initialItem, n: 0 } : null);
   const results = useMemo(() => searchSettings(query), [query]);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -57,7 +66,7 @@ export function SettingsModal({ backend, onClose, onSwitchVault, initialPage, in
 
   const groups = [...new Set(SETTINGS_PAGES.map((p) => p.group))];
   const pageLabel = (id: SettingsPageId) => SETTINGS_PAGES.find((p) => p.id === id)?.label ?? "";
-  const draft = hasTemplateDraft(backend);
+  const draft = useTemplateDraft(backend);
 
   const searchBox = (
     <div className="settings-search">

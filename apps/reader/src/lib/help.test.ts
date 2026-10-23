@@ -59,7 +59,7 @@ test("検索: 初めて使う人の言い方でも当たる", () => {
   assert.ok(searchHelp("訳せない").some((h) => h.anchor === "faq-ai"));
   assert.ok(searchHelp("翻訳").some((h) => h.page === "record"));
   assert.ok(searchHelp("保存場所").some((h) => h.anchor === "faq-note"));
-  assert.ok(searchHelp("ダークモード").some((h) => h.page === "settings"));
+  assert.equal(first("ダークモード").page, "settings");
   assert.ok(searchHelp("バックアップ").some((h) => h.anchor === "faq-move"));
   assert.equal(first("料金").anchor, "faq-cost");
   assert.equal(first("PDFが表示されない").anchor, "faq-pdf-blank");

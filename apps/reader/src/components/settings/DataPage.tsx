@@ -17,6 +17,8 @@ const RESET: Record<ResetKind, { name: string; desc: string; confirm: string }> 
 
 export function DataPage({ backend }: { backend: Backend }) {
   const importStatus = usePref("importStatus");
+  // サーバー版・デスクトップ版は「保存先フォルダ」、ブラウザだけの版は「保管庫」と呼ぶ（全般のページと同じ）
+  const store = backend.kind === "server" ? "保存先フォルダ" : "保管庫";
   const fileRef = useRef<HTMLInputElement>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [ask, setAsk] = useState<ResetKind | null>(null);
@@ -64,7 +66,7 @@ export function DataPage({ backend }: { backend: Backend }) {
       <SettingItem
         id="export"
         name="設定の書き出しと読み込み"
-        desc="表示・読解と AI・起動時の動作などを JSON のファイルにします。別の PC に移すときに使います。API キーは含めません。テンプレートは保管庫にあるので、保管庫ごと移してください。"
+        desc={`表示・読解と AI・起動時の動作などを JSON のファイルにします。別の PC に移すときに使います。API キーは含めません。テンプレートは${store}にあるので、${store}ごと移してください。`}
       >
         <div className="row nowrap">
           <button type="button" className="btn" onClick={download}>書き出す</button>
@@ -112,9 +114,9 @@ export function DataPage({ backend }: { backend: Backend }) {
         {done && <p className="notice settings-notice" role="status">{done}</p>}
       </div>
 
-      <SettingHeading>保管庫</SettingHeading>
+      <SettingHeading>{store}</SettingHeading>
       <SettingItem
-        name="保管庫の書き出し"
+        name={`${store}の書き出し`}
         desc={
           backend.kind === "server"
             ? "論文と読解ノートは、保存先フォルダ（場所は「全般」にあります）にそのままあります。フォルダごとコピーしてください。"

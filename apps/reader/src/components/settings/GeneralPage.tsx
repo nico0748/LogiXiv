@@ -64,7 +64,7 @@ function DataRoot({ backend }: { backend: ServerBackend }) {
         <dl className="kv">
           <dt>場所</dt>
           <dd><code className="path">{meta.dataRoot}</code></dd>
-          <dt>決め方</dt>
+          <dt>指定元</dt>
           <dd>{source}</dd>
         </dl>
         {meta.desktop ? (
@@ -72,7 +72,7 @@ function DataRoot({ backend }: { backend: ServerBackend }) {
             <button className="btn" onClick={() => void pick()} disabled={locked}>別のフォルダを選ぶ</button>
             <button className="btn text" onClick={() => void serverApi.reveal(meta.dataRoot)}>フォルダを開く</button>
           </div>
-        ) : (
+        ) : locked ? null : (
           <form
             className="row"
             onSubmit={(e) => {
@@ -81,8 +81,8 @@ function DataRoot({ backend }: { backend: ServerBackend }) {
             }}
           >
             <label className="visually-hidden" htmlFor="data-root">保存先フォルダの絶対パス</label>
-            <input id="data-root" className="input input-grow" value={path} onChange={(e) => setPath(e.target.value)} disabled={locked} spellCheck={false} />
-            <button className="btn" type="submit" disabled={locked || !path.trim() || path.trim() === meta.dataRoot}>変更する</button>
+            <input id="data-root" className="input input-grow" value={path} onChange={(e) => setPath(e.target.value)} spellCheck={false} />
+            <button className="btn" type="submit" disabled={!path.trim() || path.trim() === meta.dataRoot}>変更する</button>
           </form>
         )}
         {locked && <p className="field-hint">環境変数で指定しているため、画面からは変えられません。</p>}

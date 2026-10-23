@@ -159,7 +159,15 @@ try {
     await openPage("表示");
     await openPage("テンプレート");
     if (!(await tpl.inputValue()).endsWith("追記のテスト")) throw new Error("下書きが消えた");
+    // 設定を閉じて開き直しても残り、ナビに印が付いている
+    await modal.getByRole("button", { name: "閉じる" }).click();
+    await modal.waitFor({ state: "detached" });
+    await ribbon("設定").click();
+    await nav.locator(".nav-dot").waitFor();
+    await openPage("テンプレート");
+    await page.waitForFunction(() => document.querySelector("#tpl")?.value.endsWith("追記のテスト"));
     await modal.getByRole("button", { name: "変更を取り消す" }).click();
+    await nav.locator(".nav-dot").waitFor({ state: "detached" });
   });
 
   await step("画面の配置のリセットは、読み直さずにその場で戻し、閉じたあとも戻ったまま", async () => {

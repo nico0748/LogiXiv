@@ -8,13 +8,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { CONTEXT_CHARS, LANG_LABEL, glossaryFor, glossaryRule, langOf, styleOf, trimAround } from "./aiPrompt.ts";
 import type { MathSymbol } from "./model.ts";
-import { type AiSettings, DEFAULT_MODEL, getPref, setPref } from "./prefs.ts";
+import { type AiSettings, DEFAULT_MODEL } from "./prefs.ts";
 
 export { type AiSettings, DEFAULT_MODEL } from "./prefs.ts";
-
-/** 設定から読む。変更は prefs.ts の usePref("ai") で受け取る */
-export const loadAiSettings = (): AiSettings => getPref("ai");
-export const saveAiSettings = (s: AiSettings) => setPref("ai", s);
 
 export class AiUnavailable extends Error {}
 

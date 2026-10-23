@@ -15,7 +15,7 @@
     "preview": "vite preview",
     "build:single": "SINGLE=1 vite build",
     "test": "node --test --experimental-strip-types --no-warnings src/lib/*.test.ts server/*.test.ts",
-    "e2e": "node e2e/smoke.mjs && node e2e/server.mjs && node e2e/slides.mjs",
+    "e2e": "node e2e/smoke.mjs && node e2e/server.mjs && node e2e/slides.mjs && node e2e/settings.mjs && node e2e/help.mjs",
     "sample": "node scripts/make-sample.mjs"
   },
   "dependencies": {

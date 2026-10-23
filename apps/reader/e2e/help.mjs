@@ -241,14 +241,20 @@ await step("設定を開いているとき ? は何もしない。設定の「?�
   await page.waitForTimeout(200);
   if (await page.getByRole("dialog", { name: "キーボード操作の早見表" }).count()) fail("設定の上で ? が早見表を開いた");
   await settings.waitFor();
-  await settings.locator(".help-button").first().click();
+  // 既定（全般）でないページから開き、戻ったときに同じページと検索の語が残っていることを確かめる
+  await settings.getByRole("navigation", { name: "設定の項目" }).getByRole("button", { name: "読解と AI" }).click();
+  await settings.getByRole("heading", { level: 2, name: "読解と AI" }).waitFor();
+  await settings.getByRole("searchbox", { name: "設定を検索" }).fill("モデル");
+  await settings.locator(".settings-page-header .help-button").click();
   const dlg = page.getByRole("dialog", { name: "ヘルプ" });
   await dlg.waitFor();
   await page.keyboard.press("Escape");
-  await settings.waitFor();
-  await settings.locator(".help-button").first().click();
+  await settings.getByRole("heading", { level: 2, name: "読解と AI" }).waitFor();
+  if ((await settings.getByRole("searchbox", { name: "設定を検索" }).inputValue()) !== "モデル") fail("ヘルプから戻ると検索の語が消える");
+  await settings.getByRole("searchbox", { name: "設定を検索" }).fill("");
+  await settings.locator(".settings-page-header .help-button").click();
   await dlg.getByRole("button", { name: "閉じる" }).click();
-  await settings.waitFor();
+  await settings.getByRole("heading", { level: 2, name: "読解と AI" }).waitFor();
   await page.keyboard.press("Escape");
   await settings.waitFor({ state: "detached" });
 });
@@ -285,7 +291,12 @@ await step("狭い画面でもツアーとヘルプが崩れない", async () =>
     await page.waitForTimeout(350);
     const box = await tour.boundingBox();
     if (!box || box.x < 0 || box.x + box.width > 400 || box.y < 0 || box.y + box.height > 820) fail(`手順 ${i} の吹き出しが画面からはみ出している: ${JSON.stringify(box)}`);
-    if ([1, 2, 4, N].includes(i)) await shot(`tour-${i}-narrow`);
+    if (i === 3) {
+      // 「文を選んで記録する」では、中央に重なるサイドバーを両方閉じて PDF を見せる
+      const hidden = await page.evaluate(() => ["left", "right"].map((x) => document.querySelector(`aside.sidebar.${x}`)?.getAttribute("aria-hidden")));
+      if (hidden.some((h) => h !== "true")) fail(`狭い画面の手順 3 でサイドバーが開いている: ${hidden}`);
+    }
+    await shot(`tour-${i}-narrow`);
     if (i < N) await page.keyboard.press("ArrowRight");
   }
   await page.keyboard.press("Escape");

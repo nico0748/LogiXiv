@@ -12,10 +12,11 @@ export function normalizeQuery(s: string): string {
 
 /** 同じ意味として扱う言い方の組。初めて使う人が打ちそうな言い方を足していく */
 export const SYNONYMS: string[][] = [
-  ["訳", "翻訳", "訳す", "訳せない", "和訳", "translate"],
+  ["訳", "翻訳", "訳す", "訳し", "訳せない", "訳を", "和訳", "translate"],
   ["保存先", "保存場所", "場所", "フォルダ", "保管庫", "どこ"],
   ["キーボード操作", "ショートカット", "キー操作", "キーボード", "shortcut"],
-  ["ダーク", "暗い", "テーマ", "ダークモード", "明るい", "ライト", "配色"],
+  // 「ライト」は「ハイライト」に、「明るい」は表示の説明の多くに当たるため入れない
+  ["ダーク", "暗い", "テーマ", "ダークモード", "配色", "ダークテーマ"],
   ["バックアップ", "書き出し", "書き出す", "移す", "移行", "別のpc", "エクスポート", "export"],
   ["料金", "お金", "費用", "課金", "無料", "有料", "値段"],
   ["apiキー", "apikey", "api"],
@@ -37,7 +38,13 @@ export const SYNONYMS: string[][] = [
 const GROUPS = SYNONYMS.map((g) => g.map(normalizeQuery));
 /** 言い換えの語（正規化済み）→ 属する組の語すべて。長い語から先に当てる */
 const WORDS = [...new Set(GROUPS.flat())].sort((a, b) => b.length - a.length);
-const groupOf = (w: string) => [...new Set(GROUPS.filter((g) => g.includes(w)).flat())];
+/**
+ * 語の組の言い換え。1 文字の語（"訳"・"式"）は短すぎて多くの語に当たる（"対訳"・"数式"）ので、
+ * 打った語そのものでない限り言い換えに使わない。
+ */
+const groupOf = (w: string) => [...new Set([w, ...GROUPS.filter((g) => g.includes(w)).flat().filter((x) => x.length >= 2)])];
+/** これより長い検索語は切り詰める（打つたびに探すので、とても長い語で重くならないように） */
+export const MAX_QUERY = 200;
 /** 語と語のあいだの助詞や記号。残りの文字として扱わない */
 const FILLER = /^[がをはのにでともへやかな、。・?？!！]+|[がをはのにでともへやかな、。・?？!！]+$/g;
 
@@ -73,7 +80,7 @@ export function expandTerm(term: string): string[][] {
 
 /** 検索語を、当てるべき条件（どれかが含まれればよい語の一覧）の並びにする。 */
 export function queryTerms(query: string): string[][] {
-  return query.normalize("NFKC").split(/[\s\u3000]+/).flatMap(expandTerm);
+  return query.slice(0, MAX_QUERY).normalize("NFKC").split(/[\s\u3000]+/).flatMap(expandTerm);
 }
 
 /**

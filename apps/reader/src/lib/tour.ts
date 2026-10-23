@@ -17,8 +17,10 @@ export interface TourStep {
   body: string[];
   /** 強調する要素。前から順に探し、最初に見つかったものを使う。無ければ画面の中央に出す */
   targets: string[];
-  /** この手順を見せる前に開いておくもの */
-  open?: "left" | "right";
+  /** この手順を見せる前に開いておくもの。"none" は、狭い画面で中央に重なるサイドバーを両方閉じる */
+  open?: "left" | "right" | "none";
+  /** この手順の間だけ選ぶタブ（押すタブの CSS セレクタ）。手順を離れたら元のタブに戻す */
+  tab?: string;
   /** 論文がまだ無いときに「サンプルの論文を取り込む」を出す */
   sample?: boolean;
 }
@@ -70,6 +72,7 @@ export function tourSteps(mode: AppMode): TourStep[] {
         "色の丸でマーカー、「訳す」で訳、「用語を調べる」で用語の説明、「数式にする」で TeX を残します。",
       ],
       targets: [".view-content"],
+      open: "none",
     },
     {
       id: "right",
@@ -92,6 +95,7 @@ export function tourSteps(mode: AppMode): TourStep[] {
       ],
       targets: ["#tab-sentences", "aside.sidebar.right .tabs", "aside.sidebar.right"],
       open: "right",
+      tab: "#tab-sentences",
     },
     {
       id: "slides",

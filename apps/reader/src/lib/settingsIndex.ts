@@ -1,7 +1,7 @@
 // 設定のページと項目の一覧。左のナビと設定内の検索、ヘルプからの呼び出しで使う。
 // 項目の id は画面の要素の id（set-<id>）にもなる。検索で選ぶと、そのページを開いてその項目へ動く。
 
-import { matchesQuery, normalizeQuery } from "./searchText.ts";
+import { matchesQuery, normalizeQuery, queryTerms } from "./searchText.ts";
 
 export type SettingsPageId = "general" | "display" | "ai" | "template" | "data" | "mcp" | "obsidian" | "shortcuts" | "about";
 
@@ -69,7 +69,8 @@ export const SETTING_ITEMS: SettingItemInfo[] = [
  * 空白で区切った語はすべて当たるものだけ。項目名に当たるものを先に並べる
  */
 export function searchSettings(query: string, items: SettingItemInfo[] = SETTING_ITEMS): SettingItemInfo[] {
-  if (!normalizeQuery(query)) return [];
+  // 助詞や記号だけ（"の"、"?" など）の語では探さない（すべてに当たってしまうため）
+  if (!normalizeQuery(query) || !queryTerms(query).length) return [];
   const pageLabel = new Map(SETTINGS_PAGES.map((p) => [p.id, p.label]));
   const scored = items.flatMap((it) => {
     const hay = `${it.label} ${it.desc} ${pageLabel.get(it.page) ?? ""}`;

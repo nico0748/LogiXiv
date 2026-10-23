@@ -190,6 +190,30 @@ await step("設定画面に MCP の登録方法が出る", async () => {
   if (!(await page.getByLabel("Claude Code のコマンド").textContent()).includes("PAPERLENS_MCP_READONLY=1")) throw new Error("読み取り専用の設定にならない");
 });
 
+await step("設定の「画面の配置」のリセットは workspace.json も戻し、閉じるときに古い配置を書き戻さない", async () => {
+  const settings = page.getByRole("dialog", { name: "設定" });
+  await settings.getByRole("button", { name: "閉じる" }).click();
+  await settings.waitFor({ state: "detached" });
+  const remote = () => page.evaluate(() => fetch("/api/workspace").then((r) => r.json()));
+  if (!(await remote()).leftOpen) {
+    await page.keyboard.press("Control+Backslash");
+    await page.waitForFunction(() => document.querySelector("aside.sidebar.left")?.getAttribute("aria-hidden") !== "true");
+  }
+  await page.waitForTimeout(800); // 配置の保存は 400ms 後
+  if (!(await remote()).leftOpen) throw new Error("左サイドバーを開いた配置が保存されない");
+  await ribbon("設定").click();
+  await settings.getByRole("navigation", { name: "設定の項目" }).getByRole("button", { name: "データ" }).click();
+  await settings.locator("#set-reset").getByRole("button", { name: "初期に戻す" }).nth(1).click();
+  await settings.getByRole("button", { name: "戻す", exact: true }).click();
+  await settings.getByText("画面の配置を初期に戻しました。").waitFor();
+  await page.waitForTimeout(500);
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await page.waitForTimeout(500);
+  const ws = await remote();
+  if (ws.leftOpen) throw new Error(`workspace.json が古い配置のまま: ${JSON.stringify(ws)}`);
+  if (!ws.openPaper) throw new Error("開いている論文まで消えた");
+});
+
 await step("読み直すと、前回の位置から表示する", async () => {
   // 設定のモーダルを閉じて論文に戻る
   await page.getByRole("dialog", { name: "設定" }).getByRole("button", { name: "閉じる" }).click();

@@ -1,17 +1,31 @@
 // テンプレート: 保管庫の読解ノートのテンプレートをこのページで編集する（以前はダイアログ）。
 // 保存していない変更は、ページを替えたり設定を閉じたりしても、この画面を開いている間は残す（下書き）。
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { Backend } from "../../lib/backend.ts";
 import { DEFAULT_TEMPLATE } from "../../lib/defaultTemplate.ts";
 import { openHelp } from "../../lib/help.ts";
 import { TEMPLATE_PATH } from "../../lib/papers.ts";
 import { parseFields } from "../../lib/template.ts";
 
-/** 保管庫ごとの保存していない下書き */
+/** 保管庫ごとの保存していない下書き。増減を購読できる（ナビの印に使う） */
 const drafts = new Map<string, string>();
+const listeners = new Set<() => void>();
+function setDraft(name: string, text: string | null) {
+  const had = drafts.has(name);
+  if (text === null) drafts.delete(name);
+  else drafts.set(name, text);
+  if (had !== drafts.has(name)) for (const fn of listeners) fn();
+}
+const subscribe = (fn: () => void) => {
+  listeners.add(fn);
+  return () => void listeners.delete(fn);
+};
 
-/** 保存していないテンプレートの変更があるか（設定を閉じるときの確認に使う） */
-export const hasTemplateDraft = (backend: Backend) => drafts.has(backend.name);
+/** 保存していないテンプレートの変更があるか */
+export function useTemplateDraft(backend: Backend): boolean {
+  const get = () => drafts.has(backend.name);
+  return useSyncExternalStore(subscribe, get, get);
+}
 
 export function TemplatePage({ backend }: { backend: Backend }) {
   const [text, setTextState] = useState<string | null>(drafts.get(backend.name) ?? null);
@@ -20,15 +34,14 @@ export function TemplatePage({ backend }: { backend: Backend }) {
   const setText = (t: string) => {
     setTextState(t);
     setMsg(null);
-    if (saved !== null && t === saved) drafts.delete(backend.name);
-    else drafts.set(backend.name, t);
+    setDraft(backend.name, saved !== null && t === saved ? null : t);
   };
   useEffect(() => {
     void backend.readTemplate().then(
       (t) => {
         setSaved(t);
         setTextState((cur) => cur ?? t);
-        if (drafts.get(backend.name) === t) drafts.delete(backend.name);
+        if (drafts.get(backend.name) === t) setDraft(backend.name, null);
       },
       () => {
         setSaved(null);
@@ -44,7 +57,7 @@ export function TemplatePage({ backend }: { backend: Backend }) {
     try {
       await backend.writeTemplate(text);
       setSaved(text);
-      drafts.delete(backend.name);
+      setDraft(backend.name, null);
       setMsg({ ok: true, text: "保存しました" });
     } catch (e) {
       setMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });

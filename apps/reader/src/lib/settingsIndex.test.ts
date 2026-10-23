@@ -52,3 +52,7 @@ test("不具合報告では家のフォルダを ~ にする", () => {
   assert.equal(maskHome("C:\\Users\\nico\\PaperLens"), "~\\PaperLens");
   assert.equal(maskHome("/srv/data"), "/srv/data");
 });
+
+test("助詞や記号だけの語では何も出さない", () => {
+  for (const q of ["の", "へ", "?", "　"]) assert.deepEqual(searchSettings(q), [], q);
+});

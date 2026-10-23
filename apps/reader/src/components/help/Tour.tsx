@@ -113,11 +113,28 @@ export function Tour({ mode, ready, restart, hasPapers, onImport, layout, setLay
     // 狭い画面ではサイドバーが中央に重なるので、開くのは片方だけにする
     const narrow = window.innerWidth <= 900;
     setLayout({
-      left: want === "left" || (base.left && !(narrow && want === "right")),
-      right: want === "right" || (base.right && !(narrow && want === "left")),
+      left: want === "left" || (base.left && !(narrow && (want === "right" || want === "none"))),
+      right: want === "right" || (base.right && !(narrow && (want === "left" || want === "none"))),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.open, state.index]);
+
+  // 手順にタブの指定があれば、その間だけそのタブを選ぶ。離れたら元のタブを押し直す
+  useEffect(() => {
+    const sel = step?.tab;
+    if (!sel) return;
+    const prev = document.querySelector<HTMLElement>("aside.sidebar.right [role='tab'][aria-selected='true']");
+    // サイドバーを開いた直後はタブがまだ無いことがあるので、少し待つ
+    const t = window.setTimeout(() => {
+      const el = document.querySelector<HTMLElement>(sel);
+      if (el && el.getAttribute("aria-selected") !== "true") el.click();
+    }, 50);
+    return () => {
+      window.clearTimeout(t);
+      const back = prev?.id ? document.getElementById(prev.id) : null;
+      if (back && back.getAttribute("aria-selected") !== "true") back.click();
+    };
+  }, [step]);
 
   // 対象の位置を毎フレーム確かめる（サイドバーの開閉の動きや、窓の大きさの変化に付いていく）
   useLayoutEffect(() => {
@@ -280,7 +297,7 @@ export function Tour({ mode, ready, restart, hasPapers, onImport, layout, setLay
           <button type="button" className="btn sm" disabled={state.index === 0} onClick={() => go({ type: "prev" })}>戻る</button>
           <button ref={nextRef} type="button" className="btn primary sm" onClick={next}>{last ? "使いはじめる" : "次へ"}</button>
         </div>
-        <p className="tour-keys" aria-hidden="true"><kbd>←</kbd> <kbd>→</kbd> で移動、<kbd>Esc</kbd> で閉じる</p>
+        <p className="tour-keys" aria-hidden="true"><kbd>←</kbd> <kbd>→</kbd> で移動、<kbd>Esc</kbd> であとで</p>
       </div>
     </div>
   );

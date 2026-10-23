@@ -12,7 +12,7 @@ import { TemplatePage } from "./settings/TemplatePage.tsx";
 
 const LEAD: Partial<Record<SettingsPageId, string>> = {
   display: "この端末のブラウザにだけ保存します。保管庫には書き込みません。",
-  ai: "PDF の文を選んで「訳す」「用語を調べる」「数式にする」を押したときに使います。この端末のブラウザにだけ保存します。",
+  ai: "PDF の文を選んで「訳す」「用語を調べる」「数式にする」を押したときに使います。",
   template: "保管庫に保存します。同じ保管庫を開くほかの端末でも同じテンプレートになります。",
   mcp: "Claude Desktop や Claude Code から、PaperLens の論文とノートを読み書きできるようにします。",
   obsidian: "保存先のフォルダを Obsidian の保管庫として開くと、同じノートを両方で使えます。",

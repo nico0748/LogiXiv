@@ -271,6 +271,12 @@ export function usePref<K extends PrefName>(name: K): Prefs[K] {
   return useSyncExternalStore(subscriberFor(name), get, get);
 }
 
+/** 設定の一部だけを購読する。select の結果（真偽値など）が変わったときだけ描き直す */
+export function usePrefSelect<K extends PrefName, T extends string | number | boolean>(name: K, select: (v: Prefs[K]) => T): T {
+  const get = () => select(getPref(name));
+  return useSyncExternalStore(subscriberFor(name), get, get);
+}
+
 // --- まとめて扱う ------------------------------------------------------------
 
 /** 表示の設定。リセットでまとめて戻す */

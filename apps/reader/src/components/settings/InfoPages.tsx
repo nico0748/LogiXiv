@@ -5,7 +5,8 @@ import { filterShortcuts, shortcutsFor } from "../../lib/shortcuts.ts";
 import { appMode, buildReport, MODE_LABEL, maskHome } from "../../lib/appInfo.ts";
 import { KeyCombo } from "../help/KeyCombo.tsx";
 import { SettingItem } from "./Setting.tsx";
-import pkg from "../../../package.json";
+// バージョンはサーバーと同じ値（server/version.ts）を使う。ブラウザだけの版でも同じ番号を出す
+import { VERSION } from "../../../server/version.ts";
 
 export function ShortcutsPage({ backend }: { backend: Backend }) {
   const [q, setQ] = useState("");
@@ -43,7 +44,7 @@ export function ShortcutsPage({ backend }: { backend: Backend }) {
 export function AboutPage({ backend }: { backend: Backend }) {
   const [copied, setCopied] = useState(false);
   const mode = appMode(backend.kind, backend instanceof ServerBackend && backend.meta.desktop);
-  const version = backend instanceof ServerBackend ? backend.meta.version || pkg.version : pkg.version;
+  const version = backend instanceof ServerBackend ? backend.meta.version || VERSION : VERSION;
   const where = backend instanceof ServerBackend ? backend.meta.dataRoot : backend.persistent ? `ブラウザで選んだフォルダ「${backend.name}」` : "メモリ（ページを閉じると消えます）";
   // 不具合報告には、利用者の名前が入る家のフォルダを ~ にして出す
   const report = buildReport({ version, mode, where: maskHome(where), userAgent: navigator.userAgent, language: navigator.language, screen: `${window.innerWidth}×${window.innerHeight}` });

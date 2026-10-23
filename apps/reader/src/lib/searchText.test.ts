@@ -37,3 +37,20 @@ test("語はすべて当たる必要がある。追加の語でも当たる。�
   assert.ok(matchesQuery("表示", "バックアップ", ["書き出し"]));
   assert.ok(matchesQuery("なんでも", "  "));
 });
+
+test("1 文字の語は言い換えに広げない。「ライト」で「ハイライト」に当たらない。長い語は切り詰める", () => {
+  assert.ok(!matchesQuery("対訳のタブ", "翻訳"));
+  assert.ok(matchesQuery("数式にする", "式"));
+  assert.ok(!matchesQuery("マーカー（ハイライト）を引く", "ダークモード"));
+  const t = Date.now();
+  matchesQuery("あ".repeat(10000), "い".repeat(5000));
+  assert.ok(Date.now() - t < 50);
+});
+
+test("キーボード操作: ブラウザ版では対訳とリストを出さず、補足情報の説明から対訳を外す", async () => {
+  const { shortcutsFor, SHORTCUTS } = await import("./shortcuts.ts");
+  const b = shortcutsFor(false);
+  assert.ok(b.length < SHORTCUTS.length);
+  assert.ok(!b.some((s) => s.action.includes("対訳") || s.scope.includes("対訳")));
+  assert.ok(shortcutsFor(true).some((s) => s.action.includes("対訳")));
+});

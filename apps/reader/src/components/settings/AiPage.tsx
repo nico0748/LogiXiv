@@ -1,7 +1,7 @@
 // 読解と AI: API キーとモデル、接続の確認、訳文の言語、文体、訳語の固定、送る範囲。
 // 値はこの端末（localStorage）にだけ保存する。保管庫には書かない。
 import { ExternalLink, Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DEFAULT_STYLE, LANG_LABEL, glossaryItemToPair, mergeGlossary, termToPair } from "../../lib/aiPrompt.ts";
 import { type Backend, ServerBackend } from "../../lib/backend.ts";
 import { checkConnection, describeError } from "../../lib/claude.ts";
@@ -79,7 +79,7 @@ export function AiPage({ backend }: { backend: Backend }) {
             <a href={CONSOLE_URL} target="_blank" rel="noreferrer" className="ext-link">
               Anthropic Console<ExternalLink size={11} aria-hidden="true" />
             </a>
-            {" "}で発行できます。この端末のブラウザにだけ保存し、保管庫のフォルダには書き込みません。
+            {" "}で発行できます。このページの設定はこの端末のブラウザにだけ保存し、保管庫のフォルダには書き込みません。
             <span className={`key-state ${keyState.cls}`} role="status">{keyState.text}</span>
           </>
         }
@@ -187,10 +187,19 @@ export function AiPage({ backend }: { backend: Backend }) {
 /** 文体の欄。入力の途中で空にしても初期値で埋め直さない（空のまま保存すると初期値を使う） */
 function StyleEditor({ lang, style }: { lang: TargetLang; style: string }) {
   const [draft, setDraft] = useState(style || DEFAULT_STYLE[lang]);
+  // 設定の読み込みやリセットで保存された値が外から変わったら、欄も合わせる（入力中の自分の変更では変えない）
+  const mine = useRef(style);
+  useEffect(() => {
+    if (style === mine.current) return;
+    mine.current = style;
+    setDraft(style || DEFAULT_STYLE[lang]);
+  }, [style, lang]);
   const changed = draft.trim() !== DEFAULT_STYLE[lang].trim();
   const save = (v: string) => {
     setDraft(v);
-    patchPref("ai", { style: { ...getPref("ai").style, [lang]: v.trim() === DEFAULT_STYLE[lang].trim() ? "" : v } });
+    const stored = v.trim() === DEFAULT_STYLE[lang].trim() ? "" : v;
+    mine.current = stored;
+    patchPref("ai", { style: { ...getPref("ai").style, [lang]: stored } });
   };
   return (
     <SettingItem id="style" name="訳と説明の文体" htmlFor="ai-style" desc={`Claude に渡す書き方の方針です（${LANG_LABEL[lang]}で書くとき）。空のときは初期値を使います。`} stacked>
@@ -239,15 +248,20 @@ function Glossary({ backend, pairs, lang }: { backend: Backend; pairs: GlossPair
           }
         }
       } else {
-        for (const paper of await backend.listPapers()) {
-          const a = await backend.loadAnnotations(paper.id).catch(() => null);
-          for (const t of a?.terms ?? []) {
-            const p = termToPair(t.term);
-            if (p) found.push(p);
+        // 論文ごとの注釈を 4 件ずつ並べて読む
+        const papers = await backend.listPapers();
+        for (let i = 0; i < papers.length; i += 4) {
+          const batch = await Promise.all(papers.slice(i, i + 4).map((paper) => backend.loadAnnotations(paper.id).catch(() => null)));
+          for (const a of batch) {
+            for (const t of a?.terms ?? []) {
+              const p = termToPair(t.term);
+              if (p) found.push(p);
+            }
           }
         }
       }
-      const r = mergeGlossary(pairs, found);
+      // 読んでいる間に欄を書き換えたかもしれないので、保存されている今の一覧に足す
+      const r = mergeGlossary(getPref("ai").glossary ?? [], found);
       save(r.list);
       setMsg(r.added ? `${r.added} 個を取り込みました。` : "新しく取り込める訳語はありませんでした。用語の見出しが「日本語（English）」の形のものを取り込みます。");
     } catch (e) {

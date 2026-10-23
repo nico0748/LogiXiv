@@ -24,7 +24,7 @@ import { ThemeToggle } from "./components/shell/ThemeToggle.tsx";
 import { useWorkspace } from "./components/shell/useWorkspace.ts";
 import type { LeftTab } from "./components/shell/workspaceState.ts";
 import { describeError, explainTerm, toTex, translate } from "./lib/claude.ts";
-import { getPref, usePref } from "./lib/prefs.ts";
+import { getPref, usePrefSelect } from "./lib/prefs.ts";
 import { OPEN_SETTINGS_EVENT, type SettingsPageId } from "./lib/settingsIndex.ts";
 import { ApiError, type Backend, type Link, ServerBackend, VaultBackend, connectServer } from "./lib/backend.ts";
 import { type Pos, loadPos, posKey, savePos, throttleTrailing } from "./lib/position.ts";
@@ -72,11 +72,14 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   }, [sentenceFocus.nonce]);
   const [busy, setBusy] = useState<Busy>({});
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
-  // API キーなどは設定（prefs.ts）から読む。設定の画面で変えるとすぐに反映される
-  const ai = usePref("ai");
+  // API キーがあるかだけを購読する（設定の画面で入力するたびに全体を描き直さないように）。
+  // キー・モデル・文体などは、頼むときに設定（prefs.ts）から読む
+  const aiReady = usePrefSelect("ai", (a) => !!a.apiKey);
   const [dialog, setDialog] = useState<"url" | null>(null);
   /** 設定を開くページと項目（「API キーを設定する」やヘルプから）。n を変えると開き直す */
-  const [settingsAt, setSettingsAt] = useState<{ page?: SettingsPageId; item?: string; n: number }>({ n: 0 });
+  const [settingsAt, setSettingsAt] = useState<{ page?: SettingsPageId; item?: string; query?: string; n: number }>({ n: 0 });
+  /** 開いている設定のページと検索の語。設定の「?」からヘルプへ行って戻ったときに、同じ所を開く */
+  const settingsLast = useRef<{ page: SettingsPageId; query: string } | null>(null);
   const openSettingsAt = (page?: SettingsPageId, item?: string) => {
     setSettingsAt({ page, item, n: Date.now() });
     setOverlay("settings");
@@ -127,7 +130,6 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const timers = useRef(new Map<string, number>());
   const contexts = useRef(new Map<string, string>());
 
-  const aiReady = !!ai.apiKey;
 
   // 発表スライドとの対応（中央の「スライド」画面と、右サイドバーのグループ一覧で共有する）
   const slides = useSlides(backend, current, {
@@ -363,7 +365,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const runTranslate = async (id: string, text: string) => {
     setBusyFor(id, "working");
     try {
-      const t = await translate(ai, text, { title, around: contexts.current.get(id) ?? text });
+      const t = await translate(getPref("ai"), text, { title, around: contexts.current.get(id) ?? text });
       update((a) => ({ ...a, highlights: a.highlights.map((h) => (h.id === id ? { ...h, translation: t } : h)) }));
       setBusyFor(id, undefined);
     } catch (e) {
@@ -374,7 +376,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const runTerm = async (id: string, term: string) => {
     setBusyFor(id, "working");
     try {
-      const r = await explainTerm(ai, term, { title, around: contexts.current.get(id) ?? term });
+      const r = await explainTerm(getPref("ai"), term, { title, around: contexts.current.get(id) ?? term });
       update((a) => ({ ...a, terms: a.terms.map((t) => (t.id === id ? { ...t, ...r, id, page: t.page, createdAt: t.createdAt } : t)) }));
       setBusyFor(id, undefined);
     } catch (e) {
@@ -386,7 +388,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const runTex = async (id: string, source: string) => {
     setBusyFor(id, "working");
     try {
-      const r = await toTex(ai, source, crops.current.get(id) ?? null, { title, around: contexts.current.get(id) ?? source });
+      const r = await toTex(getPref("ai"), source, crops.current.get(id) ?? null, { title, around: contexts.current.get(id) ?? source });
       update((a) => ({
         ...a,
         // 記号の欄は、手で書いたものがあれば上書きしない
@@ -623,8 +625,11 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, on);
   }, []);
   // 閉じたら（Esc・リボンを含む）指定のページを忘れ、次にリボンから開くときは「全般」から
+  // 設定の「?」から開いたヘルプの間は覚えておく（閉じると同じページに戻る）
   useEffect(() => {
-    if (overlay !== "settings") setSettingsAt((x) => (x.page || x.item ? { n: x.n } : x));
+    if (overlay === "settings" || (overlay === "help" && helpReturn.current)) return;
+    settingsLast.current = null;
+    setSettingsAt((x) => (x.page || x.item || x.query ? { n: x.n } : x));
   }, [overlay]);
 
   // ? でキーボード操作の早見表。画面の各所の「?」からは、その章でヘルプを開く
@@ -638,6 +643,9 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     const on = (e: Event) => {
       const d = (e as CustomEvent<HelpRequest>).detail;
       helpReturn.current = overlayRef.current === "settings";
+      // 戻ったときに同じページと検索の語で開き直す（設定のモーダルはヘルプの間は閉じる）
+      const last = settingsLast.current;
+      if (helpReturn.current && last) setSettingsAt((x) => ({ n: x.n, page: last.page, query: last.query }));
       setHelpAt({ ...d, n: Date.now() });
       setOverlay("help");
     };
@@ -872,6 +880,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
           key={settingsAt.n}
           initialPage={settingsAt.page}
           initialItem={settingsAt.item}
+          initialQuery={settingsAt.query}
+          onState={(st) => { settingsLast.current = st; }}
           onClose={() => setOverlay(null)}
           onSwitchVault={onClose}
         />
