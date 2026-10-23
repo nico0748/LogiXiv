@@ -31,6 +31,9 @@ if (!fs.existsSync(path.join(APP_ROOT, "dist-server", "app.js"))) {
 }
 const { startServer, setHostBridge } = await import("../dist-server/app.js");
 
+// 開発時（npm run app）と Linux のウィンドウに使うアイコン。配布版の mac / Windows はアプリ本体のアイコン（build/icon.*）が使われる。
+const WINDOW_ICON = path.join(__dirname, "icon.png");
+
 const STATE_FILE = path.join(userData, "window-state.json");
 let mainWindow = null;
 let serverUrl = "";
@@ -78,6 +81,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     title: "PaperLens",
+    icon: WINDOW_ICON,
     backgroundColor: "#f2f2f2",
     webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false },
   });
@@ -174,6 +178,8 @@ if (!electronApp.requestSingleInstanceLock()) {
   });
 
   electronApp.whenReady().then(async () => {
+    // 開発時は Electron の既定のアイコンが Dock に出るので差し替える
+    if (!PACKAGED && process.platform === "darwin") electronApp.dock?.setIcon(WINDOW_ICON);
     setHostBridge({
       pickFolder: async (current) => {
         const res = await dialog.showOpenDialog(mainWindow ?? undefined, {
