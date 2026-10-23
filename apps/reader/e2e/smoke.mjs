@@ -9,6 +9,8 @@ const shotDir = process.argv[2] ?? "/tmp";
 
 const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" }).catch(() => chromium.launch());
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+// 初回の画面の案内（ツアー）が画面を覆わないようにする。案内は e2e/help.mjs で確かめる
+await page.addInitScript(() => { window.__PAPERLENS_NO_TOUR = true; });
 const errors = [];
 page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 page.on("pageerror", (e) => errors.push(String(e)));
@@ -94,14 +96,11 @@ await step("API キー未設定でマーカーを引く", async () => {
 });
 
 await step("API キーを設定", async () => {
-  // 設定のモーダルから Claude の設定を開く
+  // 設定のモーダルの「読解と AI」のページで、API キーをその場で入力する
   await ribbon("設定").click();
   const modal = page.getByRole("dialog", { name: "設定" });
-  await modal.getByRole("button", { name: "API キーとモデルを設定する" }).click();
-  await page.getByRole("heading", { name: "Claude の設定" }).waitFor();
-  await page.getByLabel("API キー").fill("sk-ant-test");
-  await page.getByRole("button", { name: "保存する" }).click();
-  await page.getByRole("heading", { name: "Claude の設定" }).waitFor({ state: "detached" });
+  await modal.getByRole("navigation", { name: "設定の項目" }).getByRole("button", { name: "読解と AI" }).click();
+  await modal.getByLabel("API キー", { exact: true }).fill("sk-ant-test");
   await modal.getByText("API キーは設定済みです。").waitFor();
   await modal.getByRole("button", { name: "閉じる" }).click();
   await modal.waitFor({ state: "detached" });

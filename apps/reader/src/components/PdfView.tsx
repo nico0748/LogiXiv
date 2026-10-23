@@ -9,6 +9,7 @@ import { openPdf } from "../lib/pdf.ts";
 import { type Pt, segmentText, snapSegments } from "../lib/selection.ts";
 import { attachEndOfContent } from "../lib/textSelection.ts";
 import type { Pos } from "../lib/position.ts";
+import { getPref } from "../lib/prefs.ts";
 import { setSentenceFocus, setSentenceMarksVisible, useSentenceFocus, useSentenceMarksVisible } from "../lib/sentenceFocus.ts";
 import { type SentenceMark, hitTest, marksByPage, sentenceAnchor, successorSentence } from "../lib/sentencesView.ts";
 import { SentenceMarkLayer } from "./sentences/SentenceMarks.tsx";
@@ -96,7 +97,8 @@ export function PdfView({ data, highlights, activeId, onAction, onHighlightClick
   const sizesRef = useRef(sizes);
   sizesRef.current = sizes;
   const [error, setError] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
+  // 開いたときの倍率は設定（表示 → PDF）で決める
+  const [zoom, setZoom] = useState(() => getPref("pdfZoom"));
   const [width, setWidth] = useState(800);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; sel: SelectionInfo } | null>(null);
@@ -1000,11 +1002,12 @@ function selectionSegments(range: Range, layer: pdfjs.TextLayer, model: PageMode
   return out;
 }
 
+// 前後の本文は多めに取っておき、送る量（設定の「送る範囲」）は claude.ts で切り詰める
 function surrounding(full: string, text: string) {
   const key = text.slice(0, 40);
   const i = full.indexOf(key);
-  if (i < 0) return full.slice(0, 1200);
-  return full.slice(Math.max(0, i - 600), i + text.length + 600);
+  if (i < 0) return full.slice(0, 3000);
+  return full.slice(Math.max(0, i - 1500), i + text.length + 1500);
 }
 
 function cropCanvas(canvas: HTMLCanvasElement, rects: Rect[]): string | null {

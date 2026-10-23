@@ -27,6 +27,8 @@ await new Promise((resolve, reject) => {
 
 const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" }).catch(() => chromium.launch());
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+// 初回の画面の案内（ツアー）が画面を覆わないようにする。案内は e2e/help.mjs で確かめる
+await page.addInitScript(() => { window.__PAPERLENS_NO_TOUR = true; });
 const errors = [];
 page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 page.on("pageerror", (e) => errors.push(String(e)));
@@ -179,6 +181,7 @@ await step("対訳タブを開く", async () => {
 await step("設定画面に MCP の登録方法が出る", async () => {
   await ribbon("設定").click();
   await page.getByRole("dialog", { name: "設定" }).waitFor();
+  await page.getByRole("navigation", { name: "設定の項目" }).getByRole("button", { name: "AI エージェント（MCP）" }).click();
   await page.getByRole("heading", { name: "AI エージェント（MCP）" }).waitFor();
   const cmd = await page.getByLabel("Claude Code のコマンド").textContent();
   if (!cmd.startsWith("claude mcp add paperlens") || !cmd.includes("dist-server/mcp.js")) throw new Error(`コマンドが違う: ${cmd}`);
@@ -220,12 +223,12 @@ await step("URL から取り込む（新しい論文は書誌情報の欄を開�
   };
   await add();
   await page.screenshot({ path: `${shotDir}/14-url-dialog.png` });
-  await page.getByRole("button", { name: "取り込む" }).click();
+  await page.getByRole("button", { name: "取り込む", exact: true }).click();
   await page.getByRole("dialog").waitFor({ state: "detached" });
   await page.locator(".biblio[open]").waitFor();
   if (count() !== before + 1) throw new Error(`論文が増えていない: ${count()}`);
   await add();
-  await page.getByRole("button", { name: "取り込む" }).click();
+  await page.getByRole("button", { name: "取り込む", exact: true }).click();
   await page.locator(".snackbar", { hasText: "この論文は既に取り込んでいます。開きました。" }).waitFor();
   if (count() !== before + 1) throw new Error("同じ URL で論文が増えた");
 });

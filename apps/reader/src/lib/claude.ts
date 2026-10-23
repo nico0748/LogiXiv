@@ -2,45 +2,37 @@
 //
 // API キーは利用者のブラウザ（localStorage）にだけ保存し、保管庫には書かない。
 // 保管庫を Git や同期サービスで共有してもキーが漏れないようにするため。
-// 送信するのは選択した範囲の文と、その前後の数文、論文の題名だけ。PDF 全体は送らない。
+// 送信するのは選択した範囲の文と、その前後の本文（量は設定で選ぶ）、論文の題名だけ。PDF 全体は送らない。
+// 文体・訳語の固定・訳す言語も設定（prefs.ts の ai）から読む。
 
 import Anthropic from "@anthropic-ai/sdk";
+import { CONTEXT_CHARS, LANG_LABEL, glossaryFor, glossaryRule, langOf, styleOf, trimAround } from "./aiPrompt.ts";
 import type { MathSymbol } from "./model.ts";
+import { type AiSettings, DEFAULT_MODEL, getPref, setPref } from "./prefs.ts";
 
-export interface AiSettings {
-  apiKey: string;
-  model: string;
-}
+export { type AiSettings, DEFAULT_MODEL } from "./prefs.ts";
 
-const KEY = "paperlens.ai";
-export const DEFAULT_MODEL = "claude-opus-5-5";
-
-export function loadAiSettings(): AiSettings {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) return { apiKey: "", model: DEFAULT_MODEL, ...JSON.parse(raw) };
-  } catch {
-    // localStorage が使えない環境では毎回入力してもらう
-  }
-  return { apiKey: "", model: DEFAULT_MODEL };
-}
-
-export function saveAiSettings(s: AiSettings) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(s));
-  } catch {
-    // 保存できなくても、この画面を開いている間は使える
-  }
-}
+/** 設定から読む。変更は prefs.ts の usePref("ai") で受け取る */
+export const loadAiSettings = (): AiSettings => getPref("ai");
+export const saveAiSettings = (s: AiSettings) => setPref("ai", s);
 
 export class AiUnavailable extends Error {}
 
-const STYLE = `日本語は次の方針で書く。
-- 学術的な平叙文（である調）。1文は40字前後を目安にし、読点は1文に2つまで。
-- 比喩や誇張を使わない。「〜と言えるでしょう」のような締めの言葉を付けない。
-- 原文にない主張や数値を足さない。原文の条件や数値はそのまま残す。
-- 専門用語は日本語の定訳を使い、初出で英語を括弧で添える。例: 自己注意（self-attention）。定訳が無い語は英語のまま書く。
-- 指示語（これ、それ）より具体的な名詞を使う。`;
+/** 文体・訳語の固定をシステムプロンプトの末尾に添える */
+function rules(s: AiSettings, ...texts: string[]) {
+  return `${styleOf(s)}${glossaryRule(glossaryFor(s.glossary, ...texts))}`;
+}
+
+/** 設定に合わせて前後の本文を切り詰める */
+const aroundOf = (s: AiSettings, ctx: PaperContext, text: string) => trimAround(ctx.around, text, CONTEXT_CHARS[s.context ?? "normal"]);
+
+/** 接続を確かめる。モデルの情報を 1 回だけ取りに行く（文章は送らない） */
+export async function checkConnection(s: AiSettings): Promise<string> {
+  if (!s.apiKey) throw new AiUnavailable("API キーが設定されていません");
+  const client = new Anthropic({ apiKey: s.apiKey, dangerouslyAllowBrowser: true, maxRetries: 0 });
+  const m = await client.models.retrieve(s.model || DEFAULT_MODEL);
+  return m.display_name || m.id;
+}
 
 async function askJson<T>(
   s: AiSettings,
@@ -75,13 +67,14 @@ export interface PaperContext {
 }
 
 export async function translate(s: AiSettings, text: string, ctx: PaperContext) {
+  const around = aroundOf(s, ctx, text);
   const r = await askJson<{ translation: string }>(
     s,
-    `あなたは英語の学術論文を日本語に訳す翻訳者である。\n${STYLE}`,
+    `${langOf(s) === "ja" ? "あなたは英語の学術論文を日本語に訳す翻訳者である。" : "あなたは学術論文を英語に訳す翻訳者である。"}\n${rules(s, text, around)}`,
     [
       {
         type: "text",
-        text: `論文: ${ctx.title}\n\n前後の本文（参考）:\n${ctx.around}\n\n次の箇所を日本語に訳す。PDF から抽出したため、改行やハイフンで単語が切れている場合は直してから訳す。\n\n${text}`,
+        text: `論文: ${ctx.title}\n\n前後の本文（参考）:\n${around}\n\n次の箇所を${LANG_LABEL[langOf(s)]}に訳す。PDF から抽出したため、改行やハイフンで単語が切れている場合は直してから訳す。\n\n${text}`,
       },
     ],
     {
@@ -105,13 +98,14 @@ export interface TermExplanation {
 }
 
 export async function explainTerm(s: AiSettings, term: string, ctx: PaperContext) {
+  const around = aroundOf(s, ctx, term);
   return askJson<TermExplanation>(
     s,
-    `あなたは研究者向けに専門用語を説明する。\n${STYLE}\n確かでない内容は「〜とされる」ではなく「論文中では定義されていない」のように事実として書く。`,
+    `あなたは研究者向けに専門用語を説明する。説明は${LANG_LABEL[langOf(s)]}で書く。\n${rules(s, term, around)}\n確かでない内容は「〜とされる」ではなく「論文中では定義されていない」のように事実として書く。`,
     [
       {
         type: "text",
-        text: `論文: ${ctx.title}\n\n用語が出てくる箇所:\n${ctx.around}\n\n用語: ${term}\n\n次の項目を書く。\n- term: 見出し語。英語の用語は英語のまま、日本語の定訳があれば「日本語（English）」の形\n- reading: 日本語の見出し語の読み。不要なら空文字\n- short: 1文の定義\n- detail: 2〜4文の説明。仕組みや前提を含める\n- inPaper: この論文での使われ方。前後の本文から分かる範囲で1〜2文\n- related: 関連する用語を3つまで`,
+        text: `論文: ${ctx.title}\n\n用語が出てくる箇所:\n${around}\n\n用語: ${term}\n\n次の項目を書く。\n- term: 見出し語。英語の用語は英語のまま、日本語の定訳があれば「日本語（English）」の形\n- reading: 日本語の見出し語の読み。不要なら空文字\n- short: 1文の定義\n- detail: 2〜4文の説明。仕組みや前提を含める\n- inPaper: この論文での使われ方。前後の本文から分かる範囲で1〜2文\n- related: 関連する用語を3つまで`,
       },
     ],
     {
@@ -147,6 +141,7 @@ export async function toTex(
   imagePng: string | null,
   ctx: PaperContext,
 ) {
+  const around = aroundOf(s, ctx, extracted);
   const content: Anthropic.Beta.Messages.BetaContentBlockParam[] = [];
   if (imagePng) {
     content.push({
@@ -156,11 +151,11 @@ export async function toTex(
   }
   content.push({
     type: "text",
-    text: `論文: ${ctx.title}\n\nPDF から抽出した文字列（崩れている場合がある）:\n${extracted}\n\n${imagePng ? "画像の数式を" : "この数式を"} KaTeX で表示できる TeX に書き起こす。$ や $$ で囲まない。式番号は含めない。explanation には式の役割を前後の本文から分かる範囲で1〜3文で書く。symbols には式に出てくる記号（添字だけのものは除く）を1つずつ挙げ、symbol に TeX、kind に値の種類（scalar=スカラー、vector=ベクトル、matrix=行列、tensor=テンソル、set=集合、function=関数、other=その他。本文から判断できなければ空文字）、meaning に論文中で何を表すか、shape に次元や値の範囲（例: \\mathbb{R}^{d}。分からなければ空文字）を書く。\n\n前後の本文:\n${ctx.around}`,
+    text: `論文: ${ctx.title}\n\nPDF から抽出した文字列（崩れている場合がある）:\n${extracted}\n\n${imagePng ? "画像の数式を" : "この数式を"} KaTeX で表示できる TeX に書き起こす。$ や $$ で囲まない。式番号は含めない。explanation には式の役割を前後の本文から分かる範囲で1〜3文で書く。symbols には式に出てくる記号（添字だけのものは除く）を1つずつ挙げ、symbol に TeX、kind に値の種類（scalar=スカラー、vector=ベクトル、matrix=行列、tensor=テンソル、set=集合、function=関数、other=その他。本文から判断できなければ空文字）、meaning に論文中で何を表すか、shape に次元や値の範囲（例: \\mathbb{R}^{d}。分からなければ空文字）を書く。\n\n前後の本文:\n${around}`,
   });
   return askJson<TexResult>(
     s,
-    `あなたは論文の数式を TeX に書き起こす。\n${STYLE}`,
+    `あなたは論文の数式を TeX に書き起こす。explanation と meaning は${LANG_LABEL[langOf(s)]}で書く。\n${rules(s, extracted, around)}`,
     content,
     {
       type: "object",

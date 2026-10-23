@@ -4,9 +4,13 @@ import { GraphView } from "./components/GraphView.tsx";
 import { ListModal } from "./components/ListModal";
 import { type LocateRequest, PdfView, type SelectionAction, type SelectionInfo } from "./components/PdfView.tsx";
 import { type Busy, RightPanel, type Tab } from "./components/RightPanel.tsx";
-import { SettingsDialog, TemplateDialog, UrlImportDialog } from "./components/Dialogs.tsx";
+import { UrlImportDialog } from "./components/Dialogs.tsx";
 import { Welcome } from "./components/Welcome.tsx";
 import { HelpModal } from "./components/shell/HelpModal.tsx";
+import { ShortcutSheet } from "./components/help/ShortcutSheet.tsx";
+import { Tour } from "./components/help/Tour.tsx";
+import { useHelpHotkey, useUnreadChanges } from "./components/help/useHelpState.ts";
+import { HELP_EVENT, type HelpRequest } from "./lib/help.ts";
 import { LeftSidebar } from "./components/shell/LeftSidebar.tsx";
 import { ResizeHandle } from "./components/shell/ResizeHandle.tsx";
 import { Ribbon, type RibbonItem } from "./components/shell/Ribbon.tsx";
@@ -19,15 +23,9 @@ import { StatusBar } from "./components/shell/StatusBar.tsx";
 import { ThemeToggle } from "./components/shell/ThemeToggle.tsx";
 import { useWorkspace } from "./components/shell/useWorkspace.ts";
 import type { LeftTab } from "./components/shell/workspaceState.ts";
-import {
-  type AiSettings,
-  describeError,
-  explainTerm,
-  loadAiSettings,
-  saveAiSettings,
-  toTex,
-  translate,
-} from "./lib/claude.ts";
+import { describeError, explainTerm, toTex, translate } from "./lib/claude.ts";
+import { getPref, usePref } from "./lib/prefs.ts";
+import { OPEN_SETTINGS_EVENT, type SettingsPageId } from "./lib/settingsIndex.ts";
 import { ApiError, type Backend, type Link, ServerBackend, VaultBackend, connectServer } from "./lib/backend.ts";
 import { type Pos, loadPos, posKey, savePos, throttleTrailing } from "./lib/position.ts";
 import { type FmValue, FrontmatterError } from "./lib/frontmatter.ts";
@@ -53,7 +51,7 @@ export function App() {
 
 type View = "paper" | "graph" | "slides";
 /** 中央の上に重ねて開く画面 */
-type Overlay = "settings" | "help" | "lists" | null;
+type Overlay = "settings" | "help" | "lists" | "keys" | null;
 
 function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => void }) {
   const [papers, setPapers] = useState<PaperSummary[]>([]);
@@ -74,8 +72,15 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   }, [sentenceFocus.nonce]);
   const [busy, setBusy] = useState<Busy>({});
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
-  const [ai, setAi] = useState<AiSettings>(loadAiSettings);
-  const [dialog, setDialog] = useState<"settings" | "template" | "url" | null>(null);
+  // API キーなどは設定（prefs.ts）から読む。設定の画面で変えるとすぐに反映される
+  const ai = usePref("ai");
+  const [dialog, setDialog] = useState<"url" | null>(null);
+  /** 設定を開くページと項目（「API キーを設定する」やヘルプから）。n を変えると開き直す */
+  const [settingsAt, setSettingsAt] = useState<{ page?: SettingsPageId; item?: string; n: number }>({ n: 0 });
+  const openSettingsAt = (page?: SettingsPageId, item?: string) => {
+    setSettingsAt({ page, item, n: Date.now() });
+    setOverlay("settings");
+  };
   const [jumpTo, setJumpTo] = useState<{ page: number; y: number; n: number; instant?: boolean } | null>(null);
   /** 用語・数式の場所を PDF で示す指示 */
   const [locateReq, setLocateReq] = useState<LocateRequest | null>(null);
@@ -91,6 +96,11 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   /** リストから論文のページへ飛ぶとき。nonce を変えると同じページでももう一度飛ぶ */
   const [scrollToPage, setScrollToPage] = useState<{ page: number; nonce: number } | undefined>(undefined);
   const [overlay, setOverlay] = useState<Overlay>(null);
+  /** ヘルプを開く章（画面の各所の「?」から）。n を変えると同じ章でも開き直す */
+  const [helpAt, setHelpAt] = useState<(HelpRequest & { n: number }) | null>(null);
+  /** 値を変えると、画面の案内（ツアー）を最初から始める */
+  const [tourRun, setTourRun] = useState(0);
+  const unreadChanges = useUnreadChanges();
   const [resizing, setResizing] = useState(false);
   const { ws, patch, ready } = useWorkspace(backend);
   const setRightOpen = (v: boolean) => patch({ rightOpen: v });
@@ -166,7 +176,9 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       if (restored.current) return;
       restored.current = true;
       const last = ws.openPaper && list.find((p) => p.id === ws.openPaper) ? ws.openPaper : list[0]?.id;
-      if (last) setCurrent((c) => c ?? last);
+      // 起動時の動作が「論文一覧を開く」のときは、論文を開かずに一覧を出す
+      if (getPref("startup") === "list") patch({ leftOpen: true, leftTab: "files" });
+      else if (last) setCurrent((c) => c ?? last);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh, ready]);
@@ -450,12 +462,19 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     return backend.importPaper(f.name, data, t);
   };
 
+  /** 設定の「取り込み時の段階」が未読以外なら、取り込んだ論文の段階をそれにする */
+  const applyImportStatus = async (id: string) => {
+    const s = getPref("importStatus");
+    if (s) await backend.writeMeta(id, "status", s).catch(() => undefined);
+  };
+
   /** 選んだ・ドロップした PDF を順に取り込み、最後のものを開く */
   const onImport = async (files: File[]) => {
     let last: string | null = null;
     for (const f of files) {
       try {
         last = await importOne(f);
+        await applyImportStatus(last);
       } catch (e) {
         setSave({ kind: "error", msg: `${f.name} を取り込めませんでした: ${e instanceof Error ? e.message : String(e)}` });
       }
@@ -479,6 +498,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       notify("この論文は既に取り込んでいます。開きました。");
     } else {
       skipRestore.current = r.id;
+      await applyImportStatus(r.id);
       setTab("record");
       setRightOpen(true);
       try {
@@ -591,6 +611,33 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     return () => window.removeEventListener("keydown", on);
   }, []);
 
+  // ヘルプなど App の外から、設定を指定のページで開く（settingsIndex.ts の openSettings）
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ page?: SettingsPageId; item?: string }>).detail ?? {};
+      setSettingsAt({ page: d.page, item: d.item, n: Date.now() });
+      setOverlay("settings");
+    };
+    window.addEventListener(OPEN_SETTINGS_EVENT, on);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, on);
+  }, []);
+
+  // ? でキーボード操作の早見表。画面の各所の「?」からは、その章でヘルプを開く
+  useHelpHotkey(() => setOverlay((o) => (o === "keys" ? null : "keys")));
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<HelpRequest>).detail;
+      setHelpAt({ ...d, n: Date.now() });
+      setOverlay("help");
+    };
+    window.addEventListener(HELP_EVENT, on);
+    return () => window.removeEventListener(HELP_EVENT, on);
+  }, []);
+  // ヘルプを閉じたら章の指定を捨てる（リボンから開くときは「はじめに」から）
+  useEffect(() => {
+    if (overlay !== "help") setHelpAt(null);
+  }, [overlay]);
+
   const saveLabel =
     save.kind === "saving" ? "保存しています" : save.kind === "saved" ? (backend.persistent ? "フォルダに保存しました" : "保存しました（メモリ）") : save.kind === "error" ? `保存できませんでした: ${save.msg}` : "";
 
@@ -625,7 +672,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       status={status}
       onField={onField}
       onStatus={(s) => void onStatus(s)}
-      onOpenSettings={() => setDialog("settings")}
+      onOpenSettings={() => openSettingsAt("ai", "api-key")}
       onMeta={onMeta}
       metaError={metaError}
       notify={notify}
@@ -643,6 +690,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       <Ribbon
         active={{ files: leftOpen && ws.leftTab === "files", search: leftOpen && ws.leftTab === "search", graph: view === "graph", slides: view === "slides", lists: overlay === "lists", settings: overlay === "settings", help: overlay === "help" }}
         onItem={onRibbon}
+        badges={unreadChanges ? { help: "新しい更新情報があります" } : undefined}
       />
 
       <aside className="sidebar left" aria-label="左サイドバー" aria-hidden={!leftOpen} inert={!leftOpen}>
@@ -808,23 +856,32 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       {overlay === "settings" && (
         <SettingsModal
           backend={backend}
-          aiReady={aiReady}
-          onOpenClaude={() => setDialog("settings")}
-          onOpenTemplate={() => setDialog("template")}
-          onClose={() => setOverlay(null)}
+          key={settingsAt.n}
+          initialPage={settingsAt.page}
+          initialItem={settingsAt.item}
+          onClose={() => { setOverlay(null); setSettingsAt((x) => ({ ...x, item: undefined })); }}
           onSwitchVault={onClose}
         />
       )}
-      {overlay === "help" && <HelpModal onClose={() => setOverlay(null)} />}
-
-      {dialog === "settings" && (
-        <SettingsDialog
-          value={ai}
-          onClose={() => setDialog(null)}
-          onSave={(s) => { setAi(s); saveAiSettings(s); setDialog(null); }}
+      {overlay === "help" && (
+        <HelpModal
+          key={helpAt?.n}
+          page={helpAt?.page}
+          anchor={helpAt?.anchor}
+          onClose={() => setOverlay(null)}
+          onStartTour={() => { setOverlay(null); setTourRun((n) => n + 1); }}
         />
       )}
-      {dialog === "template" && <TemplateDialog backend={backend} onClose={() => setDialog(null)} />}
+      {overlay === "keys" && <ShortcutSheet onClose={() => setOverlay(null)} onOpenHelp={() => { setHelpAt({ page: "keys", n: Date.now() }); setOverlay("help"); }} />}
+      <Tour
+        ready={ready && overlay === null && dialog === null}
+        restart={tourRun}
+        hasPapers={papers.length > 0}
+        onImport={onImport}
+        layout={{ left: ws.leftOpen, right: ws.rightOpen }}
+        setLayout={(l) => patch({ ...(l.left !== undefined && { leftOpen: l.left }), ...(l.left && !ws.leftOpen && { leftTab: "files" as const }), ...(l.right !== undefined && { rightOpen: l.right }) })}
+      />
+
       {dialog === "url" && <UrlImportDialog onClose={() => setDialog(null)} onImport={onImportUrl} />}
       <Snackbar snack={snack} onClose={() => setSnack(null)} />
     </div>

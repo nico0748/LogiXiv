@@ -4,8 +4,10 @@ import { toBibFile } from "../lib/bibtex.ts";
 import { readFrontmatter } from "../lib/frontmatter.ts";
 import { SORT_KEYS, SORT_LABEL, type SortKey, isSortKey, sortPapers } from "../lib/paperSort.ts";
 import type { PaperSummary, SearchHit } from "../lib/papers.ts";
+import { setPref, usePref } from "../lib/prefs.ts";
 import { parseFields } from "../lib/template.ts";
 import { StatusChips } from "./StatusChips.tsx";
+import { HelpButton } from "./help/HelpButton.tsx";
 
 // 左サイドバーの論文一覧。検索欄と段階の絞り込み、ノートの中の当たりを出す。
 //
@@ -13,10 +15,9 @@ import { StatusChips } from "./StatusChips.tsx";
 // - 段階の絞り込みは localStorage に覚える。検索の語は覚えない（開き直したときに一覧が理由なく短くならないように）
 // - 開いている論文は、絞り込みに当てはまらなくても一覧の先頭に残す
 // - 行のタグを押すと、そのタグ（#tag）で絞り込む。検索の語が # で始まるときはタグだけを見る
-// - 並び順は localStorage に覚える。「BibTeX を書き出す」は、絞り込んだ一覧をその並び順で 1 つの .bib にする
+// - 並び順は設定（prefs.ts の paperSort）に覚える。「BibTeX を書き出す」は、絞り込んだ一覧をその並び順で 1 つの .bib にする
 
 const FILTER_KEY = "paperlens.ui.statusFilter";
-const SORT_KEY = "paperlens.ui.paperSort";
 const HIT_LIMIT = 50;
 
 const REGION_LABEL: Record<string, string> = {
@@ -52,14 +53,9 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
       return "";
     }
   });
-  const [sort, setSort] = useState<SortKey>(() => {
-    try {
-      const v = localStorage.getItem(SORT_KEY);
-      return isSortKey(v) ? v : "created";
-    } catch {
-      return "created";
-    }
-  });
+  // 並び順は設定（表示 → 論文一覧の並び順）と同じ値。ここで変えると次からもその順になる
+  const sort = usePref("paperSort");
+  const setSort = (v: SortKey) => setPref("paperSort", v);
   const [exporting, setExporting] = useState(false);
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [labels, setLabels] = useState<Record<string, string>>({});
@@ -78,14 +74,6 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
       // 覚えられなくても絞り込みは効く
     }
   }, [status]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(SORT_KEY, sort);
-    } catch {
-      // 覚えられなくても並べ替えは効く
-    }
-  }, [sort]);
 
   // 記録欄の見出しは、テンプレートから引く
   useEffect(() => {
@@ -198,6 +186,7 @@ export function PaperListPane({ backend, papers, current, showing, onOpen, onHit
               </select>
             </>
           )}
+          <HelpButton chapter="import" label="ヘルプ: 論文を取り込む・探す" />
         </div>
         {papers.length === 0 ? (
           <div className="empty">
