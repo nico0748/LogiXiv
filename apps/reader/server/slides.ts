@@ -12,10 +12,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { Rect } from "../src/lib/model.ts";
 import { type SlideDeck, markupName, overlapRatio, putSlides, slidesPdfPath, sortMarkups } from "../src/lib/slides.ts";
 import type { NodeVault } from "./nodeVault.ts";
+import { pdfjs } from "./pdfjs.ts";
 import { readPages } from "./pdftext.ts";
 import { requirePaper } from "./service.ts";
 
@@ -141,6 +141,7 @@ export function isPptx(name: string, data: ArrayBuffer) {
 async function checkPdf(data: ArrayBuffer) {
   if (!new TextDecoder().decode(new Uint8Array(data.slice(0, 5))).startsWith("%PDF")) return; // putSlides がわかる言葉で断る
   try {
+    const { getDocument } = await pdfjs();
     const doc = await getDocument({ data: new Uint8Array(data.slice(0)), isEvalSupported: false, verbosity: 0 }).promise;
     const n = doc.numPages;
     await doc.destroy();
@@ -183,6 +184,7 @@ function textIn(items: { str: string; rect: Rect }[], box: Rect) {
 
 /** スライドのページ数 */
 export async function slideCount(vault: NodeVault, id: string) {
+  const { getDocument } = await pdfjs();
   const doc = await getDocument({ data: new Uint8Array(await fs.readFile(vault.resolve(slidesPdfPath(id)))), isEvalSupported: false, verbosity: 0 }).promise;
   try {
     return doc.numPages;

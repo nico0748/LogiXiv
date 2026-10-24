@@ -2,11 +2,11 @@
 // 指定された文の位置（マーカーを引く場所）を探すときに使う。
 
 import fs from "node:fs/promises";
-import { AnnotationMode, getDocument, OPS } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { attachGlyphs, type FontLike, layoutGlyphs } from "../src/lib/glyphs.ts";
 import type { Rect } from "../src/lib/model.ts";
 import { type PageText, findText, type Match } from "../src/lib/findText.ts";
 import { type LaidItem, layoutItems, mergeLineRects, type TextItemLike, textRotation } from "../src/lib/pageText.ts";
+import { pdfjs } from "./pdfjs.ts";
 
 export { type PageText, findText, type Match };
 
@@ -24,6 +24,7 @@ export async function readPages(file: string, opts: { glyphs?: boolean } = {}): 
   if (hit && hit.mtime === stat.mtimeMs && (hit.glyphs || !opts.glyphs)) return hit.pages;
 
   const data = new Uint8Array(await fs.readFile(file));
+  const { AnnotationMode, getDocument, OPS } = await pdfjs();
   const doc = await getDocument({ data, isEvalSupported: false, useSystemFonts: false, verbosity: 0 }).promise;
   const pages: PageText[] = [];
   try {

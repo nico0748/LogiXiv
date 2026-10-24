@@ -19,7 +19,16 @@ export interface Vault {
   writeText(path: string, text: string): Promise<void>;
   readBinary(path: string): Promise<ArrayBuffer>;
   writeBinary(path: string, data: ArrayBuffer): Promise<void>;
+  /**
+   * 任意。path のファイルの中身から derive で作った値を、ファイルが変わるまで使い回す。
+   * tag は作り方の名前（同じファイルから別の値を作るときに分ける）。返った値は書き換えないこと。
+   */
+  memo?<T>(path: string, tag: string, derive: (text: string) => T): Promise<T>;
 }
+
+/** 読むだけの集計用。保管庫が使い回せるなら使い回し、できなければ毎回読んで作る。 */
+export const readMemo = <T>(vault: Vault, path: string, tag: string, derive: (text: string) => T): Promise<T> =>
+  vault.memo ? vault.memo(path, tag, derive) : vault.readText(path).then(derive);
 
 const split = (p: string) => p.split("/").filter(Boolean);
 

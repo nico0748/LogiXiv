@@ -2,8 +2,8 @@
 // 描画は pdf.js、画面の代わりの canvas は pdf.js が Node.js で使う @napi-rs/canvas（pdfjs-dist の依存）に任せる。
 
 import fs from "node:fs/promises";
-import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { Rect } from "../src/lib/model.ts";
+import { pdfjs } from "./pdfjs.ts";
 
 /** 画像の長い辺の上限（px）。大きすぎる画像は受け取る側の上限に当たり、読むのにも時間がかかる */
 export const MAX_IMAGE_SIDE = 1600;
@@ -23,6 +23,7 @@ interface NodeCanvas {
 /** ページを PNG にする。page は 1 から。ページの外を指したら Error */
 export async function renderPagePng(file: string, page: number, opts: RenderOptions = {}) {
   const data = new Uint8Array(await fs.readFile(file));
+  const { getDocument } = await pdfjs();
   const doc = await getDocument({ data, isEvalSupported: false, verbosity: 0 }).promise;
   try {
     if (page < 1 || page > doc.numPages) throw new Error(`この PDF は ${doc.numPages} ページです。page を 1〜${doc.numPages} で指定してください。`);
