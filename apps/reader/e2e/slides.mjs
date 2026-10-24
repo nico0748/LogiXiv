@@ -4,7 +4,8 @@
 // 2. 画面で「囲む」を選び、スライドの 2 ページ目を囲む → Markup-02.01 ができる
 // 3. 論文の文を選んで「文章としてリンク」、図を囲んでリンクする → 線が 2 本引かれる
 // 4. slides.json と note.md に残ること、MCP の書き込みで線が増えることを確かめる
-// 5. 全画面（発表のとき）: ボタンと P キーで入る・出る、見出しが隠れる、線がずれない、帯が上の端で出る、使えないときはウィンドウいっぱい
+// 5. 全画面（発表の窓を開けないとき）: ボタンと P キーで入る・出る、見出しが隠れる、線がずれない、帯が上の端で出る、使えないときはウィンドウいっぱい
+// 5'. 発表: 別の窓にスライドと論文を映し、元の窓に台本を出す。ページとグループの指示が窓の間で届く、閉じると元に戻る
 // 6. 名前の札はカーソルを乗せたときだけ出ること、スライド側と Delete キーではグループごと、論文側ではそのリンクだけが消え、元に戻せること、
 //    つまみで四角の大きさを直せること、消して空いた番号を次のグループが使うことを確かめる
 // 7. 三面（スライド / 論文 / 補足情報）: タブと [ ] キーで横に送る、論文の幅は変わらない、隠れたスライドの線は引かない、補足情報から論文へ動かせる、
@@ -380,8 +381,18 @@ try {
     if (head.length < 200) fail("スライドが上書きされました");
   });
 
-  // --- 全画面（発表のとき）-----------------------------------------------------
-  // スライドと論文を並べた画面ごと全画面にする。見出しは隠れ、道具の帯は上の端にマウスを近づけたときだけ出る。
+  // --- 全画面（発表の窓を開けないとき）---------------------------------------------
+  // 「発表」は別の窓を開くが、開けない（ポップアップを止められたなど）ときは、スライドと論文を並べた画面ごと全画面にする。
+  // 見出しは隠れ、道具の帯は上の端にマウスを近づけたときだけ出る。ここでは window.open を止めて確かめる。
+  const blockPopups = () =>
+    page.evaluate(() => {
+      window.__open ??= window.open;
+      window.open = () => null;
+    });
+  const allowPopups = () =>
+    page.evaluate(() => {
+      if (window.__open) window.open = window.__open;
+    });
   const fsState = () =>
     page.evaluate(() => {
       const v = document.querySelector(".slides-view");
@@ -424,10 +435,11 @@ try {
     });
     await page.waitForFunction(() => document.querySelectorAll(".sv-lines circle").length === 2, null, { timeout: 5000 });
     await linesOk();
+    await blockPopups();
   });
 
-  await step("全画面: ボタンで画面ごと全画面になり、見出しと道具の帯が隠れ、線は四角に付いたまま", async () => {
-    await page.getByRole("button", { name: "全画面", exact: true }).click();
+  await step("全画面: 「発表」の窓を開けないときは、ボタンで画面ごと全画面になり、見出しと道具の帯が隠れ、線は四角に付いたまま", async () => {
+    await page.getByRole("button", { name: "発表", exact: true }).click();
     await page.waitForFunction(() => document.querySelector(".slides-view").classList.contains("is-fullscreen"));
     const st = await fsState();
     if (!st.native && !st.fill) fail(`全画面になっていません: ${JSON.stringify(st)}`);
@@ -550,6 +562,85 @@ try {
       Element.prototype.requestFullscreen = window.__rf;
     });
     await linesOk();
+    await allowPopups();
+  });
+
+  // --- 発表（別の窓と台本）---------------------------------------------------------
+  // 「発表」で別の窓にスライドと論文を映し、元の窓にはグループのメモとリンクをスライドの順に台本として出す。
+  let pop;
+  const popErrors = [];
+  const waitCurrent = (n) => page.waitForFunction((n) => document.querySelector(".sc-page.is-current")?.dataset.page === String(n), n, { timeout: 5000 });
+  const openPresenter = async (how) => {
+    [pop] = await Promise.all([page.waitForEvent("popup"), how()]);
+    pop.on("console", (m) => m.type() === "error" && popErrors.push(m.text()));
+    pop.on("pageerror", (e) => popErrors.push(String(e)));
+    await pop.locator(".slides-view.is-fullscreen .sv-slides .pp-page").nth(1).waitFor();
+    await page.locator(".sc").waitFor();
+  };
+
+  await step("発表: 「発表」で別の窓にスライドと論文が全画面で映り、元の窓には台本が出る", async () => {
+    await page.mouse.move(800, 500);
+    // 台本に出るメモを入れておく
+    const deck = (await (await fetch(`${base}/api/papers/${id}/slides`)).json()).deck;
+    const g = deck.markups.find((m) => m.links.length) ?? deck.markups[0];
+    await fetch(`${base}/api/papers/${id}/slides/markups`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-paperlens-client": "agent" },
+      body: JSON.stringify({ ops: [{ op: "update", id: g.id, patch: { memo: "ここで提案手法の要点を話す" } }] }),
+    });
+    await openPresenter(() => page.getByRole("button", { name: "発表", exact: true }).click());
+    if (!(await pop.evaluate(() => new URL(location.href).searchParams.get("present")))) fail("発表の窓の URL に論文の ID がありません");
+    if (await page.locator(".sv-split").count()) fail("元の窓にスライドと論文が残っています");
+    const groups = await page.locator(".sc-group").count();
+    if (groups !== deck.markups.length) fail(`台本のグループの数が違います: ${groups} / ${deck.markups.length}`);
+    await page.locator(".sc-memo", { hasText: "ここで提案手法の要点を話す" }).waitFor();
+    if (!(await page.locator(".sc-link").count())) fail("台本にリンク先が出ていません");
+    await waitCurrent(1);
+    await page.screenshot({ path: path.join(shotDir, "slides-script.png") });
+    await pop.screenshot({ path: path.join(shotDir, "slides-presenter.png") });
+  });
+
+  await step("発表: 発表の窓で → を押すとスライドが進み、台本の印も進む。台本の ← で戻る", async () => {
+    await pop.mouse.move(800, 500);
+    await pop.keyboard.press("ArrowRight");
+    await waitCurrent(2);
+    await page.keyboard.press("ArrowLeft");
+    await waitCurrent(1);
+  });
+
+  await step("発表: 台本でページの見出しを押すと、発表の窓がそのページへ動く", async () => {
+    await page.locator('.sc-page[data-page="2"] .sc-page-head').click();
+    await waitCurrent(2);
+    // なめらかに動かすので、止まるのを待つ
+    await pop
+      .waitForFunction(() => {
+        const s = document.querySelector(".sv-slides .pp-scroll").getBoundingClientRect();
+        return Math.abs(document.querySelectorAll(".sv-slides .pp-page")[1].getBoundingClientRect().top - s.top) < 40;
+      }, null, { timeout: 5000 })
+      .catch(() => fail("発表の窓のスライドが 2 ページ目に動いていません"));
+  });
+
+  await step("発表: 台本でグループを押すと、発表の窓でそのグループが選ばれ、台本にも印が付く", async () => {
+    const head = page.locator(".sc-group-head").first();
+    const name = await head.locator(".sc-name").innerText();
+    await head.click();
+    await pop.locator(`.mu-box[aria-pressed="true"][aria-label^="${name}"]`).waitFor({ timeout: 5000 });
+    await page.locator(".sc-group.is-active .sc-name", { hasText: name }).waitFor({ timeout: 5000 });
+  });
+
+  await step("発表: 「発表を終える」で発表の窓が閉じ、元の窓はスライドと論文の画面に戻る", async () => {
+    await Promise.all([pop.waitForEvent("close"), page.getByRole("button", { name: "発表を終える" }).click()]);
+    await page.locator(".sv-slides .pp-page").first().waitFor();
+    if (await page.locator(".sc").count()) fail("台本が残っています");
+  });
+
+  await step("発表: P キーでも開き、発表の窓を閉じると元に戻る", async () => {
+    await page.mouse.move(800, 500);
+    await openPresenter(() => page.keyboard.press("p"));
+    await pop.close();
+    await page.locator(".sv-slides .pp-page").first().waitFor({ timeout: 5000 });
+    if (await page.locator(".sc").count()) fail("発表の窓を閉じても台本が残っています");
+    if (popErrors.length) fail(`発表の窓のコンソールのエラー:\n${popErrors.join("\n")}`);
   });
 
   // --- 三面（スライド / 論文 / 補足情報）-----------------------------------------
@@ -738,6 +829,7 @@ try {
   });
 
   await step("三面: 補足情報の側のまま全画面にしても、論文と補足情報が並ぶ", async () => {
+    await blockPopups();
     await page.mouse.move(800, 500);
     await page.keyboard.press("p");
     await page.waitForFunction(() => document.querySelector(".slides-view.is-fullscreen"));
@@ -751,6 +843,7 @@ try {
     await page.keyboard.press("p");
     await page.waitForFunction(() => !document.fullscreenElement && !document.querySelector(".slides-view.is-fullscreen"));
     await waitSide("info");
+    await allowPopups();
   });
 
   await step("三面: 選んだ側は読み込み直しても残り、[ でスライドの側に戻す", async () => {

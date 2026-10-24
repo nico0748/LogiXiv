@@ -10,7 +10,7 @@
     "build": "vite build && vite build -c vite.server.config.ts",
     "start": "node dist-server/server.js",
     "mcp": "node dist-server/mcp.js",
-    "app": "npm run build && electron .",
+    "app": "npm run build && node scripts/electron.mjs",
     "dist": "npm run build && electron-builder",
     "preview": "vite preview",
     "build:single": "SINGLE=1 vite build",

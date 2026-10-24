@@ -790,6 +790,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
               setIsolate={setIsolateLines}
               info={rightPanel}
               paperJump={paperJump}
+              canPresent={backend.kind === "server"}
               onSlideCount={(n) => {
                 setSlideCount(n);
                 const lost = slides.state.kind === "ready" ? slides.state.deck.markups.filter((m) => m.page > n) : [];

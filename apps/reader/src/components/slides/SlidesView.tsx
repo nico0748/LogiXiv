@@ -15,8 +15,10 @@
 // - 補足情報の対訳で文を選ぶと、論文の面でその文に枠を付けて、そこまで動かす（論文の画面の PdfView と同じ）。
 // - 補足情報（info）を渡されたときは、論文の右に三面目（対訳・訳・用語など）を置き、二面ずつ横にめくって見せる
 //   （[スライド | 論文] か [論文 | 補足情報]。論文はいつも見える。usePager.ts）。渡されないときはこれまでの二分割のまま。
+// - 「発表」（P）は、スライドと論文を別の窓に全画面で映し、この窓には台本（ScriptView）を出す（usePresenter.ts）。
+//   別の窓を開けないときは、これまでどおりこの画面を全画面にする。発表の窓では presentation を渡す。
 
-import { Frame, Maximize, Minimize, MousePointer2, Spline, SquareDashed, Trash2, Upload } from "lucide-react";
+import { Frame, Maximize, Minimize, MousePointer2, Presentation, X, Spline, SquareDashed, Trash2, Upload } from "lucide-react";
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Rect } from "../../lib/model.ts";
 import { newId } from "../../lib/model.ts";
@@ -45,6 +47,8 @@ import "./slides.css";
 import { HelpButton } from "../help/HelpButton.tsx";
 import { useFullscreen } from "./useFullscreen.ts";
 import { GUTTER, type SlidesSide, usePager } from "./usePager.ts";
+import { ScriptView } from "./ScriptView.tsx";
+import { usePresenter } from "./usePresenter.ts";
 import type { Slides } from "./useSlides.ts";
 
 export type SlideTool = "select" | "box";
@@ -78,6 +82,14 @@ interface Props {
   info?: ReactNode;
   /** 補足情報から「論文のこの場所を見せる」指示。n が変わるたびに論文の面を page / y（0..1 のページ内の縦位置）へ動かす */
   paperJump?: { page: number; y: number; n: number } | null;
+  /** 「発表」で別の窓を開けるか（ローカルサーバーで動いているときだけ。発表の窓が同じ保存先を読むため） */
+  canPresent?: boolean;
+  /** この画面が発表の窓のとき。いつも全画面の見た目にし、「発表を終える」で窓を閉じる */
+  presentation?: boolean;
+  /** スライドの見えているページが変わったとき（発表の窓から、台本へ知らせるため） */
+  onSlidePage?: (page: number, count: number) => void;
+  /** スライドをこのページへ動かす指示。n が変わるたびに動かす */
+  slideGoto?: { page: number; n: number } | null;
 }
 
 const ACCEPT = ".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation";
@@ -90,21 +102,33 @@ export function SlidesView(props: Props) {
   const [dropping, setDropping] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const ready = s.kind === "ready" && !!props.paperPdf;
-  const fs = useFullscreen(rootRef, ready);
+  const { presentation } = props;
+  // 発表の窓の中では使わない（同じ窓の PresenterApp が送る知らせを、自分あての知らせと取り違えないように）
+  const presenter = usePresenter(presentation ? null : props.paperId, ready && !!props.canPresent);
+  // 「発表」: 別の窓を開けたらそちらに映し、開けなければこの画面を全画面にする。発表中なら終える
+  const present = () => {
+    if (presenter.open) {
+      presenter.stop();
+      return true;
+    }
+    return presenter.start();
+  };
+  const fs = useFullscreen(rootRef, ready && !presentation, present);
+  const fsLook = presentation || !!fs.mode;
   // 全画面では道具の帯を隠し、上の端にマウスを近づけたときだけ出す（止まって 2 秒で隠す）
   const [bar, setBar] = useState(false);
   const [fsHint, setFsHint] = useState(false);
   const barTimer = useRef(0);
   useEffect(() => {
     setBar(false);
-    setFsHint(!!fs.mode);
-    if (!fs.mode) return;
+    setFsHint(fsLook);
+    if (!fsLook) return;
     const t = window.setTimeout(() => setFsHint(false), 2500);
     return () => window.clearTimeout(t);
-  }, [fs.mode]);
+  }, [fsLook]);
   useEffect(() => () => window.clearTimeout(barTimer.current), []);
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!fs.mode) return;
+    if (!fsLook) return;
     const inBar = (e.target as Element).closest?.(".sv-toolbar");
     if (!inBar && e.clientY - e.currentTarget.getBoundingClientRect().top > 56) return;
     setBar(true);
@@ -139,7 +163,7 @@ export function SlidesView(props: Props) {
   return (
     <div
       ref={rootRef}
-      className={`slides-view${dropping ? " is-drop-target" : ""}${fs.mode ? " is-fullscreen" : ""}${fs.mode === "fill" ? " is-fill" : ""}${bar ? " fs-bar" : ""}`}
+      className={`slides-view${dropping ? " is-drop-target" : ""}${fsLook ? " is-fullscreen" : ""}${presentation || fs.mode === "fill" ? " is-fill" : ""}${presentation ? " is-presentation" : ""}${bar ? " fs-bar" : ""}`}
       onPointerMove={onPointerMove}
       onDragOver={(e) => {
         if (!e.dataTransfer.types.includes("Files")) return;
@@ -159,7 +183,11 @@ export function SlidesView(props: Props) {
       }}
     >
       {input}
-      {fsHint && <div className="sv-fs-hint" role="status">Esc で全画面を終えます。上の端にマウスを動かすと道具が出ます</div>}
+      {fsHint && (
+        <div className="sv-fs-hint" role="status">
+          {presentation ? "台本は元の窓に出ています。上の端にマウスを動かすと道具が出ます" : "Esc で全画面を終えます。上の端にマウスを動かすと道具が出ます"}
+        </div>
+      )}
       {slides.importing && (
         // 今の画面（拡大率や分割の幅）を残したまま、上に重ねて知らせる
         <div className="sv-importing" role="status" aria-busy="true">
@@ -184,8 +212,19 @@ export function SlidesView(props: Props) {
         </div>
       ) : !props.paperPdf ? (
         <div className="drop-hint" aria-busy="true"><h2>論文を読み込んでいます</h2></div>
+      ) : presenter.open ? (
+        <ScriptView deck={s.deck} presenter={presenter} />
       ) : (
-        <Split {...props} deck={s.deck} slidePdf={s.pdf} paperPdf={props.paperPdf} onReplace={() => fileRef.current?.click()} fullscreen={!!fs.mode} onFullscreen={fs.toggle} />
+        <Split
+          {...props}
+          deck={s.deck}
+          slidePdf={s.pdf}
+          paperPdf={props.paperPdf}
+          onReplace={() => fileRef.current?.click()}
+          fullscreen={!!fs.mode}
+          onFullscreen={presentation ? () => window.close() : () => present() || fs.toggle()}
+          canOpenPresenter={!!props.canPresent && !presentation}
+        />
       )}
     </div>
   );
@@ -213,7 +252,19 @@ function Split({
   onReplace,
   fullscreen,
   onFullscreen,
-}: Props & { deck: SlideDeck; slidePdf: ArrayBuffer; paperPdf: ArrayBuffer; onReplace: () => void; fullscreen: boolean; onFullscreen: () => void }) {
+  canOpenPresenter,
+  presentation,
+  onSlidePage,
+  slideGoto,
+}: Props & {
+  deck: SlideDeck;
+  slidePdf: ArrayBuffer;
+  paperPdf: ArrayBuffer;
+  onReplace: () => void;
+  fullscreen: boolean;
+  onFullscreen: () => void;
+  canOpenPresenter: boolean;
+}) {
   const [slideTool, setSlideTool] = useState<SlideTool>("select");
   const [paperTool, setPaperTool] = useState<PaperTool>("text");
   const [slideZoom, setSlideZoom] = useState(1);
@@ -367,6 +418,16 @@ function Split({
   // --- 移動 -----------------------------------------------------------------
   const showLink = useCallback((l: SlideLink) => paperRef.current?.goTo(l.page, boundsOf(l.rects)?.y ?? 0), []);
   const showMarkup = useCallback((m: SlideMarkup) => slideRef.current?.goTo(m.page, m.rect.y), []);
+  // 発表の窓: 見えているスライドのページを台本へ知らせ、台本からの指示でページを動かす
+  useEffect(() => {
+    onSlidePage?.(slidePage, slideCount);
+  }, [onSlidePage, slidePage, slideCount]);
+  useEffect(() => {
+    if (!slideGoto) return;
+    toSlides();
+    slideRef.current?.goTo(slideGoto.page, 0, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slideGoto?.n]);
   useEffect(() => {
     if (!focus) return;
     const m = deck.markups.find((x) => x.id === focus.id);
@@ -553,6 +614,9 @@ function Split({
     else if (k === "t" && active) setPaperTool("text");
     else if (k === "f" && active) setPaperTool("figure");
     else if (k === "e" && active) setPaperTool("equation");
+    // 発表の窓では、← / → / PageUp / PageDown（プレゼン用のリモコンが送るキー）でスライドを 1 ページずつ送る
+    else if (presentation && (e.key === "ArrowRight" || e.key === "PageDown")) slideRef.current?.goTo(Math.min(slideCount || slidePage, slidePage + 1), 0, true);
+    else if (presentation && (e.key === "ArrowLeft" || e.key === "PageUp")) slideRef.current?.goTo(Math.max(1, slidePage - 1), 0, true);
     else if (e.key === "Escape") {
       if (slideTool !== "select" || paperTool !== "text") {
         setSlideTool("select");
@@ -858,9 +922,19 @@ function Split({
         <button className={`btn text sm${isolate ? " is-on" : ""}`} aria-pressed={isolate} title="選んだグループの線だけを出す" onClick={() => setIsolate(!isolate)}>
           <Spline size={14} aria-hidden="true" /> 選んだ線だけ
         </button>
-        <button className="btn text sm sv-fs-btn" title={fullscreen ? "全画面を終える（P / Esc）" : "スライドと論文を全画面で表示する（P）"} onClick={onFullscreen}>
-          {fullscreen ? <Minimize size={14} aria-hidden="true" /> : <Maximize size={14} aria-hidden="true" />} {fullscreen ? "全画面を終える" : "全画面"}
-        </button>
+        {presentation ? (
+          <button className="btn text sm sv-fs-btn" title="発表の窓を閉じる（台本の窓は元の画面に戻ります）" onClick={onFullscreen}>
+            <X size={14} aria-hidden="true" /> 発表を終える
+          </button>
+        ) : canOpenPresenter && !fullscreen ? (
+          <button className="btn text sm sv-fs-btn" title="スライドと論文を別の窓に全画面で映し、この窓に台本（グループのメモとリンク）を出す（P）" onClick={onFullscreen}>
+            <Presentation size={14} aria-hidden="true" /> 発表
+          </button>
+        ) : (
+          <button className="btn text sm sv-fs-btn" title={fullscreen ? "全画面を終える（P / Esc）" : "スライドと論文を全画面で表示する（P）"} onClick={onFullscreen}>
+            {fullscreen ? <Minimize size={14} aria-hidden="true" /> : <Maximize size={14} aria-hidden="true" />} {fullscreen ? "全画面を終える" : "全画面"}
+          </button>
+        )}
         {tabs}
         <HelpButton chapter="slides" />
       </div>
