@@ -4,7 +4,6 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import {
   type Equation,
   type Highlight,
@@ -18,6 +17,7 @@ import type { NodeVault } from "./nodeVault.ts";
 import { type FmValue, fmText, readFrontmatter } from "../src/lib/frontmatter.ts";
 import { type ArxivMeta, arxivQueue, fetchArxivMeta, normalizeSource } from "./arxiv.ts";
 import { FetchFailed, FetchRefused, MAX_BODY, fetchPdf } from "./fetchpdf.ts";
+import { pdfjs } from "./pdfjs.ts";
 import { findText, readPages } from "./pdftext.ts";
 
 /** URL の最後の部分からファイル名を作る。 */
@@ -32,6 +32,7 @@ function fileNameOf(url: string) {
 /** PDF の文書情報から題名を取る。取れなければ null。 */
 export async function pdfTitle(data: ArrayBuffer): Promise<string | null> {
   try {
+    const { getDocument } = await pdfjs();
     const doc = await getDocument({ data: new Uint8Array(data.slice(0)), isEvalSupported: false, verbosity: 0 }).promise;
     const meta = await doc.getMetadata();
     await doc.destroy();

@@ -19,7 +19,7 @@ import {
 } from "./model.ts";
 import { type FmValue, fmText, readFrontmatter, setFrontmatterValue } from "./frontmatter.ts";
 import { type FieldDef, fillPlaceholders, parseFields, setField, setList } from "./template.ts";
-import type { Vault } from "./vault.ts";
+import { readMemo, type Vault } from "./vault.ts";
 
 export const TEMPLATE_PATH = "_templates/reading-note.md";
 export const PAPERS_DIR = "papers";
@@ -77,7 +77,9 @@ export async function listPapers(vault: Vault): Promise<PaperSummary[]> {
   const out: PaperSummary[] = [];
   for (const d of dirs) {
     try {
-      out.push(summaryOf(d.name, readFrontmatter(await vault.readText(notePath(d.name)))));
+      const s = await readMemo(vault, notePath(d.name), "summary", (text) => summaryOf(d.name, readFrontmatter(text)));
+      // 使い回した値を呼び出し側が書き換えても困らないよう、写しを返す
+      out.push({ ...s, authors: [...s.authors], tags: [...s.tags] });
     } catch {
       // note.md が無いフォルダは論文として扱わない
     }
@@ -146,6 +148,18 @@ export async function loadPdf(vault: Vault, id: string) {
 
 export async function loadNote(vault: Vault, id: string) {
   return vault.readText(notePath(checkId(id)));
+}
+
+/**
+ * 読むだけの集計（グラフ・単語帳）向けの loadAnnotations。ファイルが変わるまで前に読んだ値を使い回す。
+ * 返った値は書き換えないこと（書き換えるときは loadAnnotations を使う）。
+ */
+export async function viewAnnotations(vault: Vault, id: string): Promise<Readonly<Annotations>> {
+  try {
+    return await readMemo(vault, dataPath(checkId(id)), "annotations", (text) => ({ ...emptyAnnotations(), ...(JSON.parse(text) as Annotations) }));
+  } catch {
+    return emptyAnnotations();
+  }
 }
 
 export async function loadAnnotations(vault: Vault, id: string): Promise<Annotations> {
@@ -276,7 +290,11 @@ export async function searchNotes(vault: Vault, query: string, limit = 50): Prom
   if (!needle) return [];
   const hits: SearchHit[] = [];
   for (const p of await listPapers(vault)) {
-    const lines = (await loadNote(vault, p.id)).split(/\r?\n/);
+    // 行と、比べるための折りたたみ（NFKC・小文字）を、ノートが変わるまで使い回す
+    const { lines, folded } = await readMemo(vault, notePath(checkId(p.id)), "search-lines", (text) => {
+      const lines = text.split(/\r?\n/);
+      return { lines, folded: lines.map(fold) };
+    });
     let region: HitRegion = "body";
     let field: string | undefined;
     for (let i = 0; i < lines.length && hits.length < limit; i++) {
@@ -300,7 +318,7 @@ export async function searchNotes(vault: Vault, query: string, limit = 50): Prom
         else if (/^<!--\s*\/(field|list)\s*-->/.test(t)) [region, field] = ["body", undefined];
         continue;
       }
-      if (fold(line).includes(needle)) {
+      if (folded[i].includes(needle)) {
         hits.push({ paper: p.id, file: notePath(p.id), line: i + 1, text: t.slice(0, 300), region, ...(region === "field" ? { field } : {}) });
       }
     }
@@ -316,7 +334,7 @@ export type GraphLink = { paper: string; term: string; reading?: string; short?:
 export async function collectGraph(vault: Vault, papers: PaperSummary[]) {
   const links: GraphLink[] = [];
   for (const p of papers) {
-    const a = await loadAnnotations(vault, p.id);
+    const a = await viewAnnotations(vault, p.id);
     // 用語そのものの線には意味も載せる（グラフで用語を押したときに出す）。関連語の線は名前だけ
     for (const t of a.terms) {
       links.push({

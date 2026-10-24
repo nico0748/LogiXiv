@@ -22,6 +22,7 @@ import {
   removeGlossary,
   removeSentenceNote,
   sentencesState,
+  summarizeSentences,
   setTranslations,
   skipSentences,
   undoSentenceEdit,
@@ -906,10 +907,11 @@ export const SENTENCE_WRITE_TOOLS = WRITE;
 /** 論文一覧に添える、対訳の進み具合。解析していない論文は status だけ返す。 */
 export async function sentenceProgress(v: NodeVault, paper: string) {
   try {
-    const s = await sentencesState(v, paper);
-    if (s.status !== "ready") return { status: s.status };
-    const p = progress(s.document);
-    return { status: s.status, uniqueSentences: p.uniqueSentences, translated: p.translated, skipped: p.skipped, remaining: p.remaining };
+    return await summarizeSentences(v, paper, "progress", (s) => {
+      if (s.status !== "ready") return { status: s.status };
+      const p = progress(s.document);
+      return { status: s.status, uniqueSentences: p.uniqueSentences, translated: p.translated, skipped: p.skipped, remaining: p.remaining };
+    });
   } catch {
     return { status: "none" as const };
   }

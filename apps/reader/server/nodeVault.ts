@@ -5,6 +5,22 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Entry, Vault } from "../src/lib/vault.ts";
 
+/** ファイルの中身が同じかの目印。置き換え（rename）で inode が、書き換えで更新時刻と大きさが変わる。 */
+export async function fileSignature(full: string): Promise<string | null> {
+  try {
+    const st = await fs.stat(full, { bigint: true });
+    return `${st.ino}:${st.mtimeNs}:${st.size}`;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+// memo の置き場。保管庫は要求ごとに作り直すので、プロセスで 1 つ持つ（キーは絶対パス）。
+// 別のプロセス（MCP サーバー、Obsidian）の書き込みも、次に読むときの stat で気づく。
+const memos = new Map<string, { sig: string; values: Map<string, unknown> }>();
+const MAX_MEMO_FILES = 4000;
+
 export class NodeVault implements Vault {
   persistent = true;
   root: string;
@@ -41,6 +57,27 @@ export class NodeVault implements Vault {
     } catch {
       return false;
     }
+  }
+
+  async memo<T>(rel: string, tag: string, derive: (text: string) => T): Promise<T> {
+    const full = this.resolve(rel);
+    const sig = await fileSignature(full);
+    if (sig === null) return derive(await this.readText(rel)); // 無ければ readText と同じ失敗にする
+    let entry = memos.get(full);
+    if (entry?.sig === sig && entry.values.has(tag)) {
+      // 使った順に並べ直す（古いものから捨てる）
+      memos.delete(full);
+      memos.set(full, entry);
+      return entry.values.get(tag) as T;
+    }
+    if (!entry || entry.sig !== sig) entry = { sig, values: new Map() };
+    // stat の後に書き換わっても、次の stat で目印が変わるので作り直される
+    const value = derive(await fs.readFile(full, "utf8"));
+    entry.values.set(tag, value);
+    memos.delete(full);
+    memos.set(full, entry);
+    if (memos.size > MAX_MEMO_FILES) memos.delete(memos.keys().next().value as string);
+    return value;
   }
 
   readText(rel: string) {

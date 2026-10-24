@@ -3,7 +3,7 @@
 //   数式: paperlens.json の equations
 // sentences.json は無い論文もあるので、無い・壊れているときは用語集なしとして扱う。
 
-import { PAPERS_DIR, listPapers, loadAnnotations } from "../src/lib/papers.ts";
+import { PAPERS_DIR, listPapers, viewAnnotations } from "../src/lib/papers.ts";
 import type { FormulaItem, ListsResponse, VocabItem } from "../src/lib/lists.ts";
 import type { NodeVault } from "./nodeVault.ts";
 
@@ -11,16 +11,23 @@ export const sentencesPath = (id: string) => `${PAPERS_DIR}/${id}/sentences.json
 
 type Glossary = { term: string; translation: string; note?: string | null };
 
-/** sentences.json から用語集だけを取り出す。形が違う項目は飛ばす。 */
-async function loadGlossary(vault: NodeVault, id: string): Promise<Glossary[]> {
+/** sentences.json の用語集の部分。形が違う項目は飛ばす。 */
+function glossaryOf(text: string): Glossary[] {
+  const doc = JSON.parse(text) as { annotations?: { glossary?: unknown } };
+  const list = doc?.annotations?.glossary;
+  if (!Array.isArray(list)) return [];
+  return list.filter(
+    (g): g is Glossary => !!g && typeof g === "object" && typeof g.term === "string" && g.term.trim() !== "",
+  );
+}
+
+/**
+ * sentences.json から用語集だけを取り出す。
+ * sentences.json は 1 本で数百 KB あるので、ファイルが変わるまで取り出した用語集を使い回す。
+ */
+async function loadGlossary(vault: NodeVault, id: string): Promise<readonly Glossary[]> {
   try {
-    if (!(await vault.exists(sentencesPath(id)))) return [];
-    const doc = JSON.parse(await vault.readText(sentencesPath(id))) as { annotations?: { glossary?: unknown } };
-    const list = doc?.annotations?.glossary;
-    if (!Array.isArray(list)) return [];
-    return list.filter(
-      (g): g is Glossary => !!g && typeof g === "object" && typeof g.term === "string" && g.term.trim() !== "",
-    );
+    return await vault.memo(sentencesPath(id), "glossary", glossaryOf);
   } catch {
     return [];
   }
@@ -30,7 +37,7 @@ export async function collectLists(vault: NodeVault): Promise<ListsResponse> {
   const vocab: VocabItem[] = [];
   const formulas: FormulaItem[] = [];
   for (const p of await listPapers(vault)) {
-    const a = await loadAnnotations(vault, p.id);
+    const a = await viewAnnotations(vault, p.id);
     for (const t of a.terms ?? []) {
       if (!t?.term?.trim()) continue;
       const detail = [t.detail?.trim(), t.inPaper?.trim() ? `この論文での使われ方: ${t.inPaper.trim()}` : ""]

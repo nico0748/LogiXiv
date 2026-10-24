@@ -31,7 +31,7 @@ import {
 } from "@paperlens/core";
 import { GrobidParseError, GrobidUnavailableError, parseWithPdfJs, processFulltext } from "@paperlens/server";
 import { checkId, notePath, pdfPath, PAPERS_DIR } from "../src/lib/papers.ts";
-import type { NodeVault } from "./nodeVault.ts";
+import { fileSignature, type NodeVault } from "./nodeVault.ts";
 import { readPages } from "./pdftext.ts";
 import { type GlyphPage, glyphPagesFromText, refineStructureRects } from "./refineRects.ts";
 
@@ -221,6 +221,40 @@ export async function sentencesState(vault: NodeVault, id: string): Promise<Sent
         ? st.warning
         : undefined;
   return warning ? { status: "ready", document: doc, warning } : { status: "ready", document: doc };
+}
+
+// --- 読むだけの集計 ------------------------------------------------------------------
+
+const summaries = new Map<string, { sig: string; value: unknown }>();
+const MAX_SUMMARIES = 4000;
+
+const sentencesSig = async (vault: NodeVault, id: string) =>
+  `${await fileSignature(vault.resolve(sentencesPath(id)))}|${await fileSignature(vault.resolve(sentencesStatusPath(id)))}`;
+
+/**
+ * sentencesState から作った小さな値（論文一覧に添える進み具合など）を、
+ * sentences.json と状態ファイルが変わるまで使い回す。論文一覧のたびに全論文の sentences.json を解析し直さないため。
+ * 使い回すのは「ready」のときだけ。返った値は書き換えないこと。
+ */
+export async function summarizeSentences<T>(vault: NodeVault, id: string, tag: string, derive: (s: SentencesState) => T): Promise<T> {
+  await requirePaper(vault, id);
+  // このプロセスで解析中なら、ファイルを見ずに sentencesState に任せる
+  if (running.has(runKey(vault, id))) return derive(await sentencesState(vault, id));
+  const key = `${vault.root}\0${id}\0${tag}`;
+  const before = await sentencesSig(vault, id);
+  const hit = summaries.get(key);
+  if (hit?.sig === before) return hit.value as T;
+  const state = await sentencesState(vault, id);
+  const value = derive(state);
+  // 読んでいる間に書き換わった（移行の書き戻し・別のプロセスの書き込み）ときは覚えない。次の呼び出しで覚える
+  if (state.status === "ready" && (await sentencesSig(vault, id)) === before) {
+    summaries.delete(key);
+    summaries.set(key, { sig: before, value });
+    if (summaries.size > MAX_SUMMARIES) summaries.delete(summaries.keys().next().value as string);
+  } else {
+    summaries.delete(key);
+  }
+  return value;
 }
 
 // --- 文の枠の端 --------------------------------------------------------------------
