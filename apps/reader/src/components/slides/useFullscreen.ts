@@ -13,7 +13,8 @@ const busyTarget = (e: KeyboardEvent) => {
   return !!document.querySelector("dialog[open], [role=dialog][aria-modal=true]");
 };
 
-export function useFullscreen(ref: RefObject<HTMLElement | null>, enabled: boolean) {
+/** onKey: P を押したときに先に呼ぶ。true を返したら全画面にはしない（発表の窓を開けたときなど） */
+export function useFullscreen(ref: RefObject<HTMLElement | null>, enabled: boolean, onKey?: () => boolean) {
   const [native, setNative] = useState(false);
   const [fill, setFill] = useState(false);
   const mode: FullscreenMode = native ? "native" : fill ? "fill" : null;
@@ -47,6 +48,8 @@ export function useFullscreen(ref: RefObject<HTMLElement | null>, enabled: boole
     if (modeRef.current) exit();
     else void enter();
   }, [enter, exit]);
+  const onKeyRef = useRef(onKey);
+  onKeyRef.current = onKey;
 
   // P で切り替える。ウィンドウいっぱいのときの Esc は、ほかの処理（道具を戻す・選択を外す・重ねた画面を閉じる）が使わなかったときだけ終える
   useEffect(() => {
@@ -62,6 +65,7 @@ export function useFullscreen(ref: RefObject<HTMLElement | null>, enabled: boole
       }
       if (!enabled || e.shiftKey || e.key.toLowerCase() !== "p" || busyTarget(e)) return;
       e.preventDefault();
+      if (!modeRef.current && onKeyRef.current?.()) return;
       toggle();
     };
     window.addEventListener("keydown", on);

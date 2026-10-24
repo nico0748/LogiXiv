@@ -257,3 +257,57 @@
 @media (forced-colors: active) {
   .app .rz-h { forced-color-adjust: none; background: Canvas; border-color: CanvasText; }
 }
+
+/* --- 台本（発表中の元の窓。ScriptView） ---
+ * スライドの順にグループのメモとリンク先を並べる。発表の窓が映しているページ（.is-current）に印を付ける。
+ * メモは話しながら読むので、本文より少し大きくする */
+.app .sc { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--background-primary); }
+.app .sc-bar { gap: 6px; }
+.app .sc-live {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: var(--md-shape-full);
+  font-weight: 700; color: var(--md-sys-color-on-primary-container); background: var(--md-sys-color-primary-container);
+}
+.app .sc-pos { min-width: 104px; text-align: center; font-variant-numeric: tabular-nums; }
+.app .sc-sub { color: var(--text-muted); font-size: var(--font-ui-smaller); padding: 0 6px; }
+.app .sc-bar .btn { display: inline-flex; align-items: center; gap: 4px; }
+.app .sc-scroll { flex: 1; min-height: 0; overflow: auto; padding: 16px 24px 50vh; scroll-padding-top: 12px; }
+.app .sc-page {
+  max-width: 880px; margin: 0 auto 12px; padding: 8px 16px 12px; border-radius: var(--md-shape-md);
+  border: 1px solid var(--background-modifier-border); background: var(--background-primary);
+}
+.app .sc-page.is-current { border-color: var(--md-sys-color-primary); box-shadow: inset 4px 0 0 var(--md-sys-color-primary); background: color-mix(in srgb, var(--md-sys-color-primary) 5%, var(--background-primary)); }
+.app .sc-page-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 0; margin: 0; border: 0; background: none; cursor: pointer;
+  text-align: left; color: var(--text-normal); font: inherit;
+}
+.app .sc-page-no { font-weight: 700; font-size: var(--font-ui-medium); }
+.app .sc-page:not(.is-current) .sc-page-no { color: var(--text-muted); }
+.app .sc-now { font-size: 11px; font-weight: 700; padding: 0 8px; border-radius: var(--md-shape-full); color: var(--md-sys-color-on-primary); background: var(--md-sys-color-primary); }
+.app .sc-page-head:focus-visible, .app .sc-group-head:focus-visible, .app .sc-link:focus-visible { outline: 2px solid var(--md-sys-color-secondary); outline-offset: 2px; border-radius: 4px; }
+.app .sc-none { margin: 4px 0; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.app .sc-groups { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.app .sc-group { padding: 6px 0 6px 12px; border-left: 3px solid var(--g); }
+.app .sc-group.is-active { background: color-mix(in srgb, var(--g) 10%, transparent); border-radius: 0 var(--md-shape-sm) var(--md-shape-sm) 0; }
+.app .sc-group-head {
+  display: flex; align-items: center; gap: 6px; padding: 0; margin: 0; border: 0; background: none; cursor: pointer;
+  color: var(--text-normal); font: inherit; font-size: var(--font-ui-smaller);
+}
+.app .sc-name { font-weight: 700; }
+.app .sc-meta { color: var(--text-muted); }
+.app .sc-memo { margin: 4px 0 6px; font-size: calc(var(--font-text-size) * 1.15); line-height: 1.75; white-space: pre-wrap; color: var(--text-normal); }
+.app .sc-links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.app .sc-link {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 3px 6px; margin: 0; border: 0; border-radius: 4px; background: none; cursor: pointer;
+  text-align: left; color: var(--text-normal); font: inherit; font-size: var(--font-ui-small);
+}
+.app .sc-link:hover { background: var(--background-modifier-hover); }
+.app .sc-kind { flex: none; font-size: 11px; padding: 0 6px; border-radius: var(--md-shape-full); color: var(--text-muted); border: 1px solid var(--background-modifier-border); }
+.app .sc-text { min-width: 0; color: var(--text-muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+@media (forced-colors: active) {
+  .app .sc-page.is-current { border: 2px solid Highlight; }
+}
+
+/* 発表の窓。窓そのものを全画面にするので、根の要素を窓いっぱいに広げる。
+ * スライドは最後のページでも上の端まで送れるよう、下に余白を足す（台本の「スライド n」と、映っているページを合わせるため） */
+.app.presenter-app { display: flex; }
+.app .slides-view.is-presentation .sv-slides .pp-scroll { padding-bottom: calc(100vh - 40px); }

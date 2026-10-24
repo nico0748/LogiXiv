@@ -3,7 +3,7 @@
  * ローカルサーバー（dist-server/app.js）を同じプロセスで立ち上げ、その URL をウィンドウに読み込む。
  * 画面のコードはブラウザで動かすときと同じもの。
  */
-import { app as electronApp, BrowserWindow, Menu, dialog, shell } from "electron";
+import { app as electronApp, BrowserWindow, Menu, dialog, screen, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,11 +58,50 @@ function saveWindowState(win) {
   }
 }
 
-/** 同じサーバーの URL はアプリ内で、それ以外（obsidian:// や論文のリンク）は既定のアプリで開く。 */
+/** 発表の窓（画面の「発表」で開く、URL に ?present= を付けた窓）か */
+const isPresenterUrl = (url) => !!serverUrl && url.startsWith(serverUrl) && new URL(url).searchParams.has("present");
+
+/** 発表の窓を出す画面。外部ディスプレイ（プロジェクター）があればそちら、無ければ元の窓と同じ画面 */
+function presenterDisplay(opener) {
+  const here = screen.getDisplayMatching(opener.getBounds());
+  return screen.getAllDisplays().find((d) => d.id !== here.id) ?? here;
+}
+
+/**
+ * 同じサーバーの URL はアプリ内で、それ以外（obsidian:// や論文のリンク）は既定のアプリで開く。
+ * 発表の窓だけは新しいウィンドウとして開き、外部ディスプレイがあればそちらで全画面にする。
+ */
 function attachWindowOpenHandler(win) {
   win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isPresenterUrl(url)) {
+      const { x, y, width, height } = presenterDisplay(win).bounds;
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          x,
+          y,
+          width,
+          height,
+          title: "PaperLens 発表",
+          icon: WINDOW_ICON,
+          backgroundColor: "#f2f2f2",
+          autoHideMenuBar: true,
+          webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false },
+        },
+      };
+    }
     if (!serverUrl || !url.startsWith(serverUrl)) shell.openExternal(url);
     return { action: "deny" };
+  });
+  win.webContents.on("did-create-window", (child) => {
+    attachWindowOpenHandler(child);
+    const fullScreen = () => child.setFullScreen(true);
+    if (child.isVisible()) fullScreen();
+    else child.once("show", fullScreen);
+    // 元の窓へ戻る道を残す（全画面の発表の窓が前にあっても、台本の窓を前に出せるように）
+    child.on("closed", () => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.focus();
+    });
   });
   win.webContents.on("will-navigate", (e, url) => {
     if (serverUrl && url.startsWith(serverUrl)) return;
@@ -91,6 +130,8 @@ function createWindow() {
   for (const ev of ["resize", "move", "close"]) mainWindow.on(ev, () => saveWindowState(mainWindow));
   mainWindow.on("closed", () => {
     mainWindow = null;
+    // 元の窓を閉じたら、発表の窓も閉じる（台本の無い発表の窓だけが残らないように）
+    for (const w of BrowserWindow.getAllWindows()) w.close();
   });
 }
 
